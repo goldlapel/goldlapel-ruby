@@ -2,7 +2,8 @@
 
 Gem::Specification.new do |spec|
   spec.name = "goldlapel"
-  spec.version = "0.1.0"
+  spec.version = ENV.fetch("GEM_VERSION", "0.1.0")
+  spec.platform = ENV["GEM_PLATFORM"] if ENV["GEM_PLATFORM"]
   spec.authors = ["Stephen Gibson"]
   spec.summary = "Self-optimizing Postgres proxy — automatic materialized views and indexes"
   spec.description = "Gold Lapel sits between your app and Postgres, watches query patterns, " \
