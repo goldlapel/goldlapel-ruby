@@ -1,0 +1,21 @@
+# frozen_string_literal: true
+
+Gem::Specification.new do |spec|
+  spec.name = "goldlapel"
+  spec.version = "0.1.0"
+  spec.authors = ["Stephen Gibson"]
+  spec.summary = "Self-optimizing Postgres proxy — automatic materialized views and indexes"
+  spec.description = "Gold Lapel sits between your app and Postgres, watches query patterns, " \
+                     "and automatically creates materialized views and indexes to make your " \
+                     "database faster. Zero code changes required."
+  spec.homepage = "https://goldlapel.com"
+  spec.license = "Proprietary"
+
+  spec.required_ruby_version = ">= 3.0.0"
+
+  spec.metadata["homepage_uri"] = spec.homepage
+  spec.metadata["source_code_uri"] = "https://github.com/goldlapel/goldlapel-ruby"
+
+  spec.files = Dir["lib/**/*.rb", "bin/*", "README.md", "LICENSE"]
+  spec.require_paths = ["lib"]
+end
