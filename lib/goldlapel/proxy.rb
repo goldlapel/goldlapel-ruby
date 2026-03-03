@@ -191,7 +191,7 @@ module GoldLapel
 
       def which(cmd)
         exts = ENV["PATHEXT"] ? ENV["PATHEXT"].split(";") : [""]
-        ENV["PATH"].split(File::PATH_SEPARATOR).each do |path|
+        (ENV["PATH"] || "").split(File::PATH_SEPARATOR).each do |path|
           exts.each do |ext|
             full = File.join(path, "#{cmd}#{ext}")
             return full if File.executable?(full) && File.file?(full)
