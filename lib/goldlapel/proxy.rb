@@ -2,7 +2,6 @@
 
 require "open3"
 require "socket"
-require "timeout"
 require "rbconfig"
 
 module GoldLapel
@@ -15,7 +14,7 @@ module GoldLapel
 
     def initialize(upstream, port: nil, extra_args: [])
       @upstream = upstream
-      @port = port.nil? ? DEFAULT_PORT : port
+      @port = port || DEFAULT_PORT
       @extra_args = extra_args
       @pid = nil
       @url = nil
@@ -41,30 +40,34 @@ module GoldLapel
       @wait_thr = wait_thr
 
       unless self.class.wait_for_port("127.0.0.1", @port, STARTUP_TIMEOUT)
-        Process.kill("KILL", @pid) rescue nil
+        Process.kill("KILL", @pid) rescue Errno::ESRCH
         @wait_thr.join rescue nil
         stderr_output = stderr.read
+        stderr.close
+        @pid = nil
+        @wait_thr = nil
+        @stderr_reader = nil
         raise "Gold Lapel failed to start on port #{@port} " \
               "within #{STARTUP_TIMEOUT}s.\nstderr: #{stderr_output}"
       end
 
-      @url = self.class.replace_port(@upstream, @port)
+      @stderr_reader.close
+      @stderr_reader = nil
+      @url = self.class.make_proxy_url(@upstream, @port)
     end
 
     def stop
       if @pid
         begin
           Process.kill("TERM", @pid)
-          begin
-            Timeout.timeout(5) { @wait_thr.join }
-          rescue Timeout::Error
-            Process.kill("KILL", @pid) rescue nil
+          unless @wait_thr.join(5)
+            Process.kill("KILL", @pid) rescue Errno::ESRCH
             @wait_thr.join rescue nil
           end
         rescue Errno::ESRCH
           # Process already exited
         end
-        @stderr_reader&.close rescue nil
+        @stderr_reader&.close rescue IOError
         @pid = nil
         @url = nil
         @wait_thr = nil
@@ -119,20 +122,21 @@ module GoldLapel
             "install the platform-specific package, or ensure 'goldlapel' is on PATH."
     end
 
-    def self.replace_port(upstream, port)
-      # Use regex to avoid corrupting percent-encoded characters in passwords
-      # Match: scheme://[userinfo@]host:PORT[/path][?query]
-      if upstream =~ /\A(postgres(?:ql)?:\/\/(?:[^@]*@)?[^\/:?#]+):(\d+)(.*)\z/
-        return "#{$1}:#{port}#{$3}"
+    def self.make_proxy_url(upstream, port)
+      # pg URL with explicit port
+      if upstream =~ /\A(postgres(?:ql)?:\/\/(?:.*@)?)([^:\/?#]+):(\d+)(.*)\z/
+        return "#{$1}localhost:#{port}#{$4}"
       end
-
-      # bare host:port
-      if upstream.include?(":")
-        host = upstream.rpartition(":").first
-        return "#{host}:#{port}"
+      # pg URL without port
+      if upstream =~ /\A(postgres(?:ql)?:\/\/(?:.*@)?)([^:\/?#]+)(.*)\z/
+        return "#{$1}localhost:#{port}#{$3}"
       end
-
-      "#{upstream}:#{port}"
+      # bare host:port (guard against scheme colons)
+      if !upstream.include?("://") && upstream.include?(":")
+        return "localhost:#{port}"
+      end
+      # bare host
+      "localhost:#{port}"
     end
 
     def self.wait_for_port(host, port, timeout)

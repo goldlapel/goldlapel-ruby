@@ -50,45 +50,87 @@ class TestFindBinary < Minitest::Test
   end
 end
 
-class TestReplacePort < Minitest::Test
+class TestMakeProxyUrl < Minitest::Test
   def test_postgresql_url
-    url = "postgresql://user:pass@localhost:5432/mydb"
+    url = "postgresql://user:pass@remotehost:5432/mydb"
     assert_equal "postgresql://user:pass@localhost:7932/mydb",
-                 GoldLapel::Proxy.replace_port(url, 7932)
+                 GoldLapel::Proxy.make_proxy_url(url, 7932)
   end
 
   def test_postgres_url
     url = "postgres://user:pass@dbhost:5432/mydb"
-    assert_equal "postgres://user:pass@dbhost:7932/mydb",
-                 GoldLapel::Proxy.replace_port(url, 7932)
+    assert_equal "postgres://user:pass@localhost:7932/mydb",
+                 GoldLapel::Proxy.make_proxy_url(url, 7932)
   end
 
   def test_bare_host_port
     assert_equal "localhost:7932",
-                 GoldLapel::Proxy.replace_port("localhost:5432", 7932)
+                 GoldLapel::Proxy.make_proxy_url("remotehost:5432", 7932)
   end
 
   def test_host_only
     assert_equal "localhost:7932",
-                 GoldLapel::Proxy.replace_port("localhost", 7932)
+                 GoldLapel::Proxy.make_proxy_url("remotehost", 7932)
   end
 
   def test_preserves_params
-    url = "postgresql://user:pass@localhost:5432/mydb?sslmode=require"
+    url = "postgresql://user:pass@remotehost:5432/mydb?sslmode=require"
     assert_equal "postgresql://user:pass@localhost:7932/mydb?sslmode=require",
-                 GoldLapel::Proxy.replace_port(url, 7932)
+                 GoldLapel::Proxy.make_proxy_url(url, 7932)
   end
 
   def test_preserves_percent_encoded_password
-    url = "postgresql://user:p%40ss@localhost:5432/mydb"
+    url = "postgresql://user:p%40ss@remotehost:5432/mydb"
     assert_equal "postgresql://user:p%40ss@localhost:7932/mydb",
-                 GoldLapel::Proxy.replace_port(url, 7932)
+                 GoldLapel::Proxy.make_proxy_url(url, 7932)
   end
 
   def test_no_userinfo
-    url = "postgresql://localhost:5432/mydb"
+    url = "postgresql://remotehost:5432/mydb"
     assert_equal "postgresql://localhost:7932/mydb",
-                 GoldLapel::Proxy.replace_port(url, 7932)
+                 GoldLapel::Proxy.make_proxy_url(url, 7932)
+  end
+
+  def test_pg_url_without_port
+    url = "postgresql://user:pass@remotehost/mydb"
+    assert_equal "postgresql://user:pass@localhost:7932/mydb",
+                 GoldLapel::Proxy.make_proxy_url(url, 7932)
+  end
+
+  def test_pg_url_without_port_or_path
+    url = "postgresql://user:pass@remotehost"
+    assert_equal "postgresql://user:pass@localhost:7932",
+                 GoldLapel::Proxy.make_proxy_url(url, 7932)
+  end
+
+  def test_no_userinfo_no_port
+    url = "postgresql://remotehost/mydb"
+    assert_equal "postgresql://localhost:7932/mydb",
+                 GoldLapel::Proxy.make_proxy_url(url, 7932)
+  end
+
+  def test_literal_at_in_password
+    url = "postgresql://user:p@ss@remotehost:5432/mydb"
+    assert_equal "postgresql://user:p@ss@localhost:7932/mydb",
+                 GoldLapel::Proxy.make_proxy_url(url, 7932)
+  end
+
+  def test_at_sign_in_password_without_port
+    url = "postgresql://user:p@ss@host/mydb"
+    assert_equal "postgresql://user:p@ss@localhost:7932/mydb",
+                 GoldLapel::Proxy.make_proxy_url(url, 7932)
+  end
+
+  def test_at_sign_in_password_with_query_params
+    url = "postgresql://user:p@ss@host:5432/mydb?sslmode=require&param=val@ue"
+    assert_equal "postgresql://user:p@ss@localhost:7932/mydb?sslmode=require&param=val@ue",
+                 GoldLapel::Proxy.make_proxy_url(url, 7932)
+  end
+
+  def test_localhost_stays_localhost
+    url = "postgresql://user:pass@localhost:5432/mydb"
+    assert_equal "postgresql://user:pass@localhost:7932/mydb",
+                 GoldLapel::Proxy.make_proxy_url(url, 7932)
   end
 end
 
