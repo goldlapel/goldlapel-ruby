@@ -114,10 +114,6 @@ module GoldLapel
       on_path = which("goldlapel")
       return on_path if on_path
 
-      # 4. Local dev: check the Rust project's build output
-      dev_binary = File.join(Dir.home, "dev", "goldlapel", "target", "release", "goldlapel")
-      return dev_binary if File.file?(dev_binary)
-
       raise "Gold Lapel binary not found. Set GOLDLAPEL_BINARY env var, " \
             "install the platform-specific package, or ensure 'goldlapel' is on PATH."
     end
