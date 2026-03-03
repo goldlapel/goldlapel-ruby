@@ -36,17 +36,16 @@ class TestFindBinary < Minitest::Test
     old = ENV["GOLDLAPEL_BINARY"]
     ENV.delete("GOLDLAPEL_BINARY")
     old_path = ENV["PATH"]
+    old_home = ENV["HOME"]
     ENV["PATH"] = ""
+    ENV["HOME"] = "/nonexistent"
     begin
-      # Stub __dir__ to a nonexistent location so bundled binary isn't found,
-      # and clear PATH so which() fails, and stub home so dev binary isn't found.
-      GoldLapel::Proxy.stub(:which, nil) do
-        error = assert_raises(RuntimeError) { GoldLapel::Proxy.find_binary }
-        assert_match(/Gold Lapel binary not found/, error.message)
-      end
+      error = assert_raises(RuntimeError) { GoldLapel::Proxy.find_binary }
+      assert_match(/Gold Lapel binary not found/, error.message)
     ensure
       old ? ENV["GOLDLAPEL_BINARY"] = old : ENV.delete("GOLDLAPEL_BINARY")
       ENV["PATH"] = old_path
+      ENV["HOME"] = old_home
     end
   end
 end
