@@ -10,7 +10,7 @@ module GoldLapel
   STARTUP_POLL_INTERVAL = 0.05
 
   class Proxy
-    attr_reader :url
+    attr_reader :url, :upstream
 
     def initialize(upstream, port: nil, extra_args: [])
       @upstream = upstream
@@ -62,7 +62,7 @@ module GoldLapel
           Process.kill("TERM", @pid)
           unless @wait_thr.join(5)
             Process.kill("KILL", @pid) rescue Errno::ESRCH
-            @wait_thr.join rescue nil
+            @wait_thr.join(5) rescue nil
           end
         rescue Errno::ESRCH
           # Process already exited
@@ -155,7 +155,13 @@ module GoldLapel
 
     class << self
       def start(upstream, port: nil, extra_args: [])
-        return @instance.url if @instance&.running?
+        if @instance&.running?
+          if @instance.upstream != upstream
+            raise "Gold Lapel is already running for a different upstream. " \
+                  "Call GoldLapel.stop before starting with a new upstream."
+          end
+          return @instance.url
+        end
 
         @instance = Proxy.new(upstream, port: port, extra_args: extra_args)
         unless @cleanup_registered
