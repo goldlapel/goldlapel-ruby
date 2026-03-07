@@ -97,6 +97,7 @@ module GoldLapel
       system_name = case RbConfig::CONFIG["host_os"]
                     when /linux/i then "linux"
                     when /darwin/i then "darwin"
+                    when /mswin|mingw|cygwin/i then "windows"
                     else RbConfig::CONFIG["host_os"]
                     end
       machine = RbConfig::CONFIG["host_cpu"]
@@ -107,6 +108,7 @@ module GoldLapel
              end
 
       binary_name = "goldlapel-#{system_name}-#{arch}"
+      binary_name += ".exe" if system_name == "windows"
       bundled = File.join(__dir__, "..", "..", "bin", binary_name)
       return bundled if File.file?(bundled)
 
