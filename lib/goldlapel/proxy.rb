@@ -41,6 +41,10 @@ module GoldLapel
       replica exclude_tables
     ].freeze
 
+    def self.config_keys
+      VALID_CONFIG_KEYS.dup
+    end
+
     def self.config_to_args(config)
       return [] if config.nil? || config.empty?
 

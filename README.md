@@ -35,12 +35,13 @@ Gold Lapel is driver-agnostic. `start` returns a connection string (`postgresql:
 
 ## API
 
-### `GoldLapel.start(upstream, port: nil, extra_args: [])`
+### `GoldLapel.start(upstream, port: nil, config: {}, extra_args: [])`
 
 Starts the Gold Lapel proxy and returns the proxy connection string.
 
 - `upstream` — your Postgres connection string (e.g. `postgresql://user:pass@localhost:5432/mydb`)
 - `port` — proxy port (default: 7932)
+- `config` — configuration hash (see [Configuration](#configuration) below)
 - `extra_args` — additional CLI flags passed to the binary (e.g. `["--threshold-impact", "5000"]`)
 
 ### `GoldLapel.stop`
@@ -51,7 +52,11 @@ Stops the proxy. Also called automatically on process exit.
 
 Returns the current proxy URL, or `nil` if not running.
 
-### `GoldLapel::Proxy.new(upstream, port: nil, extra_args: [])`
+### `GoldLapel.config_keys`
+
+Returns an array of all valid configuration key names (as strings).
+
+### `GoldLapel::Proxy.new(upstream, port: nil, config: {}, extra_args: [])`
 
 Class interface for managing multiple instances:
 
@@ -64,16 +69,30 @@ proxy.stop
 
 ## Configuration
 
-The proxy binary accepts all standard Gold Lapel flags. Pass them via `extra_args`:
+Pass a config hash to configure the proxy:
 
 ```ruby
-url = GoldLapel.start(
-  "postgresql://user:pass@localhost:5432/mydb",
-  extra_args: ["--threshold-duration-ms", "200", "--refresh-interval-secs", "30"]
-)
+require "goldlapel"
+
+url = GoldLapel.start("postgresql://user:pass@localhost/mydb", config: {
+  mode: "butler",
+  pool_size: 50,
+  disable_matviews: true,
+  replica: ["postgresql://user:pass@replica1/mydb"],
+})
 ```
 
-Or set environment variables (`GOLDLAPEL_PORT`, `GOLDLAPEL_UPSTREAM`, etc.) — the binary reads them automatically.
+Keys use `snake_case` (symbols or strings) and map to CLI flags (`pool_size` -> `--pool-size`). Boolean keys are flags -- `true` enables them. Array keys produce repeated flags.
+
+Unknown keys raise `ArgumentError`. To see all valid keys:
+
+```ruby
+GoldLapel.config_keys
+```
+
+For the full configuration reference, see the [main documentation](https://github.com/goldlapel/goldlapel#setting-reference).
+
+You can also pass raw CLI flags via `extra_args`, or set environment variables (`GOLDLAPEL_PORT`, `GOLDLAPEL_UPSTREAM`, etc.) -- the binary reads them automatically.
 
 ## How It Works
 

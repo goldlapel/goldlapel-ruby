@@ -245,6 +245,37 @@ class TestConfigToArgs < Minitest::Test
   end
 end
 
+class TestConfigKeys < Minitest::Test
+  def test_returns_array_of_strings
+    keys = GoldLapel::Proxy.config_keys
+    assert_kind_of Array, keys
+    keys.each { |k| assert_kind_of String, k }
+  end
+
+  def test_contains_known_keys
+    keys = GoldLapel::Proxy.config_keys
+    assert_includes keys, "mode"
+    assert_includes keys, "pool_size"
+    assert_includes keys, "disable_matviews"
+    assert_includes keys, "replica"
+  end
+
+  def test_expected_count
+    keys = GoldLapel::Proxy.config_keys
+    assert_equal GoldLapel::Proxy::VALID_CONFIG_KEYS.size, keys.size
+  end
+
+  def test_returns_copy
+    keys = GoldLapel::Proxy.config_keys
+    keys << "bogus"
+    refute_includes GoldLapel::Proxy.config_keys, "bogus"
+  end
+
+  def test_module_level_delegates
+    assert_equal GoldLapel::Proxy.config_keys, GoldLapel.config_keys
+  end
+end
+
 class TestModuleFunctions < Minitest::Test
   def test_proxy_url_none_when_not_started
     GoldLapel.stop
