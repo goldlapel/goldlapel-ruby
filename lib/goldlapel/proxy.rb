@@ -6,11 +6,12 @@ require "rbconfig"
 
 module GoldLapel
   DEFAULT_PORT = 7932
+  DEFAULT_DASHBOARD_PORT = 7933
   STARTUP_TIMEOUT = 10.0
   STARTUP_POLL_INTERVAL = 0.05
 
   class Proxy
-    attr_reader :url, :upstream
+    attr_reader :url, :upstream, :dashboard_url
 
     VALID_CONFIG_KEYS = %w[
       mode min_pattern_count refresh_interval_secs pattern_ttl_secs
@@ -80,7 +81,14 @@ module GoldLapel
       @extra_args = extra_args
       @pid = nil
       @url = nil
+      @dashboard_url = nil
       @stderr_reader = nil
+
+      @dashboard_port = if config.key?(:dashboard_port) || config.key?("dashboard_port")
+        config.fetch(:dashboard_port, config.fetch("dashboard_port", DEFAULT_DASHBOARD_PORT)).to_i
+      else
+        DEFAULT_DASHBOARD_PORT
+      end
     end
 
     def start
@@ -117,6 +125,15 @@ module GoldLapel
       @stderr_reader.close
       @stderr_reader = nil
       @url = self.class.make_proxy_url(@upstream, @port)
+      @dashboard_url = @dashboard_port > 0 ? "http://127.0.0.1:#{@dashboard_port}" : nil
+
+      if @dashboard_port > 0
+        puts "goldlapel → :#{@port} (proxy) | http://127.0.0.1:#{@dashboard_port} (dashboard)"
+      else
+        puts "goldlapel → :#{@port} (proxy)"
+      end
+
+      @url
     end
 
     def stop
@@ -133,6 +150,7 @@ module GoldLapel
         @stderr_reader&.close rescue IOError
         @pid = nil
         @url = nil
+        @dashboard_url = nil
         @wait_thr = nil
         @stderr_reader = nil
       end
@@ -245,6 +263,10 @@ module GoldLapel
 
       def proxy_url
         @instance&.url
+      end
+
+      def dashboard_url
+        @instance&.dashboard_url
       end
 
       private

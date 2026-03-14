@@ -276,9 +276,51 @@ class TestConfigKeys < Minitest::Test
   end
 end
 
+class TestDashboardUrl < Minitest::Test
+  def test_default_dashboard_port
+    proxy = GoldLapel::Proxy.new("postgresql://localhost:5432/mydb")
+    assert_equal GoldLapel::DEFAULT_DASHBOARD_PORT,
+                 proxy.instance_variable_get(:@dashboard_port)
+  end
+
+  def test_custom_dashboard_port_from_config_symbol
+    proxy = GoldLapel::Proxy.new(
+      "postgresql://localhost:5432/mydb",
+      config: { dashboard_port: 9090 }
+    )
+    assert_equal 9090, proxy.instance_variable_get(:@dashboard_port)
+  end
+
+  def test_custom_dashboard_port_from_config_string
+    proxy = GoldLapel::Proxy.new(
+      "postgresql://localhost:5432/mydb",
+      config: { "dashboard_port" => 8080 }
+    )
+    assert_equal 8080, proxy.instance_variable_get(:@dashboard_port)
+  end
+
+  def test_disabled_dashboard_port_zero
+    proxy = GoldLapel::Proxy.new(
+      "postgresql://localhost:5432/mydb",
+      config: { dashboard_port: 0 }
+    )
+    assert_equal 0, proxy.instance_variable_get(:@dashboard_port)
+  end
+
+  def test_dashboard_url_nil_when_not_running
+    proxy = GoldLapel::Proxy.new("postgresql://localhost:5432/mydb")
+    assert_nil proxy.dashboard_url
+  end
+end
+
 class TestModuleFunctions < Minitest::Test
   def test_proxy_url_none_when_not_started
     GoldLapel.stop
     assert_nil GoldLapel.proxy_url
+  end
+
+  def test_dashboard_url_none_when_not_started
+    GoldLapel.stop
+    assert_nil GoldLapel.dashboard_url
   end
 end

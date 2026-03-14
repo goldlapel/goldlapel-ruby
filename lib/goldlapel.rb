@@ -16,6 +16,10 @@ module GoldLapel
     Proxy.proxy_url
   end
 
+  def self.dashboard_url
+    Proxy.dashboard_url
+  end
+
   def self.config_keys
     Proxy.config_keys
   end

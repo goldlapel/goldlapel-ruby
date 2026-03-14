@@ -52,6 +52,10 @@ Stops the proxy. Also called automatically on process exit.
 
 Returns the current proxy URL, or `nil` if not running.
 
+### `GoldLapel.dashboard_url`
+
+Returns the dashboard URL (e.g. `http://127.0.0.1:7933`), or `nil` if not running. The dashboard port defaults to 7933 and can be configured via `config: { dashboard_port: 9090 }` or disabled with `dashboard_port: 0`.
+
 ### `GoldLapel.config_keys`
 
 Returns an array of all valid configuration key names (as strings).
