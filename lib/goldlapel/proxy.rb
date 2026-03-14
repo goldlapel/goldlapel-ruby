@@ -12,9 +12,67 @@ module GoldLapel
   class Proxy
     attr_reader :url, :upstream
 
-    def initialize(upstream, port: nil, extra_args: [])
+    VALID_CONFIG_KEYS = %w[
+      mode min_pattern_count refresh_interval_secs pattern_ttl_secs
+      max_tables_per_view max_columns_per_view deep_pagination_threshold
+      report_interval_secs result_cache_size batch_cache_size
+      batch_cache_ttl_secs redis_url pool_size pool_timeout_secs
+      pool_mode mgmt_idle_timeout fallback read_after_write_secs
+      n1_threshold n1_window_ms n1_cross_threshold
+      tls_cert tls_key tls_client_ca config dashboard_port
+      disable_matviews disable_consolidation disable_btree_indexes
+      disable_trigram_indexes disable_expression_indexes
+      disable_partial_indexes disable_rewrite disable_prepared_cache
+      disable_result_cache disable_redis_cache disable_pool
+      disable_n1 disable_n1_cross_connection disable_shadow_mode
+      enable_coalescing replica exclude_tables
+    ].freeze
+
+    BOOLEAN_KEYS = %w[
+      disable_matviews disable_consolidation disable_btree_indexes
+      disable_trigram_indexes disable_expression_indexes
+      disable_partial_indexes disable_rewrite disable_prepared_cache
+      disable_result_cache disable_redis_cache disable_pool
+      disable_n1 disable_n1_cross_connection disable_shadow_mode
+      enable_coalescing
+    ].freeze
+
+    LIST_KEYS = %w[
+      replica exclude_tables
+    ].freeze
+
+    def self.config_to_args(config)
+      return [] if config.nil? || config.empty?
+
+      args = []
+      config.each do |key, value|
+        key = key.to_s
+        unless VALID_CONFIG_KEYS.include?(key)
+          raise ArgumentError, "Unknown config key: #{key}"
+        end
+
+        flag = "--#{key.tr('_', '-')}"
+
+        if BOOLEAN_KEYS.include?(key)
+          unless value == true || value == false
+            raise TypeError, "Config key '#{key}' expects a boolean, got #{value.class}"
+          end
+          args << flag if value
+        elsif LIST_KEYS.include?(key)
+          Array(value).each do |item|
+            args.push(flag, item.to_s)
+          end
+        else
+          args.push(flag, value.to_s)
+        end
+      end
+      args
+    end
+
+    def initialize(upstream, port: nil, config: {}, extra_args: [])
       @upstream = upstream
       @port = port || DEFAULT_PORT
+      @config = config
       @extra_args = extra_args
       @pid = nil
       @url = nil
@@ -29,6 +87,7 @@ module GoldLapel
         binary,
         "--upstream", @upstream,
         "--port", @port.to_s,
+        *self.class.config_to_args(@config),
         *@extra_args,
       ]
 
@@ -156,7 +215,7 @@ module GoldLapel
     @cleanup_registered = false
 
     class << self
-      def start(upstream, port: nil, extra_args: [])
+      def start(upstream, port: nil, config: {}, extra_args: [])
         if @instance&.running?
           if @instance.upstream != upstream
             raise "Gold Lapel is already running for a different upstream. " \
@@ -165,7 +224,7 @@ module GoldLapel
           return @instance.url
         end
 
-        @instance = Proxy.new(upstream, port: port, extra_args: extra_args)
+        @instance = Proxy.new(upstream, port: port, config: config, extra_args: extra_args)
         unless @cleanup_registered
           at_exit { cleanup }
           @cleanup_registered = true

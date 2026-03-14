@@ -4,8 +4,8 @@ require_relative "goldlapel/proxy"
 
 module GoldLapel
   # Module-level convenience methods (singleton pattern)
-  def self.start(upstream, port: nil, extra_args: [])
-    Proxy.start(upstream, port: port, extra_args: extra_args)
+  def self.start(upstream, port: nil, config: {}, extra_args: [])
+    Proxy.start(upstream, port: port, config: config, extra_args: extra_args)
   end
 
   def self.stop
