@@ -323,4 +323,193 @@ class TestModuleFunctions < Minitest::Test
     GoldLapel.stop
     assert_nil GoldLapel.dashboard_url
   end
+
+  def test_stop_specific_upstream
+    GoldLapel.stop
+    assert_nil GoldLapel.proxy_url("postgresql://host1:5432/db1")
+  end
+
+  def test_stop_with_no_args_clears_all
+    GoldLapel.stop
+    assert_equal({}, GoldLapel::Proxy.instances)
+  end
+end
+
+class TestMultiInstance < Minitest::Test
+  # Helper: inject a fake proxy instance into the registry for testing
+  # without actually spawning a binary.
+  FakeProxy = Struct.new(:upstream, :url, :dashboard_url, :alive) do
+    def running?
+      alive
+    end
+
+    def stop
+      self.alive = false
+      self.url = nil
+      self.dashboard_url = nil
+    end
+
+    def start
+      self.alive = true
+      url
+    end
+  end
+
+  def setup
+    GoldLapel::Proxy.stop
+  end
+
+  def teardown
+    GoldLapel::Proxy.stop
+  end
+
+  def inject_fake(upstream, port)
+    proxy_url = GoldLapel::Proxy.make_proxy_url(upstream, port)
+    dashboard = "http://127.0.0.1:#{port + 1}"
+    fake = FakeProxy.new(upstream, proxy_url, dashboard, true)
+    GoldLapel::Proxy.instance_variable_get(:@mutex).synchronize do
+      GoldLapel::Proxy.instance_variable_get(:@instances)[upstream] = fake
+    end
+    fake
+  end
+
+  def test_instances_returns_empty_hash_initially
+    assert_equal({}, GoldLapel::Proxy.instances)
+  end
+
+  def test_instances_returns_copy
+    copy = GoldLapel::Proxy.instances
+    copy["bogus"] = "should not leak"
+    refute_includes GoldLapel::Proxy.instances, "bogus"
+  end
+
+  def test_multiple_upstreams_tracked
+    up1 = "postgresql://host1:5432/db1"
+    up2 = "postgresql://host2:5432/db2"
+    inject_fake(up1, 7932)
+    inject_fake(up2, 7934)
+
+    instances = GoldLapel::Proxy.instances
+    assert_equal 2, instances.size
+    assert_includes instances.keys, up1
+    assert_includes instances.keys, up2
+  end
+
+  def test_proxy_url_with_specific_upstream
+    up1 = "postgresql://host1:5432/db1"
+    up2 = "postgresql://host2:5432/db2"
+    inject_fake(up1, 7932)
+    inject_fake(up2, 7934)
+
+    assert_equal "postgresql://localhost:7932/db1", GoldLapel::Proxy.proxy_url(up1)
+    assert_equal "postgresql://localhost:7934/db2", GoldLapel::Proxy.proxy_url(up2)
+  end
+
+  def test_proxy_url_without_upstream_returns_first
+    up1 = "postgresql://host1:5432/db1"
+    inject_fake(up1, 7932)
+
+    assert_equal "postgresql://localhost:7932/db1", GoldLapel::Proxy.proxy_url
+  end
+
+  def test_dashboard_url_with_specific_upstream
+    up1 = "postgresql://host1:5432/db1"
+    up2 = "postgresql://host2:5432/db2"
+    inject_fake(up1, 7932)
+    inject_fake(up2, 7934)
+
+    assert_equal "http://127.0.0.1:7933", GoldLapel::Proxy.dashboard_url(up1)
+    assert_equal "http://127.0.0.1:7935", GoldLapel::Proxy.dashboard_url(up2)
+  end
+
+  def test_dashboard_url_without_upstream_returns_first
+    up1 = "postgresql://host1:5432/db1"
+    inject_fake(up1, 7932)
+
+    assert_equal "http://127.0.0.1:7933", GoldLapel::Proxy.dashboard_url
+  end
+
+  def test_stop_specific_upstream_leaves_others
+    up1 = "postgresql://host1:5432/db1"
+    up2 = "postgresql://host2:5432/db2"
+    fake1 = inject_fake(up1, 7932)
+    inject_fake(up2, 7934)
+
+    GoldLapel::Proxy.stop(up1)
+
+    refute fake1.running?
+    assert_nil GoldLapel::Proxy.proxy_url(up1)
+    assert_equal "postgresql://localhost:7934/db2", GoldLapel::Proxy.proxy_url(up2)
+    assert_equal 1, GoldLapel::Proxy.instances.size
+  end
+
+  def test_stop_all_clears_everything
+    up1 = "postgresql://host1:5432/db1"
+    up2 = "postgresql://host2:5432/db2"
+    fake1 = inject_fake(up1, 7932)
+    fake2 = inject_fake(up2, 7934)
+
+    GoldLapel::Proxy.stop
+
+    refute fake1.running?
+    refute fake2.running?
+    assert_equal({}, GoldLapel::Proxy.instances)
+  end
+
+  def test_stop_nonexistent_upstream_is_noop
+    GoldLapel::Proxy.stop("postgresql://nonexistent:5432/db")
+    assert_equal({}, GoldLapel::Proxy.instances)
+  end
+
+  def test_module_level_stop_specific
+    up1 = "postgresql://host1:5432/db1"
+    up2 = "postgresql://host2:5432/db2"
+    inject_fake(up1, 7932)
+    inject_fake(up2, 7934)
+
+    GoldLapel.stop(up1)
+
+    assert_nil GoldLapel.proxy_url(up1)
+    assert_equal "postgresql://localhost:7934/db2", GoldLapel.proxy_url(up2)
+  end
+
+  def test_module_level_proxy_url_delegates_upstream
+    up1 = "postgresql://host1:5432/db1"
+    inject_fake(up1, 7932)
+
+    assert_equal "postgresql://localhost:7932/db1", GoldLapel.proxy_url(up1)
+  end
+
+  def test_module_level_dashboard_url_delegates_upstream
+    up1 = "postgresql://host1:5432/db1"
+    inject_fake(up1, 7932)
+
+    assert_equal "http://127.0.0.1:7933", GoldLapel.dashboard_url(up1)
+  end
+
+  def test_start_returns_existing_url_for_same_upstream
+    up1 = "postgresql://host1:5432/db1"
+    fake = inject_fake(up1, 7932)
+
+    # Calling start on same upstream should return existing URL without creating new
+    url = GoldLapel::Proxy.instance_variable_get(:@mutex).synchronize do
+      existing = GoldLapel::Proxy.instance_variable_get(:@instances)[up1]
+      existing.url if existing&.running?
+    end
+    assert_equal "postgresql://localhost:7932/db1", url
+  end
+
+  def test_proxy_url_returns_nil_for_unknown_upstream
+    up1 = "postgresql://host1:5432/db1"
+    inject_fake(up1, 7932)
+
+    assert_nil GoldLapel::Proxy.proxy_url("postgresql://unknown:5432/db")
+  end
+
+  def test_dashboard_url_returns_nil_for_unknown_upstream
+    up1 = "postgresql://host1:5432/db1"
+    inject_fake(up1, 7932)
+
+    assert_nil GoldLapel::Proxy.dashboard_url("postgresql://unknown:5432/db")
+  end
 end

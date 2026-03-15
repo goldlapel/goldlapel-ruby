@@ -232,50 +232,73 @@ module GoldLapel
       false
     end
 
-    # Module-level singleton
-    @instance = nil
+    # Module-level multi-instance registry keyed by upstream URL
+    @instances = {}
+    @mutex = Mutex.new
     @cleanup_registered = false
 
     class << self
       def start(upstream, port: nil, config: {}, extra_args: [])
-        if @instance&.running?
-          if @instance.upstream != upstream
-            raise "Gold Lapel is already running for a different upstream. " \
-                  "Call GoldLapel.stop before starting with a new upstream."
+        @mutex.synchronize do
+          existing = @instances[upstream]
+          if existing&.running?
+            return existing.url
           end
-          return @instance.url
-        end
 
-        @instance = Proxy.new(upstream, port: port, config: config, extra_args: extra_args)
-        unless @cleanup_registered
-          at_exit { cleanup }
-          @cleanup_registered = true
-        end
-        @instance.start
-      end
-
-      def stop
-        if @instance
-          @instance.stop
-          @instance = nil
+          proxy = Proxy.new(upstream, port: port, config: config, extra_args: extra_args)
+          unless @cleanup_registered
+            at_exit { cleanup }
+            @cleanup_registered = true
+          end
+          url = proxy.start
+          @instances[upstream] = proxy
+          url
         end
       end
 
-      def proxy_url
-        @instance&.url
+      def stop(upstream = nil)
+        @mutex.synchronize do
+          if upstream
+            instance = @instances.delete(upstream)
+            instance&.stop
+          else
+            @instances.each_value(&:stop)
+            @instances.clear
+          end
+        end
       end
 
-      def dashboard_url
-        @instance&.dashboard_url
+      def proxy_url(upstream = nil)
+        @mutex.synchronize do
+          instance = if upstream
+            @instances[upstream]
+          else
+            @instances.values.first
+          end
+          instance&.url
+        end
+      end
+
+      def dashboard_url(upstream = nil)
+        @mutex.synchronize do
+          instance = if upstream
+            @instances[upstream]
+          else
+            @instances.values.first
+          end
+          instance&.dashboard_url
+        end
+      end
+
+      def instances
+        @mutex.synchronize { @instances.dup }
       end
 
       private
 
       def cleanup
-        if @instance
-          @instance.stop
-          @instance = nil
-        end
+        @instances.each_value(&:stop)
+        @instances.clear
       end
 
       def which(cmd)
