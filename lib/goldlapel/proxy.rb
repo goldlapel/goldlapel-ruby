@@ -103,7 +103,9 @@ module GoldLapel
         *@extra_args,
       ]
 
-      stdin, stdout, stderr, wait_thr = Open3.popen3(*cmd)
+      env = ENV.to_h
+      env["GOLDLAPEL_CLIENT"] ||= "ruby"
+      stdin, stdout, stderr, wait_thr = Open3.popen3(env, *cmd)
       stdin.close
       stdout.close
       @pid = wait_thr.pid
