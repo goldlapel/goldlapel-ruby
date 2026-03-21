@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
-require "open3"
 require "socket"
+require "timeout"
 require "rbconfig"
 
 module GoldLapel
@@ -83,7 +83,6 @@ module GoldLapel
       @url = nil
       @dashboard_url = nil
       @stderr_reader = nil
-
       @dashboard_port = if config.key?(:dashboard_port) || config.key?("dashboard_port")
         config.fetch(:dashboard_port, config.fetch("dashboard_port", DEFAULT_DASHBOARD_PORT)).to_i
       else
@@ -105,20 +104,20 @@ module GoldLapel
 
       env = ENV.to_h
       env["GOLDLAPEL_CLIENT"] ||= "ruby"
-      stdin, stdout, stderr, wait_thr = Open3.popen3(env, *cmd)
-      stdin.close
-      stdout.close
-      @pid = wait_thr.pid
-      @stderr_reader = stderr
-      @wait_thr = wait_thr
+      stderr_read, stderr_write = IO.pipe
+      @pid = Process.spawn(env, *cmd,
+        in: File::NULL,
+        out: File::NULL,
+        err: stderr_write)
+      stderr_write.close
+      @stderr_reader = stderr_read
 
       unless self.class.wait_for_port("127.0.0.1", @port, STARTUP_TIMEOUT)
         Process.kill("KILL", @pid) rescue Errno::ESRCH
-        @wait_thr.join rescue nil
-        stderr_output = stderr.read
-        stderr.close
+        Process.wait(@pid) rescue Errno::ECHILD
+        stderr_output = stderr_read.read
+        stderr_read.close
         @pid = nil
-        @wait_thr = nil
         @stderr_reader = nil
         raise "Gold Lapel failed to start on port #{@port} " \
               "within #{STARTUP_TIMEOUT}s.\nstderr: #{stderr_output}"
@@ -142,18 +141,17 @@ module GoldLapel
       if @pid
         begin
           Process.kill("TERM", @pid)
-          unless @wait_thr.join(5)
-            Process.kill("KILL", @pid) rescue Errno::ESRCH
-            @wait_thr.join(5) rescue nil
-          end
-        rescue Errno::ESRCH
+          Timeout.timeout(5) { Process.wait(@pid) }
+        rescue Errno::ESRCH, Errno::ECHILD
           # Process already exited
+        rescue Timeout::Error
+          Process.kill("KILL", @pid) rescue Errno::ESRCH
+          Process.wait(@pid) rescue Errno::ECHILD
         end
         @stderr_reader&.close rescue IOError
         @pid = nil
         @url = nil
         @dashboard_url = nil
-        @wait_thr = nil
         @stderr_reader = nil
       end
     end
