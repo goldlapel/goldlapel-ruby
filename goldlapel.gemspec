@@ -10,7 +10,7 @@ Gem::Specification.new do |spec|
                      "and automatically creates materialized views and indexes to make your " \
                      "database faster. Zero code changes required."
   spec.homepage = "https://goldlapel.com"
-  spec.license = "Proprietary"
+  spec.license = "MIT"
 
   spec.required_ruby_version = ">= 3.2.0"
 
