@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative "goldlapel/cache"
+require_relative "goldlapel/wrap"
 require_relative "goldlapel/proxy"
 
 module GoldLapel

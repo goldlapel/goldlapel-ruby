@@ -27,6 +27,7 @@ module GoldLapel
       disable_result_cache disable_pool
       disable_n1 disable_n1_cross_connection disable_shadow_mode
       enable_coalescing replica exclude_tables
+      invalidation_port
     ].freeze
 
     BOOLEAN_KEYS = %w[
@@ -242,7 +243,7 @@ module GoldLapel
         @mutex.synchronize do
           existing = @instances[upstream]
           if existing&.running?
-            return existing.url
+            return existing.instance_variable_get(:@wrapped_conn) || existing.url
           end
 
           proxy = Proxy.new(upstream, port: port, config: config, extra_args: extra_args)
@@ -252,7 +253,18 @@ module GoldLapel
           end
           url = proxy.start
           @instances[upstream] = proxy
-          url
+
+          # Auto-detect pg gem and return wrapped connection with L1 cache
+          begin
+            require "pg"
+            conn = PG.connect(url)
+            inv_port = Integer(config[:invalidation_port] || config["invalidation_port"] || (proxy.instance_variable_get(:@port) + 2))
+            wrapped = GoldLapel.wrap(conn, invalidation_port: inv_port)
+            proxy.instance_variable_set(:@wrapped_conn, wrapped)
+            wrapped
+          rescue LoadError, StandardError
+            url
+          end
         end
       end
 
