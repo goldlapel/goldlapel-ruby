@@ -1,6 +1,6 @@
 # Gold Lapel
 
-Self-optimizing Postgres proxy — automatic materialized views and indexes. Zero code changes required.
+Self-optimizing Postgres proxy — automatic materialized views and indexes, with an L1 native cache that serves repeated reads in microseconds. Zero code changes required.
 
 Gold Lapel sits between your app and Postgres, watches query patterns, and automatically creates materialized views and indexes to make your database faster. Port 7932 (79 = atomic number for gold, 32 from Postgres).
 
@@ -21,23 +21,18 @@ gem "goldlapel"
 ```ruby
 require "goldlapel"
 
-# Start the proxy — returns a connection string pointing at Gold Lapel
-url = GoldLapel.start("postgresql://user:pass@localhost:5432/mydb")
+# Start the proxy — returns a database connection with L1 cache built in
+conn = GoldLapel.start("postgresql://user:pass@localhost:5432/mydb")
 
-# Use the URL with any Postgres driver
-require "pg"
-conn = PG.connect(url)
-
-# Or Sequel, ActiveRecord, ROM — anything that speaks Postgres
+# Use the connection directly — no driver setup needed
+conn.exec("SELECT * FROM users WHERE id = $1", [42])
 ```
-
-Gold Lapel is driver-agnostic. `start` returns a connection string (`postgresql://...@localhost:7932/...`) that works with any Postgres driver or ORM.
 
 ## API
 
 ### `GoldLapel.start(upstream, port: nil, config: {}, extra_args: [])`
 
-Starts the Gold Lapel proxy and returns the proxy connection string.
+Starts the Gold Lapel proxy and returns a database connection with L1 cache.
 
 - `upstream` — your Postgres connection string (e.g. `postgresql://user:pass@localhost:5432/mydb`)
 - `port` — proxy port (default: 7932)
@@ -66,7 +61,7 @@ Class interface for managing multiple instances:
 
 ```ruby
 proxy = GoldLapel::Proxy.new("postgresql://user:pass@localhost:5432/mydb", port: 7932)
-url = proxy.start
+conn = proxy.start
 # ...
 proxy.stop
 ```
@@ -78,7 +73,7 @@ Pass a config hash to configure the proxy:
 ```ruby
 require "goldlapel"
 
-url = GoldLapel.start("postgresql://user:pass@localhost/mydb", config: {
+conn = GoldLapel.start("postgresql://user:pass@localhost/mydb", config: {
   mode: "butler",
   pool_size: 50,
   disable_matviews: true,
@@ -105,7 +100,7 @@ This gem bundles the Gold Lapel Rust binary for your platform. When you call `st
 1. Locates the binary (bundled in gem, on PATH, or via `GOLDLAPEL_BINARY` env var)
 2. Spawns it as a subprocess listening on localhost
 3. Waits for the port to be ready
-4. Returns a connection string pointing at the proxy
+4. Returns a database connection with L1 native cache built in
 5. Cleans up automatically on process exit
 
 The binary does all the work — this wrapper just manages its lifecycle.
