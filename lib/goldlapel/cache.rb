@@ -37,8 +37,31 @@ module GoldLapel
       else
         bare_table(tokens[1])
       end
-    when "CREATE", "ALTER", "DROP"
+    when "CREATE", "ALTER", "DROP", "REFRESH", "DO", "CALL"
       DDL_SENTINEL
+    when "MERGE"
+      return nil if tokens.length < 3 || tokens[1].upcase != "INTO"
+      bare_table(tokens[2])
+    when "SELECT"
+      saw_into = false
+      into_target = nil
+      tokens[1..].each do |tok|
+        upper = tok.upcase
+        if upper == "INTO" && !saw_into
+          saw_into = true
+          next
+        end
+        if saw_into && into_target.nil?
+          if %w[TEMPORARY TEMP UNLOGGED].include?(upper)
+            next
+          end
+          into_target = tok
+          next
+        end
+        return DDL_SENTINEL if saw_into && !into_target.nil? && upper == "FROM"
+        return nil if upper == "FROM"
+      end
+      return nil
     when "COPY"
       return nil if tokens.length < 2
       raw = tokens[1]
