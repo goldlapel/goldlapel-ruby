@@ -1,3 +1,5 @@
+# frozen_string_literal: true
+
 require_relative "cache"
 
 module GoldLapel
@@ -12,8 +14,8 @@ module GoldLapel
     instances = Proxy.instances rescue {}
     if instances.any?
       inst = instances.values.first
-      port = inst.instance_variable_get(:@port) || DEFAULT_PORT
-      config = inst.instance_variable_get(:@config) || {}
+      port = inst.port || DEFAULT_PORT
+      config = inst.config || {}
       Integer(config[:invalidation_port] || config["invalidation_port"] || (port + 2))
     else
       DEFAULT_PORT + 2

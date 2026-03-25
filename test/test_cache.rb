@@ -416,4 +416,30 @@ class TestCachedResult < Minitest::Test
     result = GoldLapel::CachedResult.new([["1", "alice"], ["2", "bob"]], ["id", "name"])
     assert_equal ["alice", "bob"], result.column_values(1)
   end
+
+  def test_count_without_block_returns_ntuples
+    result = GoldLapel::CachedResult.new([["1"], ["2"], ["3"]], ["id"])
+    assert_equal 3, result.count
+  end
+
+  def test_count_with_block_filters
+    result = GoldLapel::CachedResult.new([["1", "true"], ["2", "false"], ["3", "true"]], ["id", "active"])
+    assert_equal 2, result.count { |row| row["active"] == "true" }
+  end
+
+  def test_count_with_argument
+    result = GoldLapel::CachedResult.new([["1", "alice"], ["2", "alice"], ["3", "bob"]], ["id", "name"])
+    target = { "id" => "1", "name" => "alice" }
+    assert_equal 1, result.count(target)
+  end
+
+  def test_length_returns_ntuples
+    result = GoldLapel::CachedResult.new([["1"], ["2"]], ["id"])
+    assert_equal 2, result.length
+  end
+
+  def test_size_returns_ntuples
+    result = GoldLapel::CachedResult.new([["1"], ["2"]], ["id"])
+    assert_equal 2, result.size
+  end
 end

@@ -150,17 +150,17 @@ end
 class TestProxyClass < Minitest::Test
   def test_default_port
     proxy = GoldLapel::Proxy.new("postgresql://localhost:5432/mydb")
-    assert_equal 7932, proxy.instance_variable_get(:@port)
+    assert_equal 7932, proxy.port
   end
 
   def test_custom_port
     proxy = GoldLapel::Proxy.new("postgresql://localhost:5432/mydb", port: 9000)
-    assert_equal 9000, proxy.instance_variable_get(:@port)
+    assert_equal 9000, proxy.port
   end
 
   def test_port_zero
     proxy = GoldLapel::Proxy.new("postgresql://localhost:5432/mydb", port: 0)
-    assert_equal 0, proxy.instance_variable_get(:@port)
+    assert_equal 0, proxy.port
   end
 
   def test_not_running_initially
@@ -241,7 +241,7 @@ class TestConfigToArgs < Minitest::Test
       "postgresql://localhost:5432/mydb",
       config: { mode: "butler" }
     )
-    assert_equal({ mode: "butler" }, proxy.instance_variable_get(:@config))
+    assert_equal({ mode: "butler" }, proxy.config)
   end
 end
 

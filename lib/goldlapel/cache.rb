@@ -1,3 +1,5 @@
+# frozen_string_literal: true
+
 require "socket"
 require "set"
 
@@ -114,9 +116,16 @@ module GoldLapel
       @values.length
     end
     alias_method :num_tuples, :ntuples
-    alias_method :count, :ntuples
     alias_method :length, :ntuples
     alias_method :size, :ntuples
+
+    def count(*args, &block)
+      if block || args.any?
+        super
+      else
+        ntuples
+      end
+    end
 
     def [](idx)
       row = @values[idx]

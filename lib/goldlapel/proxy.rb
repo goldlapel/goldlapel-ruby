@@ -11,7 +11,8 @@ module GoldLapel
   STARTUP_POLL_INTERVAL = 0.05
 
   class Proxy
-    attr_reader :url, :upstream, :dashboard_url
+    attr_reader :url, :upstream, :dashboard_url, :port, :config
+    attr_accessor :wrapped_conn
 
     VALID_CONFIG_KEYS = %w[
       mode min_pattern_count refresh_interval_secs pattern_ttl_secs
@@ -243,7 +244,7 @@ module GoldLapel
         @mutex.synchronize do
           existing = @instances[upstream]
           if existing&.running?
-            return existing.instance_variable_get(:@wrapped_conn) || existing.url
+            return existing.wrapped_conn || existing.url
           end
 
           proxy = Proxy.new(upstream, port: port, config: config, extra_args: extra_args)
@@ -258,9 +259,9 @@ module GoldLapel
           begin
             require "pg"
             conn = PG.connect(url)
-            inv_port = Integer(config[:invalidation_port] || config["invalidation_port"] || (proxy.instance_variable_get(:@port) + 2))
+            inv_port = Integer(config[:invalidation_port] || config["invalidation_port"] || (proxy.port + 2))
             wrapped = GoldLapel.wrap(conn, invalidation_port: inv_port)
-            proxy.instance_variable_set(:@wrapped_conn, wrapped)
+            proxy.wrapped_conn = wrapped
             wrapped
           rescue LoadError, StandardError
             url
