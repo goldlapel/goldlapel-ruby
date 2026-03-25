@@ -107,6 +107,30 @@ module GoldLapel
       end
     end
 
+    def nfields
+      @fields.length
+    end
+
+    def fname(idx)
+      @fields[idx]
+    end
+
+    def ftype(idx)
+      0 # unknown OID — safe default, ActiveRecord falls back to string
+    end
+
+    def fmod(idx)
+      -1 # no modifier — safe default
+    end
+
+    def clear
+      # no-op — cached results don't hold PG memory
+    end
+
+    def cmd_status
+      "SELECT #{ntuples}"
+    end
+
     def column_values(col_idx)
       @values.map { |row| row[col_idx] }
     end
