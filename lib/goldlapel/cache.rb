@@ -247,14 +247,20 @@ module GoldLapel
       end
     end
 
+    @instance_mutex = Mutex.new
+
     def self.instance
-      @instance ||= new
+      @instance_mutex.synchronize do
+        @instance ||= new
+      end
     end
 
     def self.reset!
-      if @instance
-        @instance.stop_invalidation
-        @instance = nil
+      @instance_mutex.synchronize do
+        if @instance
+          @instance.stop_invalidation
+          @instance = nil
+        end
       end
     end
 
