@@ -92,12 +92,18 @@ module GoldLapel
         return result
       end
 
-      # Cache miss: execute for real
-      result = delegate(method, sql, params, result_format, &block)
+      # Cache miss: execute WITHOUT block so we can cache before PG clears the result
+      result = delegate(method, sql, params, result_format)
 
       # Cache the result if it has rows
       if result && result.respond_to?(:values) && result.respond_to?(:fields)
         @cache.put(sql, params, result.values, result.fields)
+      end
+
+      # Yield to block if provided (matching PG gem's block API)
+      if block
+        block.call(result)
+        result.clear if result.respond_to?(:clear) && !result.is_a?(CachedResult)
       end
 
       result
