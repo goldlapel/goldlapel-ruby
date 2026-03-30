@@ -255,17 +255,20 @@ module GoldLapel
           url = proxy.start
           @instances[upstream] = proxy
 
-          # Auto-detect pg gem and return wrapped connection with L1 cache
+          # Require pg gem — raise if not installed
           begin
             require "pg"
-            conn = PG.connect(url)
-            inv_port = Integer(config[:invalidation_port] || config["invalidation_port"] || (proxy.port + 2))
-            wrapped = GoldLapel.wrap(conn, invalidation_port: inv_port)
-            proxy.wrapped_conn = wrapped
-            wrapped
-          rescue LoadError, StandardError
-            url
+          rescue LoadError
+            raise LoadError,
+              "No supported database driver found. " \
+              "Install one (e.g. gem install pg) " \
+              "or use proxy_url() if you only need the connection string."
           end
+          conn = PG.connect(url)
+          inv_port = Integer(config[:invalidation_port] || config["invalidation_port"] || (proxy.port + 2))
+          wrapped = GoldLapel.wrap(conn, invalidation_port: inv_port)
+          proxy.wrapped_conn = wrapped
+          wrapped
         end
       end
 
