@@ -194,6 +194,57 @@ module GoldLapel
     result[0]["st_distance"].to_f
   end
 
+  def self.hset(conn, table, key, field, value)
+    raw = _raw_conn(conn)
+    raw.exec("CREATE TABLE IF NOT EXISTS #{table} (" \
+             "key TEXT PRIMARY KEY, " \
+             "data JSONB NOT NULL DEFAULT '{}'::jsonb)")
+    raw.exec_params(
+      "INSERT INTO #{table} (key, data) VALUES ($1, jsonb_build_object($2, $3::jsonb)) " \
+      "ON CONFLICT (key) DO UPDATE SET data = #{table}.data || jsonb_build_object($4, $5::jsonb)",
+      [key, field, JSON.generate(value), field, JSON.generate(value)]
+    )
+  end
+
+  def self.hget(conn, table, key, field)
+    raw = _raw_conn(conn)
+    result = raw.exec_params(
+      "SELECT data->>$1 FROM #{table} WHERE key = $2",
+      [field, key]
+    )
+    return nil if result.ntuples.zero?
+    val = result[0].values[0]
+    return nil if val.nil?
+    begin
+      JSON.parse(val)
+    rescue JSON::ParserError
+      val
+    end
+  end
+
+  def self.hgetall(conn, table, key)
+    raw = _raw_conn(conn)
+    result = raw.exec_params("SELECT data FROM #{table} WHERE key = $1", [key])
+    return {} if result.ntuples.zero?
+    val = result[0]["data"]
+    return {} if val.nil?
+    val.is_a?(Hash) ? val : JSON.parse(val)
+  end
+
+  def self.hdel(conn, table, key, field)
+    raw = _raw_conn(conn)
+    result = raw.exec_params(
+      "SELECT data ? $1 AS existed FROM #{table} WHERE key = $2",
+      [field, key]
+    )
+    return false if result.ntuples.zero? || result[0]["existed"] != "t"
+    raw.exec_params(
+      "UPDATE #{table} SET data = data - $1 WHERE key = $2",
+      [field, key]
+    )
+    true
+  end
+
   def self._raw_conn(conn)
     conn.is_a?(CachedConnection) ? conn.send(:instance_variable_get, :@real) : conn
   end
