@@ -3,6 +3,7 @@
 require_relative "goldlapel/cache"
 require_relative "goldlapel/wrap"
 require_relative "goldlapel/proxy"
+require_relative "goldlapel/utils"
 
 module GoldLapel
   # Module-level convenience methods (multi-instance)
