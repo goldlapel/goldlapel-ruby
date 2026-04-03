@@ -84,6 +84,12 @@ module GoldLapel
     result[0]["value"].to_i
   end
 
+  def self.count_distinct(conn, table, column)
+    raw = _raw_conn(conn)
+    result = raw.exec("SELECT COUNT(DISTINCT #{column}) FROM #{table}")
+    result[0]["count"].to_i
+  end
+
   def self.zadd(conn, table, member, score)
     raw = _raw_conn(conn)
     raw.exec("CREATE TABLE IF NOT EXISTS #{table} (" \
