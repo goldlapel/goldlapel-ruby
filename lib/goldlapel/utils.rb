@@ -251,6 +251,25 @@ module GoldLapel
     true
   end
 
+  def self.script(conn, lua_code, *args)
+    raw = _raw_conn(conn)
+    raw.exec("CREATE EXTENSION IF NOT EXISTS pllua")
+    func_name = "_gl_lua_#{rand(16**8).to_s(16)}"
+    params = args.each_with_index.map { |_, i| "p#{i + 1} text" }.join(", ")
+    raw.exec("CREATE OR REPLACE FUNCTION pg_temp.#{func_name}(#{params}) " \
+             "RETURNS text LANGUAGE pllua AS $pllua$ #{lua_code} $pllua$")
+    if args.empty?
+      result = raw.exec("SELECT pg_temp.#{func_name}()")
+    else
+      placeholders = args.each_with_index.map { |_, i| "$#{i + 1}" }.join(", ")
+      result = raw.exec_params(
+        "SELECT pg_temp.#{func_name}(#{placeholders})",
+        args.map(&:to_s)
+      )
+    end
+    result.ntuples > 0 ? result[0][func_name] : nil
+  end
+
   def self._raw_conn(conn)
     conn.is_a?(CachedConnection) ? conn.send(:instance_variable_get, :@real) : conn
   end
