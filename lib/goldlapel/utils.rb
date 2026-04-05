@@ -451,6 +451,74 @@ module GoldLapel
     result.map { |row| row.transform_keys(&:to_s) }
   end
 
+  def self.facets(conn, table, column, limit: 50, query: nil, query_column: nil, lang: 'english')
+    _validate_identifier(table)
+    _validate_identifier(column)
+    raw = _raw_conn(conn)
+    if query && query_column
+      columns = Array(query_column)
+      columns.each { |col| _validate_identifier(col) }
+      tsvec = columns.map { |col| col.to_s }.join(" || ' ' || ")
+      result = raw.exec_params(
+        "SELECT #{column} AS value, COUNT(*) AS count " \
+        "FROM #{table} " \
+        "WHERE to_tsvector($1, #{tsvec}) @@ plainto_tsquery($2, $3) " \
+        "GROUP BY #{column} ORDER BY count DESC, #{column} LIMIT $4",
+        [lang, lang, query, limit]
+      )
+    else
+      result = raw.exec_params(
+        "SELECT #{column} AS value, COUNT(*) AS count " \
+        "FROM #{table} " \
+        "GROUP BY #{column} ORDER BY count DESC, #{column} LIMIT $1",
+        [limit]
+      )
+    end
+    result.map { |row| { "value" => row["value"], "count" => row["count"].to_i } }
+  end
+
+  AGGREGATE_FUNCS = %w[count sum avg min max].freeze
+  private_constant :AGGREGATE_FUNCS
+
+  def self.aggregate(conn, table, column, func, group_by: nil, limit: 50)
+    _validate_identifier(table)
+    _validate_identifier(column)
+    func_lower = func.to_s.downcase
+    unless AGGREGATE_FUNCS.include?(func_lower)
+      raise ArgumentError, "Invalid aggregate function: #{func}. Must be one of: #{AGGREGATE_FUNCS.join(', ')}"
+    end
+    raw = _raw_conn(conn)
+    expr = func_lower == "count" ? "COUNT(*)" : "#{func_lower.upcase}(#{column})"
+    if group_by
+      _validate_identifier(group_by)
+      result = raw.exec_params(
+        "SELECT #{group_by}, #{expr} AS value " \
+        "FROM #{table} " \
+        "GROUP BY #{group_by} ORDER BY value DESC LIMIT $1",
+        [limit]
+      )
+      result.map { |row| row.transform_keys(&:to_s) }
+    else
+      result = raw.exec(
+        "SELECT #{expr} AS value FROM #{table}"
+      )
+      return nil if result.ntuples.zero?
+      result[0]["value"]
+    end
+  end
+
+  def self.create_search_config(conn, name, copy_from: 'english')
+    _validate_identifier(name)
+    _validate_identifier(copy_from)
+    raw = _raw_conn(conn)
+    result = raw.exec_params(
+      "SELECT 1 FROM pg_ts_config WHERE cfgname = $1",
+      [name]
+    )
+    return if result.ntuples > 0
+    raw.exec("CREATE TEXT SEARCH CONFIGURATION #{name} (COPY = #{copy_from})")
+  end
+
   def self._validate_identifier(name)
     unless name.to_s.match?(/\A[a-zA-Z_][a-zA-Z0-9_]*\z/)
       raise ArgumentError, "Invalid identifier: #{name}"
