@@ -363,7 +363,7 @@ module GoldLapel
     columns = Array(column)
     _validate_identifier(table)
     columns.each { |col| _validate_identifier(col) }
-    tsvec = columns.map { |col| col.to_s }.join(" || ' ' || ")
+    tsvec = columns.map { |col| "coalesce(#{col}, '')" }.join(" || ' ' || ")
     if highlight
       hl_col = columns[0]
       result = raw.exec_params(
@@ -487,7 +487,7 @@ module GoldLapel
     if query && query_column
       columns = Array(query_column)
       columns.each { |col| _validate_identifier(col) }
-      tsvec = columns.map { |col| col.to_s }.join(" || ' ' || ")
+      tsvec = columns.map { |col| "coalesce(#{col}, '')" }.join(" || ' ' || ")
       result = raw.exec_params(
         "SELECT #{column} AS value, COUNT(*) AS count " \
         "FROM #{table} " \
@@ -531,8 +531,8 @@ module GoldLapel
       result = raw.exec(
         "SELECT #{expr} AS value FROM #{table}"
       )
-      return nil if result.ntuples.zero?
-      result[0]["value"]
+      return [{ "value" => nil }] if result.ntuples.zero?
+      [{ "value" => result[0]["value"] }]
     end
   end
 
@@ -544,8 +544,9 @@ module GoldLapel
              "query_text TEXT NOT NULL, " \
              "tsquery TSQUERY NOT NULL, " \
              "lang TEXT NOT NULL DEFAULT 'english', " \
-             "metadata JSONB)")
-    raw.exec("CREATE INDEX IF NOT EXISTS idx_#{name}_tsquery " \
+             "metadata JSONB, " \
+             "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
+    raw.exec("CREATE INDEX IF NOT EXISTS #{name}_tsq_idx " \
              "ON #{name} USING GIN (tsquery)")
     raw.exec_params(
       "INSERT INTO #{name} (query_id, query_text, tsquery, lang, metadata) " \

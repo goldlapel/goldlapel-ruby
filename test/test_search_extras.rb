@@ -119,7 +119,7 @@ class TestFacetsWithQuery < Minitest::Test
     GoldLapel.facets(mock, "products", "category", query: "laptop", query_column: ["name", "description"])
 
     call = mock.calls.find { |c| c[:method] == :exec_params }
-    assert_includes call[:sql], "name || ' ' || description"
+    assert_includes call[:sql], "coalesce(name, '') || ' ' || coalesce(description, '')"
   end
 end
 
@@ -145,7 +145,7 @@ end
 # --- aggregate ---
 
 class TestAggregateWithoutGroupBy < Minitest::Test
-  def test_count_returns_scalar
+  def test_count_returns_array_with_one_element
     agg_result = SearchExtrasMockResult.new(
       [{ "value" => "100" }],
       ["value"]
@@ -153,7 +153,7 @@ class TestAggregateWithoutGroupBy < Minitest::Test
     mock = SearchExtrasMockConnection.new("SELECT" => agg_result)
     result = GoldLapel.aggregate(mock, "orders", "id", "count")
 
-    assert_equal "100", result
+    assert_equal [{ "value" => "100" }], result
 
     call = mock.calls.find { |c| c[:method] == :exec }
     refute_nil call
@@ -169,7 +169,7 @@ class TestAggregateWithoutGroupBy < Minitest::Test
     mock = SearchExtrasMockConnection.new("SELECT" => agg_result)
     result = GoldLapel.aggregate(mock, "orders", "total", "sum")
 
-    assert_equal "5000.50", result
+    assert_equal [{ "value" => "5000.50" }], result
 
     call = mock.calls.find { |c| c[:method] == :exec }
     assert_includes call[:sql], "SUM(total)"
@@ -199,10 +199,10 @@ class TestAggregateWithoutGroupBy < Minitest::Test
     assert_includes call[:sql], "MAX(total)"
   end
 
-  def test_returns_nil_when_empty
+  def test_returns_array_with_nil_value_when_empty
     mock = SearchExtrasMockConnection.new
     result = GoldLapel.aggregate(mock, "orders", "total", "sum")
-    assert_nil result
+    assert_equal [{ "value" => nil }], result
   end
 end
 

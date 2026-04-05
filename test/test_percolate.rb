@@ -74,10 +74,11 @@ class TestPercolateAdd < Minitest::Test
     assert_includes table_call[:sql], "tsquery TSQUERY NOT NULL"
     assert_includes table_call[:sql], "lang TEXT NOT NULL"
     assert_includes table_call[:sql], "metadata JSONB"
+    assert_includes table_call[:sql], "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"
 
     idx_call = mock.calls.find { |c| c[:method] == :exec && c[:sql].include?("CREATE INDEX IF NOT EXISTS") }
     refute_nil idx_call
-    assert_includes idx_call[:sql], "idx_alerts_tsquery"
+    assert_includes idx_call[:sql], "alerts_tsq_idx"
     assert_includes idx_call[:sql], "USING GIN"
   end
 
