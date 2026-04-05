@@ -99,7 +99,7 @@ module GoldLapel
       cmd = [
         binary,
         "--upstream", @upstream,
-        "--port", @port.to_s,
+        "--proxy-port", @port.to_s,
         *self.class.config_to_args(@config),
         *@extra_args,
       ]
