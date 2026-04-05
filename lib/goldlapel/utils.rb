@@ -389,6 +389,35 @@ module GoldLapel
     result.map { |row| row.transform_keys(&:to_s) }
   end
 
+  def self.analyze(conn, text, lang: 'english')
+    raw = _raw_conn(conn)
+    result = raw.exec_params(
+      "SELECT alias, description, token, dictionaries, dictionary, lexemes " \
+      "FROM ts_debug($1, $2)",
+      [lang, text]
+    )
+    result.map { |row| row.transform_keys(&:to_s) }
+  end
+
+  def self.explain_score(conn, table, column, query, id_column, id_value, lang: 'english')
+    _validate_identifier(table)
+    _validate_identifier(column)
+    _validate_identifier(id_column)
+    raw = _raw_conn(conn)
+    result = raw.exec_params(
+      "SELECT #{column} AS document_text, to_tsvector($1, #{column})::text AS document_tokens, " \
+      "plainto_tsquery($1, $2)::text AS query_tokens, " \
+      "to_tsvector($1, #{column}) @@ plainto_tsquery($1, $2) AS matches, " \
+      "ts_rank(to_tsvector($1, #{column}), plainto_tsquery($1, $2)) AS score, " \
+      "ts_headline($1, #{column}, plainto_tsquery($1, $2), " \
+        "'StartSel=**, StopSel=**, MaxWords=50, MinWords=20') AS headline " \
+      "FROM #{table} WHERE #{id_column} = $3",
+      [lang, query, id_value]
+    )
+    return nil if result.ntuples.zero?
+    result[0].transform_keys(&:to_s)
+  end
+
   def self.search_fuzzy(conn, table, column, query, limit: 50, threshold: 0.3)
     _validate_identifier(table)
     _validate_identifier(column)
