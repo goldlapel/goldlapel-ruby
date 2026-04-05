@@ -358,6 +358,106 @@ module GoldLapel
     end
   end
 
+  def self.search(conn, table, column, query, limit: 50, lang: 'english', highlight: false)
+    raw = _raw_conn(conn)
+    columns = Array(column)
+    _validate_identifier(table)
+    columns.each { |col| _validate_identifier(col) }
+    tsvec = columns.map { |col| col.to_s }.join(" || ' ' || ")
+    if highlight
+      hl_col = columns[0]
+      result = raw.exec_params(
+        "SELECT *, " \
+        "ts_rank(to_tsvector($1, #{tsvec}), plainto_tsquery($2, $3)) AS _score, " \
+        "ts_headline($4, #{hl_col}, plainto_tsquery($5, $6), " \
+          "'StartSel=<mark>, StopSel=</mark>, MaxWords=35, MinWords=15') AS _highlight " \
+        "FROM #{table} " \
+        "WHERE to_tsvector($7, #{tsvec}) @@ plainto_tsquery($8, $9) " \
+        "ORDER BY _score DESC LIMIT $10",
+        [lang, lang, query, lang, lang, query, lang, lang, query, limit]
+      )
+    else
+      result = raw.exec_params(
+        "SELECT *, " \
+        "ts_rank(to_tsvector($1, #{tsvec}), plainto_tsquery($2, $3)) AS _score " \
+        "FROM #{table} " \
+        "WHERE to_tsvector($4, #{tsvec}) @@ plainto_tsquery($5, $6) " \
+        "ORDER BY _score DESC LIMIT $7",
+        [lang, lang, query, lang, lang, query, limit]
+      )
+    end
+    result.map { |row| row.transform_keys(&:to_s) }
+  end
+
+  def self.search_fuzzy(conn, table, column, query, limit: 50, threshold: 0.3)
+    _validate_identifier(table)
+    _validate_identifier(column)
+    raw = _raw_conn(conn)
+    raw.exec("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+    result = raw.exec_params(
+      "SELECT *, similarity(#{column}, $1) AS _score " \
+      "FROM #{table} " \
+      "WHERE similarity(#{column}, $2) > $3 " \
+      "ORDER BY _score DESC LIMIT $4",
+      [query, query, threshold.to_f, limit]
+    )
+    result.map { |row| row.transform_keys(&:to_s) }
+  end
+
+  def self.search_phonetic(conn, table, column, query, limit: 50)
+    _validate_identifier(table)
+    _validate_identifier(column)
+    raw = _raw_conn(conn)
+    raw.exec("CREATE EXTENSION IF NOT EXISTS fuzzystrmatch")
+    raw.exec("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+    result = raw.exec_params(
+      "SELECT *, similarity(#{column}, $1) AS _score " \
+      "FROM #{table} " \
+      "WHERE soundex(#{column}) = soundex($2) " \
+      "ORDER BY _score DESC, #{column} LIMIT $3",
+      [query, query, limit]
+    )
+    result.map { |row| row.transform_keys(&:to_s) }
+  end
+
+  def self.similar(conn, table, column, vector, limit: 10)
+    _validate_identifier(table)
+    _validate_identifier(column)
+    raw = _raw_conn(conn)
+    raw.exec("CREATE EXTENSION IF NOT EXISTS vector")
+    vec_literal = "[" + vector.map { |v| v.to_f.to_s }.join(",") + "]"
+    result = raw.exec_params(
+      "SELECT *, (#{column} <=> $1::vector) AS _score " \
+      "FROM #{table} " \
+      "ORDER BY _score LIMIT $2",
+      [vec_literal, limit]
+    )
+    result.map { |row| row.transform_keys(&:to_s) }
+  end
+
+  def self.suggest(conn, table, column, prefix, limit: 10)
+    _validate_identifier(table)
+    _validate_identifier(column)
+    raw = _raw_conn(conn)
+    raw.exec("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+    pattern = prefix + "%"
+    result = raw.exec_params(
+      "SELECT *, similarity(#{column}, $1) AS _score " \
+      "FROM #{table} " \
+      "WHERE #{column} ILIKE $2 " \
+      "ORDER BY _score DESC, #{column} LIMIT $3",
+      [prefix, pattern, limit]
+    )
+    result.map { |row| row.transform_keys(&:to_s) }
+  end
+
+  def self._validate_identifier(name)
+    unless name.to_s.match?(/\A[a-zA-Z_][a-zA-Z0-9_]*\z/)
+      raise ArgumentError, "Invalid identifier: #{name}"
+    end
+  end
+  private_class_method :_validate_identifier
+
   def self._raw_conn(conn)
     conn.is_a?(CachedConnection) ? conn.send(:instance_variable_get, :@real) : conn
   end
