@@ -507,6 +507,53 @@ module GoldLapel
     end
   end
 
+  def self.percolate_add(conn, name, query_id, query, lang: 'english', metadata: nil)
+    _validate_identifier(name)
+    raw = _raw_conn(conn)
+    raw.exec("CREATE TABLE IF NOT EXISTS #{name} (" \
+             "query_id TEXT PRIMARY KEY, " \
+             "query_text TEXT NOT NULL, " \
+             "tsquery TSQUERY NOT NULL, " \
+             "lang TEXT NOT NULL DEFAULT 'english', " \
+             "metadata JSONB)")
+    raw.exec("CREATE INDEX IF NOT EXISTS idx_#{name}_tsquery " \
+             "ON #{name} USING GIN (tsquery)")
+    raw.exec_params(
+      "INSERT INTO #{name} (query_id, query_text, tsquery, lang, metadata) " \
+      "VALUES ($1, $2, plainto_tsquery($3, $2), $3, $4) " \
+      "ON CONFLICT (query_id) DO UPDATE SET " \
+        "query_text = EXCLUDED.query_text, " \
+        "tsquery = EXCLUDED.tsquery, " \
+        "lang = EXCLUDED.lang, " \
+        "metadata = EXCLUDED.metadata",
+      [query_id, query, lang, metadata.nil? ? nil : JSON.generate(metadata)]
+    )
+  end
+
+  def self.percolate(conn, name, text, lang: 'english', limit: 50)
+    _validate_identifier(name)
+    raw = _raw_conn(conn)
+    result = raw.exec_params(
+      "SELECT query_id, query_text, metadata, " \
+      "ts_rank(to_tsvector($1, $2), tsquery) AS _score " \
+      "FROM #{name} " \
+      "WHERE to_tsvector($1, $2) @@ tsquery " \
+      "ORDER BY _score DESC LIMIT $3",
+      [lang, text, limit]
+    )
+    result.map { |row| row.transform_keys(&:to_s) }
+  end
+
+  def self.percolate_delete(conn, name, query_id)
+    _validate_identifier(name)
+    raw = _raw_conn(conn)
+    result = raw.exec_params(
+      "DELETE FROM #{name} WHERE query_id = $1 RETURNING query_id",
+      [query_id]
+    )
+    result.cmd_tuples.to_i > 0
+  end
+
   def self.create_search_config(conn, name, copy_from: 'english')
     _validate_identifier(name)
     _validate_identifier(copy_from)
