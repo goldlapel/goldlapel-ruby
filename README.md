@@ -74,7 +74,7 @@ Pass a config hash to configure the proxy:
 require "goldlapel"
 
 conn = GoldLapel.start("postgresql://user:pass@localhost/mydb", config: {
-  mode: "butler",
+  mode: "waiter",
   pool_size: 50,
   disable_matviews: true,
   replica: ["postgresql://user:pass@replica1/mydb"],

@@ -172,13 +172,13 @@ end
 
 class TestConfigToArgs < Minitest::Test
   def test_string_key
-    result = GoldLapel::Proxy.config_to_args({ "mode" => "butler" })
-    assert_equal ["--mode", "butler"], result
+    result = GoldLapel::Proxy.config_to_args({ "mode" => "waiter" })
+    assert_equal ["--mode", "waiter"], result
   end
 
   def test_symbol_key
-    result = GoldLapel::Proxy.config_to_args({ mode: "butler" })
-    assert_equal ["--mode", "butler"], result
+    result = GoldLapel::Proxy.config_to_args({ mode: "waiter" })
+    assert_equal ["--mode", "waiter"], result
   end
 
   def test_numeric_value
@@ -210,12 +210,12 @@ class TestConfigToArgs < Minitest::Test
 
   def test_multiple_keys
     result = GoldLapel::Proxy.config_to_args({
-      mode: "butler",
+      mode: "waiter",
       pool_size: 10,
       disable_pool: true,
     })
     assert_includes result, "--mode"
-    assert_includes result, "butler"
+    assert_includes result, "waiter"
     assert_includes result, "--pool-size"
     assert_includes result, "10"
     assert_includes result, "--disable-pool"
@@ -239,9 +239,9 @@ class TestConfigToArgs < Minitest::Test
   def test_constructor_stores_config
     proxy = GoldLapel::Proxy.new(
       "postgresql://localhost:5432/mydb",
-      config: { mode: "butler" }
+      config: { mode: "waiter" }
     )
-    assert_equal({ mode: "butler" }, proxy.config)
+    assert_equal({ mode: "waiter" }, proxy.config)
   end
 end
 
