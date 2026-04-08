@@ -591,3 +591,182 @@ class TestDocCreateIndex < Minitest::Test
     assert_raises(ArgumentError) { GoldLapel.doc_create_index(mock, "bad table!") }
   end
 end
+
+# --- doc_aggregate ---
+
+class TestDocAggregate < Minitest::Test
+  def test_full_pipeline
+    agg_result = DocMockResult.new(
+      [
+        { "_id" => "electronics", "total" => "1500", "cnt" => "3" },
+        { "_id" => "books", "total" => "200", "cnt" => "5" }
+      ],
+      ["_id", "total", "cnt"]
+    )
+    mock = DocMockConnection.new("SELECT" => agg_result)
+    result = GoldLapel.doc_aggregate(mock, "orders", [
+      { "$match" => { "status" => "complete" } },
+      { "$group" => {
+        "_id" => "$category",
+        "total" => { "$sum" => "$amount" },
+        "cnt" => { "$count" => true }
+      }},
+      { "$sort" => { "total" => -1 } },
+      { "$limit" => 10 },
+      { "$skip" => 2 }
+    ])
+
+    assert_equal 2, result.length
+    assert_equal "electronics", result[0]["_id"]
+    assert_equal "1500", result[0]["total"]
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("SELECT") }
+    refute_nil call
+    assert_includes call[:sql], "SUM((data->>'amount')::numeric)::numeric AS total"
+    assert_includes call[:sql], "COUNT(*)::numeric AS cnt"
+    assert_includes call[:sql], "WHERE data @> $1::jsonb"
+    assert_includes call[:sql], "GROUP BY data->>'category'"
+    assert_includes call[:sql], "ORDER BY total DESC"
+    assert_includes call[:sql], "LIMIT $2"
+    assert_includes call[:sql], "OFFSET $3"
+    assert_equal [JSON.generate({ "status" => "complete" }), 10, 2], call[:params]
+  end
+
+  def test_avg_accumulator
+    mock = DocMockConnection.new
+    GoldLapel.doc_aggregate(mock, "orders", [
+      { "$group" => { "_id" => "$region", "avg_price" => { "$avg" => "$price" } } }
+    ])
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("SELECT") }
+    refute_nil call
+    assert_includes call[:sql], "AVG((data->>'price')::numeric)::numeric AS avg_price"
+    assert_includes call[:sql], "GROUP BY data->>'region'"
+  end
+
+  def test_null_id_group
+    mock = DocMockConnection.new
+    GoldLapel.doc_aggregate(mock, "orders", [
+      { "$group" => { "_id" => nil, "total" => { "$sum" => "$amount" } } }
+    ])
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("SELECT") }
+    refute_nil call
+    assert_includes call[:sql], "NULL AS _id"
+    refute_includes call[:sql], "GROUP BY"
+  end
+
+  def test_match_only
+    mock = DocMockConnection.new
+    GoldLapel.doc_aggregate(mock, "orders", [
+      { "$match" => { "status" => "pending" } }
+    ])
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("SELECT") }
+    refute_nil call
+    assert_includes call[:sql], "SELECT id, data, created_at FROM orders"
+    assert_includes call[:sql], "WHERE data @> $1::jsonb"
+    assert_equal [JSON.generate({ "status" => "pending" })], call[:params]
+  end
+
+  def test_sort_context_with_group
+    mock = DocMockConnection.new
+    GoldLapel.doc_aggregate(mock, "orders", [
+      { "$group" => { "_id" => "$region", "total" => { "$sum" => "$amount" } } },
+      { "$sort" => { "total" => -1 } }
+    ])
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("SELECT") }
+    refute_nil call
+    assert_includes call[:sql], "ORDER BY total DESC"
+  end
+
+  def test_sort_context_without_group
+    mock = DocMockConnection.new
+    GoldLapel.doc_aggregate(mock, "orders", [
+      { "$sort" => { "name" => 1 } }
+    ])
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("SELECT") }
+    refute_nil call
+    assert_includes call[:sql], "ORDER BY data->>'name' ASC"
+  end
+
+  def test_unsupported_stage
+    mock = DocMockConnection.new
+    assert_raises(ArgumentError) do
+      GoldLapel.doc_aggregate(mock, "orders", [
+        { "$lookup" => { "from" => "users" } }
+      ])
+    end
+  end
+
+  def test_unsupported_accumulator
+    mock = DocMockConnection.new
+    assert_raises(ArgumentError) do
+      GoldLapel.doc_aggregate(mock, "orders", [
+        { "$group" => { "_id" => "$region", "first" => { "$first" => "$name" } } }
+      ])
+    end
+  end
+
+  def test_empty_pipeline
+    mock = DocMockConnection.new
+    result = GoldLapel.doc_aggregate(mock, "orders", [])
+
+    assert_equal [], result
+  end
+
+  def test_rejects_invalid_collection
+    mock = DocMockConnection.new
+    assert_raises(ArgumentError) { GoldLapel.doc_aggregate(mock, "bad table!", []) }
+  end
+
+  def test_rejects_non_array_pipeline
+    mock = DocMockConnection.new
+    assert_raises(ArgumentError) { GoldLapel.doc_aggregate(mock, "orders", "not an array") }
+  end
+
+  def test_rejects_invalid_sort_key
+    mock = DocMockConnection.new
+    assert_raises(ArgumentError) do
+      GoldLapel.doc_aggregate(mock, "orders", [
+        { "$sort" => { "bad key!" => 1 } }
+      ])
+    end
+  end
+
+  def test_rejects_invalid_field_name_in_group_id
+    mock = DocMockConnection.new
+    assert_raises(ArgumentError) do
+      GoldLapel.doc_aggregate(mock, "orders", [
+        { "$group" => { "_id" => "$bad field!", "total" => { "$sum" => "$amount" } } }
+      ])
+    end
+  end
+
+  def test_rejects_invalid_alias_in_group
+    mock = DocMockConnection.new
+    assert_raises(ArgumentError) do
+      GoldLapel.doc_aggregate(mock, "orders", [
+        { "$group" => { "_id" => "$region", "bad alias!" => { "$sum" => "$amount" } } }
+      ])
+    end
+  end
+
+  def test_min_max_accumulators
+    mock = DocMockConnection.new
+    GoldLapel.doc_aggregate(mock, "orders", [
+      { "$group" => {
+        "_id" => "$category",
+        "lo" => { "$min" => "$price" },
+        "hi" => { "$max" => "$price" }
+      }}
+    ])
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("SELECT") }
+    refute_nil call
+    assert_includes call[:sql], "MIN((data->>'price')::numeric)::numeric AS lo"
+    assert_includes call[:sql], "MAX((data->>'price')::numeric)::numeric AS hi"
+  end
+end

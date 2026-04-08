@@ -780,6 +780,152 @@ module GoldLapel
     nil
   end
 
+  DOC_ACCUMULATORS = {
+    "$count" => "COUNT(*)",
+    "$sum"   => "SUM",
+    "$avg"   => "AVG",
+    "$min"   => "MIN",
+    "$max"   => "MAX"
+  }.freeze
+  private_constant :DOC_ACCUMULATORS
+
+  def self.doc_aggregate(conn, collection, pipeline)
+    _validate_identifier(collection)
+    raise ArgumentError, "pipeline must be an array" unless pipeline.is_a?(Array)
+    return [] if pipeline.empty?
+
+    raw = _raw_conn(conn)
+    params = []
+    idx = 1
+
+    group_stage = nil
+    match_stage = nil
+    sort_stage = nil
+    limit_val = nil
+    skip_val = nil
+
+    pipeline.each do |stage|
+      raise ArgumentError, "pipeline stage must be a hash" unless stage.is_a?(Hash)
+      raise ArgumentError, "pipeline stage must have exactly one key" unless stage.size == 1
+
+      key = stage.keys[0].to_s
+      val = stage.values[0]
+
+      case key
+      when "$group"
+        group_stage = val
+      when "$match"
+        match_stage = val
+      when "$sort"
+        sort_stage = val
+      when "$limit"
+        limit_val = val
+      when "$skip"
+        skip_val = val
+      else
+        raise ArgumentError, "Unsupported pipeline stage: #{key}"
+      end
+    end
+
+    if group_stage
+      select_parts = []
+      group_id = group_stage["_id"]
+
+      if group_id.nil?
+        select_parts << "NULL AS _id"
+      else
+        field = group_id.to_s.sub(/^\$/, "")
+        unless field.match?(SORT_KEY_PATTERN)
+          raise ArgumentError, "Invalid field name: #{field}"
+        end
+        select_parts << "data->>'#{field}' AS _id"
+      end
+
+      group_stage.each do |alias_name, spec|
+        next if alias_name == "_id"
+        unless alias_name.to_s.match?(SORT_KEY_PATTERN)
+          raise ArgumentError, "Invalid alias: #{alias_name}"
+        end
+        raise ArgumentError, "accumulator must be a hash" unless spec.is_a?(Hash)
+        raise ArgumentError, "accumulator must have exactly one operator" unless spec.size == 1
+
+        op = spec.keys[0].to_s
+        unless DOC_ACCUMULATORS.key?(op)
+          raise ArgumentError, "Unsupported accumulator: #{op}"
+        end
+
+        if op == "$count"
+          select_parts << "#{DOC_ACCUMULATORS[op]}::numeric AS #{alias_name}"
+        else
+          field_ref = spec.values[0].to_s.sub(/^\$/, "")
+          unless field_ref.match?(SORT_KEY_PATTERN)
+            raise ArgumentError, "Invalid field name: #{field_ref}"
+          end
+          select_parts << "#{DOC_ACCUMULATORS[op]}((data->>'#{field_ref}')::numeric)::numeric AS #{alias_name}"
+        end
+      end
+
+      sql = "SELECT #{select_parts.join(', ')} FROM #{collection}"
+
+      if match_stage && !match_stage.empty?
+        sql += " WHERE data @> $#{idx}::jsonb"
+        params << JSON.generate(match_stage)
+        idx += 1
+      end
+
+      if group_id.nil?
+        # no GROUP BY for null _id
+      else
+        sql += " GROUP BY data->>'#{group_id.to_s.sub(/^\$/, "")}'"
+      end
+
+      if sort_stage
+        clauses = sort_stage.map do |skey, dir|
+          unless skey.to_s.match?(SORT_KEY_PATTERN)
+            raise ArgumentError, "Invalid sort key: #{skey}"
+          end
+          order = dir.to_i < 0 ? "DESC" : "ASC"
+          "#{skey} #{order}"
+        end
+        sql += " ORDER BY #{clauses.join(', ')}"
+      end
+    else
+      sql = "SELECT id, data, created_at FROM #{collection}"
+
+      if match_stage && !match_stage.empty?
+        sql += " WHERE data @> $#{idx}::jsonb"
+        params << JSON.generate(match_stage)
+        idx += 1
+      end
+
+      if sort_stage
+        clauses = sort_stage.map do |skey, dir|
+          unless skey.to_s.match?(SORT_KEY_PATTERN)
+            raise ArgumentError, "Invalid sort key: #{skey}"
+          end
+          order = dir.to_i < 0 ? "DESC" : "ASC"
+          "data->>'#{skey}' #{order}"
+        end
+        sql += " ORDER BY #{clauses.join(', ')}"
+      end
+    end
+
+    if limit_val
+      sql += " LIMIT $#{idx}"
+      params << limit_val
+      idx += 1
+    end
+
+    if skip_val
+      sql += " OFFSET $#{idx}"
+      params << skip_val
+      idx += 1
+    end
+
+    result = raw.exec_params(sql, params)
+    result.map { |row| row.transform_keys(&:to_s) }
+  end
+
   def self._validate_identifier(name)
     unless name.to_s.match?(/\A[a-zA-Z_][a-zA-Z0-9_]*\z/)
       raise ArgumentError, "Invalid identifier: #{name}"
