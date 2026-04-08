@@ -696,7 +696,7 @@ class TestDocAggregate < Minitest::Test
     mock = DocMockConnection.new
     assert_raises(ArgumentError) do
       GoldLapel.doc_aggregate(mock, "orders", [
-        { "$lookup" => { "from" => "users" } }
+        { "$bucket" => { "groupBy" => "$price" } }
       ])
     end
   end
@@ -894,5 +894,189 @@ class TestDocAggregate < Minitest::Test
         }}
       ])
     end
+  end
+
+  # --- $project ---
+
+  def test_project_include_fields
+    mock = DocMockConnection.new
+    GoldLapel.doc_aggregate(mock, "orders", [
+      { "$project" => { "name" => 1, "status" => 1 } }
+    ])
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("SELECT") }
+    refute_nil call
+    assert_includes call[:sql], "id AS _id"
+    assert_includes call[:sql], "data->>'name' AS name"
+    assert_includes call[:sql], "data->>'status' AS status"
+  end
+
+  def test_project_exclude_id
+    mock = DocMockConnection.new
+    GoldLapel.doc_aggregate(mock, "orders", [
+      { "$project" => { "_id" => 0, "name" => 1, "price" => 1 } }
+    ])
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("SELECT") }
+    refute_nil call
+    refute_includes call[:sql], "id AS _id"
+    assert_includes call[:sql], "data->>'name' AS name"
+    assert_includes call[:sql], "data->>'price' AS price"
+  end
+
+  def test_project_rename_via_field_ref
+    mock = DocMockConnection.new
+    GoldLapel.doc_aggregate(mock, "orders", [
+      { "$project" => { "_id" => 0, "customer_name" => "$name", "total" => "$amount" } }
+    ])
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("SELECT") }
+    refute_nil call
+    assert_includes call[:sql], "data->>'name' AS customer_name"
+    assert_includes call[:sql], "data->>'amount' AS total"
+    refute_includes call[:sql], "id AS _id"
+  end
+
+  def test_project_dot_notation
+    mock = DocMockConnection.new
+    GoldLapel.doc_aggregate(mock, "orders", [
+      { "$project" => { "_id" => 0, "city" => "$address.city" } }
+    ])
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("SELECT") }
+    refute_nil call
+    assert_includes call[:sql], "data->'address'->>'city' AS city"
+  end
+
+  def test_project_rejects_invalid_field
+    mock = DocMockConnection.new
+    assert_raises(ArgumentError) do
+      GoldLapel.doc_aggregate(mock, "orders", [
+        { "$project" => { "bad field!" => 1 } }
+      ])
+    end
+  end
+
+  # --- $unwind ---
+
+  def test_unwind_string_syntax
+    mock = DocMockConnection.new
+    GoldLapel.doc_aggregate(mock, "orders", [
+      { "$unwind" => "$tags" }
+    ])
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("SELECT") }
+    refute_nil call
+    assert_includes call[:sql], "CROSS JOIN jsonb_array_elements_text(data->'tags') AS _uw_tags"
+  end
+
+  def test_unwind_hash_syntax
+    mock = DocMockConnection.new
+    GoldLapel.doc_aggregate(mock, "orders", [
+      { "$unwind" => { "path" => "$items" } }
+    ])
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("SELECT") }
+    refute_nil call
+    assert_includes call[:sql], "CROSS JOIN jsonb_array_elements_text(data->'items') AS _uw_items"
+  end
+
+  def test_unwind_with_group
+    mock = DocMockConnection.new
+    GoldLapel.doc_aggregate(mock, "orders", [
+      { "$unwind" => "$tags" },
+      { "$group" => { "_id" => "$tags", "cnt" => { "$count" => true } } }
+    ])
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("SELECT") }
+    refute_nil call
+    assert_includes call[:sql], "_uw_tags AS _id"
+    assert_includes call[:sql], "GROUP BY _uw_tags"
+    assert_includes call[:sql], "CROSS JOIN jsonb_array_elements_text(data->'tags') AS _uw_tags"
+  end
+
+  def test_unwind_rejects_invalid_field
+    mock = DocMockConnection.new
+    assert_raises(ArgumentError) do
+      GoldLapel.doc_aggregate(mock, "orders", [
+        { "$unwind" => "$bad field!" }
+      ])
+    end
+  end
+
+  # --- $lookup ---
+
+  def test_lookup_correlated_subquery
+    mock = DocMockConnection.new
+    GoldLapel.doc_aggregate(mock, "orders", [
+      { "$lookup" => {
+        "from" => "users",
+        "localField" => "user_id",
+        "foreignField" => "uid",
+        "as" => "user_docs"
+      }}
+    ])
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("SELECT") }
+    refute_nil call
+    assert_includes call[:sql], "COALESCE((SELECT json_agg(users.data) FROM users WHERE users.data->>'uid' = data->>'user_id'), '[]'::json) AS user_docs"
+  end
+
+  def test_lookup_rejects_invalid_identifiers
+    mock = DocMockConnection.new
+    assert_raises(ArgumentError) do
+      GoldLapel.doc_aggregate(mock, "orders", [
+        { "$lookup" => {
+          "from" => "bad table!",
+          "localField" => "user_id",
+          "foreignField" => "uid",
+          "as" => "user_docs"
+        }}
+      ])
+    end
+  end
+
+  def test_lookup_with_match
+    mock = DocMockConnection.new
+    GoldLapel.doc_aggregate(mock, "orders", [
+      { "$match" => { "status" => "active" } },
+      { "$lookup" => {
+        "from" => "products",
+        "localField" => "product_id",
+        "foreignField" => "pid",
+        "as" => "product_info"
+      }}
+    ])
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("SELECT") }
+    refute_nil call
+    assert_includes call[:sql], "WHERE data @> $1::jsonb"
+    assert_includes call[:sql], "COALESCE((SELECT json_agg(products.data) FROM products WHERE products.data->>'pid' = data->>'product_id'), '[]'::json) AS product_info"
+    assert_equal [JSON.generate({ "status" => "active" })], call[:params]
+  end
+
+  def test_unwind_group_sort_pipeline
+    mock = DocMockConnection.new
+    GoldLapel.doc_aggregate(mock, "orders", [
+      { "$match" => { "status" => "complete" } },
+      { "$unwind" => "$items" },
+      { "$group" => {
+        "_id" => "$items",
+        "total" => { "$sum" => "$amount" },
+        "cnt" => { "$count" => true }
+      }},
+      { "$sort" => { "total" => -1 } },
+      { "$limit" => 5 }
+    ])
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("SELECT") }
+    refute_nil call
+    assert_includes call[:sql], "_uw_items AS _id"
+    assert_includes call[:sql], "CROSS JOIN jsonb_array_elements_text(data->'items') AS _uw_items"
+    assert_includes call[:sql], "GROUP BY _uw_items"
+    assert_includes call[:sql], "WHERE data @> $1::jsonb"
+    assert_includes call[:sql], "ORDER BY total DESC"
+    assert_includes call[:sql], "LIMIT $2"
+    assert_equal [JSON.generate({ "status" => "complete" }), 5], call[:params]
   end
 end

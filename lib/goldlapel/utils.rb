@@ -883,6 +883,16 @@ module GoldLapel
   }.freeze
   private_constant :DOC_ACCUMULATORS
 
+  def self._resolve_field_ref(ref, unwind_map = {})
+    field = ref.to_s.sub(/^\$/, "")
+    unless field.match?(SORT_KEY_PATTERN)
+      raise ArgumentError, "Invalid field name: #{field}"
+    end
+    return unwind_map[field] if unwind_map.key?(field)
+    _field_path(field)
+  end
+  private_class_method :_resolve_field_ref
+
   def self.doc_aggregate(conn, collection, pipeline)
     _validate_identifier(collection)
     raise ArgumentError, "pipeline must be an array" unless pipeline.is_a?(Array)
@@ -897,6 +907,9 @@ module GoldLapel
     sort_stage = nil
     limit_val = nil
     skip_val = nil
+    project_stage = nil
+    unwind_stage = nil
+    lookup_stages = []
 
     pipeline.each do |stage|
       raise ArgumentError, "pipeline stage must be a hash" unless stage.is_a?(Hash)
@@ -916,12 +929,115 @@ module GoldLapel
         limit_val = val
       when "$skip"
         skip_val = val
+      when "$project"
+        project_stage = val
+      when "$unwind"
+        unwind_stage = val
+      when "$lookup"
+        lookup_stages << val
       else
         raise ArgumentError, "Unsupported pipeline stage: #{key}"
       end
     end
 
-    if group_stage
+    # Parse $unwind
+    unwind_field = nil
+    unwind_alias = nil
+    unwind_map = {}
+    if unwind_stage
+      if unwind_stage.is_a?(String)
+        unwind_field = unwind_stage.sub(/^\$/, "")
+      elsif unwind_stage.is_a?(Hash)
+        path = (unwind_stage["path"] || unwind_stage[:path]).to_s
+        unwind_field = path.sub(/^\$/, "")
+      else
+        raise ArgumentError, "$unwind must be a string or hash with path"
+      end
+      unless unwind_field.match?(SORT_KEY_PATTERN)
+        raise ArgumentError, "Invalid field name: #{unwind_field}"
+      end
+      unwind_alias = "_uw_#{unwind_field}"
+      unwind_map[unwind_field] = unwind_alias
+    end
+
+    # Build $lookup subqueries
+    lookup_sqls = []
+    lookup_stages.each do |lk|
+      from = (lk["from"] || lk[:from]).to_s
+      local_field = (lk["localField"] || lk[:localField]).to_s
+      foreign_field = (lk["foreignField"] || lk[:foreignField]).to_s
+      as_field = (lk["as"] || lk[:as]).to_s
+
+      _validate_identifier(from)
+      raise ArgumentError, "Invalid field name: #{local_field}" unless local_field.match?(SORT_KEY_PATTERN)
+      raise ArgumentError, "Invalid field name: #{foreign_field}" unless foreign_field.match?(SORT_KEY_PATTERN)
+      _validate_identifier(as_field)
+
+      local_expr = _field_path(local_field)
+      foreign_expr = "#{from}.data->>'#{foreign_field}'"
+
+      lookup_sqls << "COALESCE((SELECT json_agg(#{from}.data) " \
+                     "FROM #{from} " \
+                     "WHERE #{foreign_expr} = #{local_expr}), '[]'::json) AS #{as_field}"
+    end
+
+    if project_stage
+      # $project stage: select specific fields
+      select_parts = []
+      project_stage.each do |key, val|
+        unless key.to_s.match?(SORT_KEY_PATTERN)
+          raise ArgumentError, "Invalid field name: #{key}"
+        end
+        if val.is_a?(String) && val.start_with?("$")
+          # Rename: { "newName" => "$oldField" }
+          select_parts << "#{_resolve_field_ref(val, unwind_map)} AS #{key}"
+        elsif val == 0 || val == false
+          next # exclude field (handled by omission)
+        else
+          # Include field: val == 1 or val == true
+          if key.to_s == "_id"
+            select_parts << "id AS _id"
+          else
+            select_parts << "#{_resolve_field_ref("$#{key}", unwind_map)} AS #{key}"
+          end
+        end
+      end
+
+      # Check if _id is explicitly excluded
+      if project_stage.key?("_id") && (project_stage["_id"] == 0 || project_stage["_id"] == false)
+        # _id excluded, do nothing
+      elsif !project_stage.key?("_id")
+        # _id included by default
+        select_parts.unshift("id AS _id")
+      end
+
+      all_parts = select_parts + lookup_sqls
+      sql = "SELECT #{all_parts.join(', ')} FROM #{collection}"
+
+      if unwind_field
+        sql += " CROSS JOIN jsonb_array_elements_text(data->'#{unwind_field}') AS #{unwind_alias}"
+      end
+
+      if match_stage && !match_stage.empty?
+        where_clause, filter_params, idx = _build_filter(match_stage, idx)
+        unless where_clause.empty?
+          sql += " WHERE #{where_clause}"
+          params.concat(filter_params)
+        end
+      end
+
+      if sort_stage
+        clauses = sort_stage.map do |skey, dir|
+          unless skey.to_s.match?(SORT_KEY_PATTERN)
+            raise ArgumentError, "Invalid sort key: #{skey}"
+          end
+          order = dir.to_i < 0 ? "DESC" : "ASC"
+          "#{skey} #{order}"
+        end
+        sql += " ORDER BY #{clauses.join(', ')}"
+      end
+
+    elsif group_stage
       select_parts = []
       group_by_exprs = []
       group_id = group_stage["_id"]
@@ -934,21 +1050,15 @@ module GoldLapel
           unless label.to_s.match?(SORT_KEY_PATTERN)
             raise ArgumentError, "Invalid field name: #{label}"
           end
-          field = ref.to_s.sub(/^\$/, "")
-          unless field.match?(SORT_KEY_PATTERN)
-            raise ArgumentError, "Invalid field name: #{field}"
-          end
-          jbo_args << "'#{label}', data->>'#{field}'"
-          group_by_exprs << "data->>'#{field}'"
+          resolved = _resolve_field_ref(ref, unwind_map)
+          jbo_args << "'#{label}', #{resolved}"
+          group_by_exprs << resolved
         end
         select_parts << "json_build_object(#{jbo_args.join(', ')}) AS _id"
       else
-        field = group_id.to_s.sub(/^\$/, "")
-        unless field.match?(SORT_KEY_PATTERN)
-          raise ArgumentError, "Invalid field name: #{field}"
-        end
-        select_parts << "data->>'#{field}' AS _id"
-        group_by_exprs << "data->>'#{field}'"
+        resolved = _resolve_field_ref(group_id, unwind_map)
+        select_parts << "#{resolved} AS _id"
+        group_by_exprs << resolved
       end
 
       group_stage.each do |alias_name, spec|
@@ -967,27 +1077,22 @@ module GoldLapel
         if op == "$count"
           select_parts << "#{DOC_ACCUMULATORS[op]}::numeric AS #{alias_name}"
         elsif op == "$push"
-          field_ref = spec.values[0].to_s.sub(/^\$/, "")
-          unless field_ref.match?(SORT_KEY_PATTERN)
-            raise ArgumentError, "Invalid field name: #{field_ref}"
-          end
-          select_parts << "array_agg(data->>'#{field_ref}') AS #{alias_name}"
+          resolved = _resolve_field_ref(spec.values[0], unwind_map)
+          select_parts << "array_agg(#{resolved}) AS #{alias_name}"
         elsif op == "$addToSet"
-          field_ref = spec.values[0].to_s.sub(/^\$/, "")
-          unless field_ref.match?(SORT_KEY_PATTERN)
-            raise ArgumentError, "Invalid field name: #{field_ref}"
-          end
-          select_parts << "array_agg(DISTINCT data->>'#{field_ref}') AS #{alias_name}"
+          resolved = _resolve_field_ref(spec.values[0], unwind_map)
+          select_parts << "array_agg(DISTINCT #{resolved}) AS #{alias_name}"
         else
-          field_ref = spec.values[0].to_s.sub(/^\$/, "")
-          unless field_ref.match?(SORT_KEY_PATTERN)
-            raise ArgumentError, "Invalid field name: #{field_ref}"
-          end
-          select_parts << "#{DOC_ACCUMULATORS[op]}((data->>'#{field_ref}')::numeric)::numeric AS #{alias_name}"
+          resolved = _resolve_field_ref(spec.values[0], unwind_map)
+          select_parts << "#{DOC_ACCUMULATORS[op]}((#{resolved})::numeric)::numeric AS #{alias_name}"
         end
       end
 
       sql = "SELECT #{select_parts.join(', ')} FROM #{collection}"
+
+      if unwind_field
+        sql += " CROSS JOIN jsonb_array_elements_text(data->'#{unwind_field}') AS #{unwind_alias}"
+      end
 
       if match_stage && !match_stage.empty?
         where_clause, filter_params, idx = _build_filter(match_stage, idx)
@@ -1012,7 +1117,13 @@ module GoldLapel
         sql += " ORDER BY #{clauses.join(', ')}"
       end
     else
-      sql = "SELECT id, data, created_at FROM #{collection}"
+      base_cols = ["id", "data", "created_at"]
+      all_parts = base_cols + lookup_sqls
+      sql = "SELECT #{all_parts.join(', ')} FROM #{collection}"
+
+      if unwind_field
+        sql += " CROSS JOIN jsonb_array_elements_text(data->'#{unwind_field}') AS #{unwind_alias}"
+      end
 
       if match_stage && !match_stage.empty?
         where_clause, filter_params, idx = _build_filter(match_stage, idx)
