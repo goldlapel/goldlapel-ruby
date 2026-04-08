@@ -608,6 +608,9 @@ module GoldLapel
   }.freeze
   private_constant :COMPARISON_OPS
 
+  LOGICAL_OPS = %w[$or $and $not].freeze
+  private_constant :LOGICAL_OPS
+
   def self._field_path(key)
     parts = key.to_s.split(".")
     parts.each do |part|
@@ -650,7 +653,29 @@ module GoldLapel
     idx = start_param
 
     filter.each do |key, value|
-      if value.is_a?(Hash) && value.keys.any? { |k| k.to_s.start_with?("$") }
+      key_s = key.to_s
+      if LOGICAL_OPS.include?(key_s)
+        if key_s == "$not"
+          raise ArgumentError, "$not value must be a Hash" unless value.is_a?(Hash)
+          sc, sp, idx = _build_filter(value, idx)
+          if sc && !sc.empty?
+            clauses << "NOT (#{sc})"
+            params.concat(sp)
+          end
+        else
+          raise ArgumentError, "#{key_s} value must be a non-empty array" unless value.is_a?(Array) && !value.empty?
+          joiner = key_s == "$or" ? " OR " : " AND "
+          sub_clauses = []
+          value.each do |sub_filter|
+            sc, sp, idx = _build_filter(sub_filter, idx)
+            if sc && !sc.empty?
+              sub_clauses << sc
+              params.concat(sp)
+            end
+          end
+          clauses << "(#{sub_clauses.join(joiner)})" unless sub_clauses.empty?
+        end
+      elsif value.is_a?(Hash) && value.keys.any? { |k| k.to_s.start_with?("$") }
         field_expr = _field_path(key)
         value.each do |op, operand|
           op_s = op.to_s
@@ -698,13 +723,204 @@ module GoldLapel
     end
 
     if !containment.empty?
-      clauses.unshift("data @> $#{idx}::jsonb")
+      clauses << "data @> $#{idx}::jsonb"
       params << JSON.generate(_expand_dot_keys(containment))
       idx += 1
     end
     [clauses.join(" AND "), params, idx]
   end
   private_class_method :_build_filter
+
+  def self._field_path_json(key)
+    parts = key.to_s.split(".")
+    parts.each do |part|
+      unless part.match?(FIELD_PART_PATTERN)
+        raise ArgumentError, "Invalid field key: #{key}"
+      end
+    end
+    chain = "data"
+    parts.each { |p| chain += "->'#{p}'" }
+    chain
+  end
+  private_class_method :_field_path_json
+
+  def self._jsonb_path(key)
+    parts = key.to_s.split(".")
+    parts.each do |part|
+      unless part.match?(FIELD_PART_PATTERN)
+        raise ArgumentError, "Invalid field key: #{key}"
+      end
+    end
+    "{" + parts.join(",") + "}"
+  end
+  private_class_method :_jsonb_path
+
+  def self._to_jsonb_expr(value, idx)
+    if value == true || value == false
+      ["to_jsonb($#{idx}::boolean)", value, idx + 1]
+    elsif value.is_a?(Numeric)
+      ["to_jsonb($#{idx}::numeric)", value, idx + 1]
+    elsif value.is_a?(String)
+      ["to_jsonb($#{idx}::text)", value, idx + 1]
+    else
+      ["$#{idx}::jsonb", JSON.generate(value), idx + 1]
+    end
+  end
+  private_class_method :_to_jsonb_expr
+
+  def self._build_update(update, start_param = 1)
+    idx = start_param
+    unless update.any? { |k, _| k.to_s.start_with?("$") }
+      return ["data || $#{idx}::jsonb", [JSON.generate(update)], idx + 1]
+    end
+
+    expr = "data"
+    params = []
+
+    if update.key?("$set") || update.key?(:$set)
+      set_val = update["$set"] || update[:$set]
+      expr = "(#{expr} || $#{idx}::jsonb)"
+      params << JSON.generate(set_val)
+      idx += 1
+    end
+
+    if update.key?("$unset") || update.key?(:$unset)
+      unset_val = update["$unset"] || update[:$unset]
+      unset_val.each do |field, _|
+        field_s = field.to_s
+        parts = field_s.split(".")
+        parts.each do |part|
+          unless part.match?(FIELD_PART_PATTERN)
+            raise ArgumentError, "Invalid field key: #{field_s}"
+          end
+        end
+        if parts.length == 1
+          expr = "(#{expr} - $#{idx})"
+          params << field_s
+          idx += 1
+        else
+          path = "{" + parts.join(",") + "}"
+          expr = "(#{expr} #- $#{idx}::text[])"
+          params << path
+          idx += 1
+        end
+      end
+    end
+
+    if update.key?("$inc") || update.key?(:$inc)
+      inc_val = update["$inc"] || update[:$inc]
+      inc_val.each do |field, amount|
+        field_s = field.to_s
+        jp = _jsonb_path(field_s)
+        fp = _field_path(field_s)
+        expr = "jsonb_set(#{expr}, $#{idx}::text[], to_jsonb(COALESCE((#{fp})::numeric, 0) + $#{idx + 1}))"
+        params << jp
+        params << amount
+        idx += 2
+      end
+    end
+
+    if update.key?("$mul") || update.key?(:$mul)
+      mul_val = update["$mul"] || update[:$mul]
+      mul_val.each do |field, factor|
+        field_s = field.to_s
+        jp = _jsonb_path(field_s)
+        fp = _field_path(field_s)
+        expr = "jsonb_set(#{expr}, $#{idx}::text[], to_jsonb(COALESCE((#{fp})::numeric, 0) * $#{idx + 1}))"
+        params << jp
+        params << factor
+        idx += 2
+      end
+    end
+
+    if update.key?("$rename") || update.key?(:$rename)
+      rename_val = update["$rename"] || update[:$rename]
+      rename_val.each do |old_name, new_name|
+        old_s = old_name.to_s
+        new_s = new_name.to_s
+        old_s.split(".").each do |part|
+          unless part.match?(FIELD_PART_PATTERN)
+            raise ArgumentError, "Invalid field key: #{old_s}"
+          end
+        end
+        new_s.split(".").each do |part|
+          unless part.match?(FIELD_PART_PATTERN)
+            raise ArgumentError, "Invalid field key: #{new_s}"
+          end
+        end
+        old_json = _field_path_json(old_s)
+        new_jp = _jsonb_path(new_s)
+        if old_s.include?(".")
+          old_path = "{" + old_s.split(".").join(",") + "}"
+          expr = "jsonb_set((#{expr} #- $#{idx}::text[]), $#{idx + 1}::text[], #{old_json})"
+          params << old_path
+          params << new_jp
+          idx += 2
+        else
+          expr = "jsonb_set((#{expr} - $#{idx}), $#{idx + 1}::text[], #{old_json})"
+          params << old_s
+          params << new_jp
+          idx += 2
+        end
+      end
+    end
+
+    if update.key?("$push") || update.key?(:$push)
+      push_val = update["$push"] || update[:$push]
+      push_val.each do |field, value|
+        field_s = field.to_s
+        jp = _jsonb_path(field_s)
+        fj = _field_path_json(field_s)
+        jp_idx = idx
+        params << jp
+        idx += 1
+        val_expr, val_param, idx = _to_jsonb_expr(value, idx)
+        params << val_param
+        expr = "jsonb_set(#{expr}, $#{jp_idx}::text[], COALESCE(#{fj}, '[]'::jsonb) || #{val_expr})"
+      end
+    end
+
+    if update.key?("$pull") || update.key?(:$pull)
+      pull_val = update["$pull"] || update[:$pull]
+      pull_val.each do |field, value|
+        field_s = field.to_s
+        jp = _jsonb_path(field_s)
+        fj = _field_path_json(field_s)
+        jp_idx = idx
+        params << jp
+        idx += 1
+        val_expr, val_param, idx = _to_jsonb_expr(value, idx)
+        params << val_param
+        expr = "jsonb_set(#{expr}, $#{jp_idx}::text[], " \
+               "COALESCE((SELECT jsonb_agg(elem) FROM jsonb_array_elements(#{fj}) AS elem " \
+               "WHERE elem != #{val_expr}), '[]'::jsonb))"
+      end
+    end
+
+    if update.key?("$addToSet") || update.key?(:$addToSet)
+      ats_val = update["$addToSet"] || update[:$addToSet]
+      ats_val.each do |field, value|
+        field_s = field.to_s
+        jp = _jsonb_path(field_s)
+        fj = _field_path_json(field_s)
+        jp_idx = idx
+        params << jp
+        idx += 1
+        val_expr, val_param, idx = _to_jsonb_expr(value, idx)
+        params << val_param
+        # $addToSet uses the value param twice (for @> check and for append)
+        val_expr2, _, idx = _to_jsonb_expr(value, idx)
+        params << val_param
+        expr = "jsonb_set(#{expr}, $#{jp_idx}::text[], " \
+               "CASE WHEN COALESCE(#{fj}, '[]'::jsonb) @> #{val_expr} " \
+               "THEN #{fj} " \
+               "ELSE COALESCE(#{fj}, '[]'::jsonb) || #{val_expr2} END)"
+      end
+    end
+
+    [expr, params, idx]
+  end
+  private_class_method :_build_update
 
   def self.doc_insert(conn, collection, document)
     _validate_identifier(collection)
@@ -799,8 +1015,9 @@ module GoldLapel
     _validate_identifier(collection)
     raw = _raw_conn(conn)
     where_clause, filter_params, idx = _build_filter(filter, 1)
-    sql = "UPDATE #{collection} SET data = data || $#{idx}::jsonb"
-    params = filter_params + [JSON.generate(update)]
+    update_expr, update_params, _idx = _build_update(update, idx)
+    sql = "UPDATE #{collection} SET data = #{update_expr}"
+    params = filter_params + update_params
     unless where_clause.empty?
       sql += " WHERE #{where_clause}"
     end
@@ -812,13 +1029,14 @@ module GoldLapel
     _validate_identifier(collection)
     raw = _raw_conn(conn)
     where_clause, filter_params, idx = _build_filter(filter, 1)
+    update_expr, update_params, _idx = _build_update(update, idx)
     cte_where = where_clause.empty? ? "" : " WHERE #{where_clause}"
     sql = "WITH target AS (" \
           "SELECT id FROM #{collection}#{cte_where} " \
           "LIMIT 1" \
-          ") UPDATE #{collection} SET data = data || $#{idx}::jsonb " \
+          ") UPDATE #{collection} SET data = #{update_expr} " \
           "FROM target WHERE #{collection}.id = target.id"
-    params = filter_params + [JSON.generate(update)]
+    params = filter_params + update_params
     result = raw.exec_params(sql, params)
     result.cmd_tuples
   end
@@ -861,6 +1079,60 @@ module GoldLapel
       result = raw.exec_params(sql, filter_params)
     end
     result[0]["count"].to_i
+  end
+
+  def self.doc_find_one_and_update(conn, collection, filter, update)
+    _validate_identifier(collection)
+    raw = _raw_conn(conn)
+    where_clause, filter_params, idx = _build_filter(filter, 1)
+    update_expr, update_params, _idx = _build_update(update, idx)
+    cte_where = where_clause.empty? ? "" : " WHERE #{where_clause}"
+    sql = "WITH target AS (" \
+          "SELECT id FROM #{collection}#{cte_where} " \
+          "LIMIT 1" \
+          ") UPDATE #{collection} SET data = #{update_expr} " \
+          "FROM target WHERE #{collection}.id = target.id " \
+          "RETURNING #{collection}.id, #{collection}.data, #{collection}.created_at"
+    params = filter_params + update_params
+    result = raw.exec_params(sql, params)
+    return nil if result.ntuples.zero?
+    row = result[0]
+    { "id" => row["id"].to_i, "data" => JSON.parse(row["data"]), "created_at" => row["created_at"] }
+  end
+
+  def self.doc_find_one_and_delete(conn, collection, filter)
+    _validate_identifier(collection)
+    raw = _raw_conn(conn)
+    where_clause, filter_params, _idx = _build_filter(filter, 1)
+    cte_where = where_clause.empty? ? "" : " WHERE #{where_clause}"
+    sql = "WITH target AS (" \
+          "SELECT id FROM #{collection}#{cte_where} " \
+          "LIMIT 1" \
+          ") DELETE FROM #{collection} " \
+          "USING target WHERE #{collection}.id = target.id " \
+          "RETURNING #{collection}.id, #{collection}.data, #{collection}.created_at"
+    result = raw.exec_params(sql, filter_params)
+    return nil if result.ntuples.zero?
+    row = result[0]
+    { "id" => row["id"].to_i, "data" => JSON.parse(row["data"]), "created_at" => row["created_at"] }
+  end
+
+  def self.doc_distinct(conn, collection, field, filter: nil)
+    _validate_identifier(collection)
+    raw = _raw_conn(conn)
+    field_expr = _field_path(field)
+    sql = "SELECT DISTINCT #{field_expr} AS val FROM #{collection}"
+    params = []
+    idx = 1
+    where_parts = ["#{field_expr} IS NOT NULL"]
+    where_clause, filter_params, _idx = _build_filter(filter, idx)
+    if !where_clause.empty?
+      where_parts << where_clause
+      params.concat(filter_params)
+    end
+    sql += " WHERE #{where_parts.join(' AND ')}"
+    result = raw.exec_params(sql, params)
+    result.map { |row| row["val"] }
   end
 
   def self.doc_create_index(conn, collection, keys: nil)
