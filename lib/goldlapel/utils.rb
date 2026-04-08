@@ -873,11 +873,13 @@ module GoldLapel
   end
 
   DOC_ACCUMULATORS = {
-    "$count" => "COUNT(*)",
-    "$sum"   => "SUM",
-    "$avg"   => "AVG",
-    "$min"   => "MIN",
-    "$max"   => "MAX"
+    "$count"   => "COUNT(*)",
+    "$sum"     => "SUM",
+    "$avg"     => "AVG",
+    "$min"     => "MIN",
+    "$max"     => "MAX",
+    "$push"    => "array_agg",
+    "$addToSet" => "array_agg"
   }.freeze
   private_constant :DOC_ACCUMULATORS
 
@@ -921,16 +923,32 @@ module GoldLapel
 
     if group_stage
       select_parts = []
+      group_by_exprs = []
       group_id = group_stage["_id"]
 
       if group_id.nil?
         select_parts << "NULL AS _id"
+      elsif group_id.is_a?(Hash)
+        jbo_args = []
+        group_id.each do |label, ref|
+          unless label.to_s.match?(SORT_KEY_PATTERN)
+            raise ArgumentError, "Invalid field name: #{label}"
+          end
+          field = ref.to_s.sub(/^\$/, "")
+          unless field.match?(SORT_KEY_PATTERN)
+            raise ArgumentError, "Invalid field name: #{field}"
+          end
+          jbo_args << "'#{label}', data->>'#{field}'"
+          group_by_exprs << "data->>'#{field}'"
+        end
+        select_parts << "json_build_object(#{jbo_args.join(', ')}) AS _id"
       else
         field = group_id.to_s.sub(/^\$/, "")
         unless field.match?(SORT_KEY_PATTERN)
           raise ArgumentError, "Invalid field name: #{field}"
         end
         select_parts << "data->>'#{field}' AS _id"
+        group_by_exprs << "data->>'#{field}'"
       end
 
       group_stage.each do |alias_name, spec|
@@ -948,6 +966,18 @@ module GoldLapel
 
         if op == "$count"
           select_parts << "#{DOC_ACCUMULATORS[op]}::numeric AS #{alias_name}"
+        elsif op == "$push"
+          field_ref = spec.values[0].to_s.sub(/^\$/, "")
+          unless field_ref.match?(SORT_KEY_PATTERN)
+            raise ArgumentError, "Invalid field name: #{field_ref}"
+          end
+          select_parts << "array_agg(data->>'#{field_ref}') AS #{alias_name}"
+        elsif op == "$addToSet"
+          field_ref = spec.values[0].to_s.sub(/^\$/, "")
+          unless field_ref.match?(SORT_KEY_PATTERN)
+            raise ArgumentError, "Invalid field name: #{field_ref}"
+          end
+          select_parts << "array_agg(DISTINCT data->>'#{field_ref}') AS #{alias_name}"
         else
           field_ref = spec.values[0].to_s.sub(/^\$/, "")
           unless field_ref.match?(SORT_KEY_PATTERN)
@@ -967,10 +997,8 @@ module GoldLapel
         end
       end
 
-      if group_id.nil?
-        # no GROUP BY for null _id
-      else
-        sql += " GROUP BY data->>'#{group_id.to_s.sub(/^\$/, "")}'"
+      unless group_by_exprs.empty?
+        sql += " GROUP BY #{group_by_exprs.join(', ')}"
       end
 
       if sort_stage

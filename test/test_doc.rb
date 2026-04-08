@@ -769,4 +769,130 @@ class TestDocAggregate < Minitest::Test
     assert_includes call[:sql], "MIN((data->>'price')::numeric)::numeric AS lo"
     assert_includes call[:sql], "MAX((data->>'price')::numeric)::numeric AS hi"
   end
+
+  # --- composite _id ---
+
+  def test_composite_id_json_build_object
+    mock = DocMockConnection.new
+    GoldLapel.doc_aggregate(mock, "orders", [
+      { "$group" => {
+        "_id" => { "cat" => "$category", "region" => "$region" },
+        "total" => { "$sum" => "$amount" }
+      }}
+    ])
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("SELECT") }
+    refute_nil call
+    assert_includes call[:sql], "json_build_object('cat', data->>'category', 'region', data->>'region') AS _id"
+    assert_includes call[:sql], "SUM((data->>'amount')::numeric)::numeric AS total"
+    assert_includes call[:sql], "GROUP BY data->>'category', data->>'region'"
+  end
+
+  def test_composite_id_with_match_and_sort
+    mock = DocMockConnection.new
+    GoldLapel.doc_aggregate(mock, "orders", [
+      { "$match" => { "status" => "complete" } },
+      { "$group" => {
+        "_id" => { "year" => "$year", "month" => "$month" },
+        "revenue" => { "$sum" => "$amount" }
+      }},
+      { "$sort" => { "revenue" => -1 } },
+      { "$limit" => 5 }
+    ])
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("SELECT") }
+    refute_nil call
+    assert_includes call[:sql], "json_build_object('year', data->>'year', 'month', data->>'month') AS _id"
+    assert_includes call[:sql], "GROUP BY data->>'year', data->>'month'"
+    assert_includes call[:sql], "WHERE data @> $1::jsonb"
+    assert_includes call[:sql], "ORDER BY revenue DESC"
+    assert_includes call[:sql], "LIMIT $2"
+    assert_equal [JSON.generate({ "status" => "complete" }), 5], call[:params]
+  end
+
+  def test_composite_id_rejects_invalid_label
+    mock = DocMockConnection.new
+    assert_raises(ArgumentError) do
+      GoldLapel.doc_aggregate(mock, "orders", [
+        { "$group" => {
+          "_id" => { "bad label!" => "$category" },
+          "total" => { "$sum" => "$amount" }
+        }}
+      ])
+    end
+  end
+
+  def test_composite_id_rejects_invalid_field_ref
+    mock = DocMockConnection.new
+    assert_raises(ArgumentError) do
+      GoldLapel.doc_aggregate(mock, "orders", [
+        { "$group" => {
+          "_id" => { "cat" => "$bad field!" },
+          "total" => { "$sum" => "$amount" }
+        }}
+      ])
+    end
+  end
+
+  # --- $push / $addToSet accumulators ---
+
+  def test_push_accumulator
+    mock = DocMockConnection.new
+    GoldLapel.doc_aggregate(mock, "orders", [
+      { "$group" => {
+        "_id" => "$category",
+        "names" => { "$push" => "$name" }
+      }}
+    ])
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("SELECT") }
+    refute_nil call
+    assert_includes call[:sql], "array_agg(data->>'name') AS names"
+    assert_includes call[:sql], "GROUP BY data->>'category'"
+  end
+
+  def test_add_to_set_accumulator
+    mock = DocMockConnection.new
+    GoldLapel.doc_aggregate(mock, "orders", [
+      { "$group" => {
+        "_id" => "$category",
+        "unique_regions" => { "$addToSet" => "$region" }
+      }}
+    ])
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("SELECT") }
+    refute_nil call
+    assert_includes call[:sql], "array_agg(DISTINCT data->>'region') AS unique_regions"
+    assert_includes call[:sql], "GROUP BY data->>'category'"
+  end
+
+  def test_push_with_composite_id
+    mock = DocMockConnection.new
+    GoldLapel.doc_aggregate(mock, "orders", [
+      { "$group" => {
+        "_id" => { "cat" => "$category", "region" => "$region" },
+        "items" => { "$push" => "$name" },
+        "total" => { "$sum" => "$amount" }
+      }}
+    ])
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("SELECT") }
+    refute_nil call
+    assert_includes call[:sql], "json_build_object('cat', data->>'category', 'region', data->>'region') AS _id"
+    assert_includes call[:sql], "array_agg(data->>'name') AS items"
+    assert_includes call[:sql], "SUM((data->>'amount')::numeric)::numeric AS total"
+    assert_includes call[:sql], "GROUP BY data->>'category', data->>'region'"
+  end
+
+  def test_push_rejects_invalid_field
+    mock = DocMockConnection.new
+    assert_raises(ArgumentError) do
+      GoldLapel.doc_aggregate(mock, "orders", [
+        { "$group" => {
+          "_id" => "$category",
+          "items" => { "$push" => "$bad field!" }
+        }}
+      ])
+    end
+  end
 end
