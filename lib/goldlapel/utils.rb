@@ -596,6 +596,190 @@ module GoldLapel
     raw.exec("CREATE TEXT SEARCH CONFIGURATION #{name} (COPY = #{copy_from})")
   end
 
+  SORT_KEY_PATTERN = /\A[a-zA-Z_][a-zA-Z0-9_.]*\z/
+  private_constant :SORT_KEY_PATTERN
+
+  def self.doc_insert(conn, collection, document)
+    _validate_identifier(collection)
+    raw = _raw_conn(conn)
+    raw.exec("CREATE TABLE IF NOT EXISTS #{collection} (" \
+             "id BIGSERIAL PRIMARY KEY, " \
+             "data JSONB NOT NULL, " \
+             "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
+    result = raw.exec_params(
+      "INSERT INTO #{collection} (data) VALUES ($1::jsonb) " \
+      "RETURNING id, data, created_at",
+      [JSON.generate(document)]
+    )
+    row = result[0]
+    { "id" => row["id"].to_i, "data" => JSON.parse(row["data"]), "created_at" => row["created_at"] }
+  end
+
+  def self.doc_insert_many(conn, collection, documents)
+    _validate_identifier(collection)
+    raise ArgumentError, "documents must be a non-empty array" if !documents.is_a?(Array) || documents.empty?
+    raw = _raw_conn(conn)
+    raw.exec("CREATE TABLE IF NOT EXISTS #{collection} (" \
+             "id BIGSERIAL PRIMARY KEY, " \
+             "data JSONB NOT NULL, " \
+             "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
+    placeholders = documents.each_with_index.map { |_, i| "($#{i + 1}::jsonb)" }.join(", ")
+    params = documents.map { |doc| JSON.generate(doc) }
+    result = raw.exec_params(
+      "INSERT INTO #{collection} (data) VALUES #{placeholders} " \
+      "RETURNING id, data, created_at",
+      params
+    )
+    result.map do |row|
+      { "id" => row["id"].to_i, "data" => JSON.parse(row["data"]), "created_at" => row["created_at"] }
+    end
+  end
+
+  def self.doc_find(conn, collection, filter: nil, sort: nil, limit: nil, skip: nil)
+    _validate_identifier(collection)
+    raw = _raw_conn(conn)
+    sql = "SELECT id, data, created_at FROM #{collection}"
+    params = []
+    idx = 1
+    if filter && !filter.empty?
+      sql += " WHERE data @> $#{idx}::jsonb"
+      params << JSON.generate(filter)
+      idx += 1
+    end
+    if sort
+      clauses = sort.map do |key, dir|
+        unless key.to_s.match?(SORT_KEY_PATTERN)
+          raise ArgumentError, "Invalid sort key: #{key}"
+        end
+        order = dir.to_i < 0 ? "DESC" : "ASC"
+        "data->>'#{key}' #{order}"
+      end
+      sql += " ORDER BY #{clauses.join(', ')}"
+    end
+    if limit
+      sql += " LIMIT $#{idx}"
+      params << limit
+      idx += 1
+    end
+    if skip
+      sql += " OFFSET $#{idx}"
+      params << skip
+    end
+    result = raw.exec_params(sql, params)
+    result.map do |row|
+      { "id" => row["id"].to_i, "data" => JSON.parse(row["data"]), "created_at" => row["created_at"] }
+    end
+  end
+
+  def self.doc_find_one(conn, collection, filter: nil)
+    _validate_identifier(collection)
+    raw = _raw_conn(conn)
+    if filter && !filter.empty?
+      result = raw.exec_params(
+        "SELECT id, data, created_at FROM #{collection} " \
+        "WHERE data @> $1::jsonb LIMIT 1",
+        [JSON.generate(filter)]
+      )
+    else
+      result = raw.exec_params(
+        "SELECT id, data, created_at FROM #{collection} LIMIT 1",
+        []
+      )
+    end
+    return nil if result.ntuples.zero?
+    row = result[0]
+    { "id" => row["id"].to_i, "data" => JSON.parse(row["data"]), "created_at" => row["created_at"] }
+  end
+
+  def self.doc_update(conn, collection, filter, update)
+    _validate_identifier(collection)
+    raw = _raw_conn(conn)
+    result = raw.exec_params(
+      "UPDATE #{collection} SET data = data || $2::jsonb " \
+      "WHERE data @> $1::jsonb",
+      [JSON.generate(filter), JSON.generate(update)]
+    )
+    result.cmd_tuples
+  end
+
+  def self.doc_update_one(conn, collection, filter, update)
+    _validate_identifier(collection)
+    raw = _raw_conn(conn)
+    result = raw.exec_params(
+      "WITH target AS (" \
+        "SELECT id FROM #{collection} " \
+        "WHERE data @> $1::jsonb " \
+        "LIMIT 1" \
+      ") UPDATE #{collection} SET data = data || $2::jsonb " \
+      "FROM target WHERE #{collection}.id = target.id",
+      [JSON.generate(filter), JSON.generate(update)]
+    )
+    result.cmd_tuples
+  end
+
+  def self.doc_delete(conn, collection, filter)
+    _validate_identifier(collection)
+    raw = _raw_conn(conn)
+    result = raw.exec_params(
+      "DELETE FROM #{collection} WHERE data @> $1::jsonb",
+      [JSON.generate(filter)]
+    )
+    result.cmd_tuples
+  end
+
+  def self.doc_delete_one(conn, collection, filter)
+    _validate_identifier(collection)
+    raw = _raw_conn(conn)
+    result = raw.exec_params(
+      "WITH target AS (" \
+        "SELECT id FROM #{collection} " \
+        "WHERE data @> $1::jsonb " \
+        "LIMIT 1" \
+      ") DELETE FROM #{collection} " \
+      "USING target WHERE #{collection}.id = target.id",
+      [JSON.generate(filter)]
+    )
+    result.cmd_tuples
+  end
+
+  def self.doc_count(conn, collection, filter: nil)
+    _validate_identifier(collection)
+    raw = _raw_conn(conn)
+    if filter && !filter.empty?
+      result = raw.exec_params(
+        "SELECT COUNT(*) FROM #{collection} WHERE data @> $1::jsonb",
+        [JSON.generate(filter)]
+      )
+    else
+      result = raw.exec("SELECT COUNT(*) FROM #{collection}")
+    end
+    result[0]["count"].to_i
+  end
+
+  def self.doc_create_index(conn, collection, keys: nil)
+    _validate_identifier(collection)
+    raw = _raw_conn(conn)
+    if keys.nil?
+      idx_name = "#{collection}_data_gin_idx"
+      raw.exec("CREATE INDEX IF NOT EXISTS #{idx_name} " \
+               "ON #{collection} USING GIN (data)")
+    else
+      key_names = []
+      exprs = []
+      keys.each do |key, _dir|
+        unless key.to_s.match?(SORT_KEY_PATTERN)
+          raise ArgumentError, "Invalid index key: #{key}"
+        end
+        key_names << key.to_s
+        exprs << "(data->>'#{key}')"
+      end
+      idx_name = "#{collection}_#{key_names.join('_')}_idx"
+      raw.exec("CREATE INDEX IF NOT EXISTS #{idx_name} " \
+               "ON #{collection} (#{exprs.join(', ')})")
+    end
+    nil
+  end
+
   def self._validate_identifier(name)
     unless name.to_s.match?(/\A[a-zA-Z_][a-zA-Z0-9_]*\z/)
       raise ArgumentError, "Invalid identifier: #{name}"
