@@ -1176,6 +1176,131 @@ module GoldLapel
     result.map { |row| row.transform_keys(&:to_s) }
   end
 
+  # --- Change streams (doc_watch / doc_unwatch) ---
+
+  def self.doc_watch(conn, collection, &block)
+    _validate_identifier(collection)
+    raw = _raw_conn(conn)
+    channel = "_gl_watch_#{collection}"
+    fn_name = "_gl_notify_#{collection}"
+
+    raw.exec(
+      "CREATE OR REPLACE FUNCTION #{fn_name}() RETURNS trigger AS $$ " \
+      "BEGIN " \
+        "PERFORM pg_notify('#{channel}', json_build_object(" \
+          "'op', TG_OP, " \
+          "'id', COALESCE(NEW.id, OLD.id), " \
+          "'data', COALESCE(NEW.data, OLD.data)" \
+        ")::text); " \
+        "RETURN COALESCE(NEW, OLD); " \
+      "END; $$ LANGUAGE plpgsql"
+    )
+
+    raw.exec(
+      "DROP TRIGGER IF EXISTS #{fn_name}_trg ON #{collection}"
+    )
+    raw.exec(
+      "CREATE TRIGGER #{fn_name}_trg " \
+      "AFTER INSERT OR UPDATE OR DELETE ON #{collection} " \
+      "FOR EACH ROW EXECUTE FUNCTION #{fn_name}()"
+    )
+
+    listen_conn = PG.connect(raw.conninfo_hash)
+    listen_conn.exec("LISTEN #{channel}")
+    loop do
+      listen_conn.wait_for_notify(5) do |_ch, _pid, payload|
+        event = JSON.parse(payload)
+        if event["data"].is_a?(String)
+          event["data"] = JSON.parse(event["data"])
+        end
+        block.call(event)
+      end
+    end
+  end
+
+  def self.doc_unwatch(conn, collection)
+    _validate_identifier(collection)
+    raw = _raw_conn(conn)
+    fn_name = "_gl_notify_#{collection}"
+    raw.exec("DROP TRIGGER IF EXISTS #{fn_name}_trg ON #{collection}")
+    raw.exec("DROP FUNCTION IF EXISTS #{fn_name}()")
+  end
+
+  # --- TTL indexes (doc_create_ttl_index / doc_remove_ttl_index) ---
+
+  def self.doc_create_ttl_index(conn, collection, field, expire_after_seconds:)
+    _validate_identifier(collection)
+    _validate_identifier(field)
+    raw = _raw_conn(conn)
+    fn_name = "_gl_ttl_#{collection}"
+
+    raw.exec(
+      "CREATE OR REPLACE FUNCTION #{fn_name}() RETURNS trigger AS $$ " \
+      "BEGIN " \
+        "DELETE FROM #{collection} " \
+        "WHERE (data->>'#{field}')::timestamptz + " \
+          "interval '#{expire_after_seconds.to_i} seconds' < NOW(); " \
+        "RETURN NEW; " \
+      "END; $$ LANGUAGE plpgsql"
+    )
+
+    raw.exec("DROP TRIGGER IF EXISTS #{fn_name}_trg ON #{collection}")
+    raw.exec(
+      "CREATE TRIGGER #{fn_name}_trg " \
+      "BEFORE INSERT ON #{collection} " \
+      "FOR EACH STATEMENT EXECUTE FUNCTION #{fn_name}()"
+    )
+  end
+
+  def self.doc_remove_ttl_index(conn, collection)
+    _validate_identifier(collection)
+    raw = _raw_conn(conn)
+    fn_name = "_gl_ttl_#{collection}"
+    raw.exec("DROP TRIGGER IF EXISTS #{fn_name}_trg ON #{collection}")
+    raw.exec("DROP FUNCTION IF EXISTS #{fn_name}()")
+  end
+
+  # --- Capped collections (doc_create_capped / doc_remove_cap) ---
+
+  def self.doc_create_capped(conn, collection, max:)
+    _validate_identifier(collection)
+    raw = _raw_conn(conn)
+
+    raw.exec("CREATE TABLE IF NOT EXISTS #{collection} (" \
+             "id BIGSERIAL PRIMARY KEY, " \
+             "data JSONB NOT NULL, " \
+             "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
+
+    fn_name = "_gl_cap_#{collection}"
+
+    raw.exec(
+      "CREATE OR REPLACE FUNCTION #{fn_name}() RETURNS trigger AS $$ " \
+      "BEGIN " \
+        "DELETE FROM #{collection} WHERE id IN (" \
+          "SELECT id FROM #{collection} " \
+          "ORDER BY id DESC " \
+          "OFFSET #{max.to_i}" \
+        "); " \
+        "RETURN NULL; " \
+      "END; $$ LANGUAGE plpgsql"
+    )
+
+    raw.exec("DROP TRIGGER IF EXISTS #{fn_name}_trg ON #{collection}")
+    raw.exec(
+      "CREATE TRIGGER #{fn_name}_trg " \
+      "AFTER INSERT ON #{collection} " \
+      "FOR EACH STATEMENT EXECUTE FUNCTION #{fn_name}()"
+    )
+  end
+
+  def self.doc_remove_cap(conn, collection)
+    _validate_identifier(collection)
+    raw = _raw_conn(conn)
+    fn_name = "_gl_cap_#{collection}"
+    raw.exec("DROP TRIGGER IF EXISTS #{fn_name}_trg ON #{collection}")
+    raw.exec("DROP FUNCTION IF EXISTS #{fn_name}()")
+  end
+
   def self._validate_identifier(name)
     unless name.to_s.match?(/\A[a-zA-Z_][a-zA-Z0-9_]*\z/)
       raise ArgumentError, "Invalid identifier: #{name}"

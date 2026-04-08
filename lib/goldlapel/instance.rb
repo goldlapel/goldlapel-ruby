@@ -236,6 +236,36 @@ module GoldLapel
       GoldLapel.percolate_delete(require_conn, name, query_id)
     end
 
+    # --- Change streams ---
+
+    def doc_watch(collection, &block)
+      GoldLapel.doc_watch(require_conn, collection, &block)
+    end
+
+    def doc_unwatch(collection)
+      GoldLapel.doc_unwatch(require_conn, collection)
+    end
+
+    # --- TTL indexes ---
+
+    def doc_create_ttl_index(collection, field, expire_after_seconds:)
+      GoldLapel.doc_create_ttl_index(require_conn, collection, field, expire_after_seconds: expire_after_seconds)
+    end
+
+    def doc_remove_ttl_index(collection)
+      GoldLapel.doc_remove_ttl_index(require_conn, collection)
+    end
+
+    # --- Capped collections ---
+
+    def doc_create_capped(collection, max:)
+      GoldLapel.doc_create_capped(require_conn, collection, max: max)
+    end
+
+    def doc_remove_cap(collection)
+      GoldLapel.doc_remove_cap(require_conn, collection)
+    end
+
     # --- Analysis methods ---
 
     def analyze(text, lang: 'english')
