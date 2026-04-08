@@ -292,3 +292,66 @@ class TestComparisonKeyValidation < Minitest::Test
     end
   end
 end
+
+# --- dot notation expansion in plain containment filters ---
+
+class TestDotNotationExpansion < Minitest::Test
+  def test_single_level
+    result = GoldLapel.send(:_expand_dot_keys, { "addr.city" => "NY" })
+    assert_equal({ "addr" => { "city" => "NY" } }, result)
+  end
+
+  def test_deep_nesting
+    result = GoldLapel.send(:_expand_dot_keys, { "a.b.c" => 1 })
+    assert_equal({ "a" => { "b" => { "c" => 1 } } }, result)
+  end
+
+  def test_mixed_with_plain
+    result = GoldLapel.send(:_expand_dot_keys, { "status" => "active", "addr.city" => "NY" })
+    assert_equal({ "status" => "active", "addr" => { "city" => "NY" } }, result)
+  end
+
+  def test_merge_siblings
+    result = GoldLapel.send(:_expand_dot_keys, { "a.b" => 1, "a.c" => 2 })
+    assert_equal({ "a" => { "b" => 1, "c" => 2 } }, result)
+  end
+
+  def test_no_dots_unchanged
+    result = GoldLapel.send(:_expand_dot_keys, { "status" => "active" })
+    assert_equal({ "status" => "active" }, result)
+  end
+
+  def test_dot_with_operators_in_build_filter
+    mock = CompMockConnection.new
+    GoldLapel.doc_find(mock, "users", filter: { "addr.city" => "NY", "age" => { "$gt" => 25 } })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params }
+    refute_nil call
+    assert_includes call[:sql], "data @> $2::jsonb"
+    containment_json = call[:params][1]
+    assert_equal({ "addr" => { "city" => "NY" } }, JSON.parse(containment_json))
+    assert_includes call[:sql], "(data->>'age')::numeric > $1"
+    assert_equal 25, call[:params][0]
+  end
+
+  def test_dot_in_doc_find
+    mock = CompMockConnection.new
+    GoldLapel.doc_find(mock, "users", filter: { "addr.city" => "NY" })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params }
+    refute_nil call
+    assert_includes call[:sql], "WHERE data @> $1::jsonb"
+    assert_equal({ "addr" => { "city" => "NY" } }, JSON.parse(call[:params][0]))
+  end
+
+  def test_dot_in_doc_count
+    count_result = CompMockResult.new([{ "count" => "3" }], ["count"])
+    mock = CompMockConnection.new("COUNT" => count_result)
+    GoldLapel.doc_count(mock, "users", filter: { "addr.city" => "NY" })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("COUNT") }
+    refute_nil call
+    assert_includes call[:sql], "WHERE data @> $1::jsonb"
+    assert_equal({ "addr" => { "city" => "NY" } }, JSON.parse(call[:params][0]))
+  end
+end

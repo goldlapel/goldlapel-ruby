@@ -626,6 +626,21 @@ module GoldLapel
   end
   private_class_method :_field_path
 
+  def self._expand_dot_keys(hash)
+    result = {}
+    hash.each do |key, value|
+      parts = key.to_s.split(".")
+      current = result
+      parts[0..-2].each do |part|
+        current[part] = {} unless current.key?(part)
+        current = current[part]
+      end
+      current[parts[-1]] = value
+    end
+    result
+  end
+  private_class_method :_expand_dot_keys
+
   def self._build_filter(filter, start_param = 1)
     return ["", [], start_param] if filter.nil? || filter.empty?
 
@@ -684,7 +699,7 @@ module GoldLapel
 
     if !containment.empty?
       clauses.unshift("data @> $#{idx}::jsonb")
-      params << JSON.generate(containment)
+      params << JSON.generate(_expand_dot_keys(containment))
       idx += 1
     end
     [clauses.join(" AND "), params, idx]
