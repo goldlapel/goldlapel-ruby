@@ -4,6 +4,7 @@ require_relative "goldlapel/cache"
 require_relative "goldlapel/wrap"
 require_relative "goldlapel/proxy"
 require_relative "goldlapel/utils"
+require_relative "goldlapel/instance"
 
 module GoldLapel
   # Module-level convenience methods (multi-instance)
@@ -25,5 +26,9 @@ module GoldLapel
 
   def self.config_keys
     Proxy.config_keys
+  end
+
+  def self.new(upstream, port: nil, config: {}, extra_args: [])
+    Instance.new(upstream, port: port, config: config, extra_args: extra_args)
   end
 end
