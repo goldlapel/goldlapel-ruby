@@ -599,6 +599,98 @@ module GoldLapel
   SORT_KEY_PATTERN = /\A[a-zA-Z_][a-zA-Z0-9_.]*\z/
   private_constant :SORT_KEY_PATTERN
 
+  FIELD_PART_PATTERN = /\A[a-zA-Z_][a-zA-Z0-9_]*\z/
+  private_constant :FIELD_PART_PATTERN
+
+  COMPARISON_OPS = {
+    "$gt" => ">", "$gte" => ">=", "$lt" => "<", "$lte" => "<=",
+    "$eq" => "=", "$ne" => "!="
+  }.freeze
+  private_constant :COMPARISON_OPS
+
+  def self._field_path(key)
+    parts = key.to_s.split(".")
+    parts.each do |part|
+      unless part.match?(FIELD_PART_PATTERN)
+        raise ArgumentError, "Invalid filter key: #{key}"
+      end
+    end
+    if parts.length == 1
+      "data->>'#{parts[0]}'"
+    else
+      chain = "data"
+      parts[0..-2].each { |p| chain += "->'#{p}'" }
+      chain += "->>'#{parts[-1]}'"
+      chain
+    end
+  end
+  private_class_method :_field_path
+
+  def self._build_filter(filter, start_param = 1)
+    return ["", [], start_param] if filter.nil? || filter.empty?
+
+    containment = {}
+    clauses = []
+    params = []
+    idx = start_param
+
+    filter.each do |key, value|
+      if value.is_a?(Hash) && value.keys.any? { |k| k.to_s.start_with?("$") }
+        field_expr = _field_path(key)
+        value.each do |op, operand|
+          op_s = op.to_s
+          if COMPARISON_OPS.key?(op_s)
+            sql_op = COMPARISON_OPS[op_s]
+            if operand.is_a?(Numeric)
+              clauses << "(#{field_expr})::numeric #{sql_op} $#{idx}"
+              params << operand
+              idx += 1
+            else
+              clauses << "#{field_expr} #{sql_op} $#{idx}"
+              params << operand.to_s
+              idx += 1
+            end
+          elsif op_s == "$in"
+            placeholders = operand.each_with_index.map { |_, i| "$#{idx + i}" }.join(", ")
+            clauses << "#{field_expr} IN (#{placeholders})"
+            operand.each { |v| params << v.to_s }
+            idx += operand.length
+          elsif op_s == "$nin"
+            placeholders = operand.each_with_index.map { |_, i| "$#{idx + i}" }.join(", ")
+            clauses << "#{field_expr} NOT IN (#{placeholders})"
+            operand.each { |v| params << v.to_s }
+            idx += operand.length
+          elsif op_s == "$exists"
+            top_key = key.to_s.split(".")[0]
+            if operand
+              clauses << "data ? $#{idx}"
+            else
+              clauses << "NOT (data ? $#{idx})"
+            end
+            params << top_key
+            idx += 1
+          elsif op_s == "$regex"
+            clauses << "#{field_expr} ~ $#{idx}"
+            params << operand.to_s
+            idx += 1
+          else
+            raise ArgumentError, "Unsupported filter operator: #{op_s}"
+          end
+        end
+      else
+        containment[key.to_s] = value
+      end
+    end
+
+    if !containment.empty?
+      clauses.unshift("data @> $#{idx}::jsonb")
+      params << JSON.generate(containment)
+      idx += 1
+    end
+    [clauses.join(" AND "), params, idx]
+  end
+  private_class_method :_build_filter
+
   def self.doc_insert(conn, collection, document)
     _validate_identifier(collection)
     raw = _raw_conn(conn)
@@ -641,10 +733,10 @@ module GoldLapel
     sql = "SELECT id, data, created_at FROM #{collection}"
     params = []
     idx = 1
-    if filter && !filter.empty?
-      sql += " WHERE data @> $#{idx}::jsonb"
-      params << JSON.generate(filter)
-      idx += 1
+    where_clause, filter_params, idx = _build_filter(filter, idx)
+    unless where_clause.empty?
+      sql += " WHERE #{where_clause}"
+      params.concat(filter_params)
     end
     if sort
       clauses = sort.map do |key, dir|
@@ -674,18 +766,15 @@ module GoldLapel
   def self.doc_find_one(conn, collection, filter: nil)
     _validate_identifier(collection)
     raw = _raw_conn(conn)
-    if filter && !filter.empty?
-      result = raw.exec_params(
-        "SELECT id, data, created_at FROM #{collection} " \
-        "WHERE data @> $1::jsonb LIMIT 1",
-        [JSON.generate(filter)]
-      )
-    else
-      result = raw.exec_params(
-        "SELECT id, data, created_at FROM #{collection} LIMIT 1",
-        []
-      )
+    sql = "SELECT id, data, created_at FROM #{collection}"
+    params = []
+    where_clause, filter_params, _idx = _build_filter(filter, 1)
+    unless where_clause.empty?
+      sql += " WHERE #{where_clause}"
+      params.concat(filter_params)
     end
+    sql += " LIMIT 1"
+    result = raw.exec_params(sql, params)
     return nil if result.ntuples.zero?
     row = result[0]
     { "id" => row["id"].to_i, "data" => JSON.parse(row["data"]), "created_at" => row["created_at"] }
@@ -694,64 +783,67 @@ module GoldLapel
   def self.doc_update(conn, collection, filter, update)
     _validate_identifier(collection)
     raw = _raw_conn(conn)
-    result = raw.exec_params(
-      "UPDATE #{collection} SET data = data || $2::jsonb " \
-      "WHERE data @> $1::jsonb",
-      [JSON.generate(filter), JSON.generate(update)]
-    )
+    where_clause, filter_params, idx = _build_filter(filter, 1)
+    sql = "UPDATE #{collection} SET data = data || $#{idx}::jsonb"
+    params = filter_params + [JSON.generate(update)]
+    unless where_clause.empty?
+      sql += " WHERE #{where_clause}"
+    end
+    result = raw.exec_params(sql, params)
     result.cmd_tuples
   end
 
   def self.doc_update_one(conn, collection, filter, update)
     _validate_identifier(collection)
     raw = _raw_conn(conn)
-    result = raw.exec_params(
-      "WITH target AS (" \
-        "SELECT id FROM #{collection} " \
-        "WHERE data @> $1::jsonb " \
-        "LIMIT 1" \
-      ") UPDATE #{collection} SET data = data || $2::jsonb " \
-      "FROM target WHERE #{collection}.id = target.id",
-      [JSON.generate(filter), JSON.generate(update)]
-    )
+    where_clause, filter_params, idx = _build_filter(filter, 1)
+    cte_where = where_clause.empty? ? "" : " WHERE #{where_clause}"
+    sql = "WITH target AS (" \
+          "SELECT id FROM #{collection}#{cte_where} " \
+          "LIMIT 1" \
+          ") UPDATE #{collection} SET data = data || $#{idx}::jsonb " \
+          "FROM target WHERE #{collection}.id = target.id"
+    params = filter_params + [JSON.generate(update)]
+    result = raw.exec_params(sql, params)
     result.cmd_tuples
   end
 
   def self.doc_delete(conn, collection, filter)
     _validate_identifier(collection)
     raw = _raw_conn(conn)
-    result = raw.exec_params(
-      "DELETE FROM #{collection} WHERE data @> $1::jsonb",
-      [JSON.generate(filter)]
-    )
+    where_clause, filter_params, _idx = _build_filter(filter, 1)
+    sql = "DELETE FROM #{collection}"
+    unless where_clause.empty?
+      sql += " WHERE #{where_clause}"
+    end
+    result = raw.exec_params(sql, filter_params)
     result.cmd_tuples
   end
 
   def self.doc_delete_one(conn, collection, filter)
     _validate_identifier(collection)
     raw = _raw_conn(conn)
-    result = raw.exec_params(
-      "WITH target AS (" \
-        "SELECT id FROM #{collection} " \
-        "WHERE data @> $1::jsonb " \
-        "LIMIT 1" \
-      ") DELETE FROM #{collection} " \
-      "USING target WHERE #{collection}.id = target.id",
-      [JSON.generate(filter)]
-    )
+    where_clause, filter_params, _idx = _build_filter(filter, 1)
+    cte_where = where_clause.empty? ? "" : " WHERE #{where_clause}"
+    sql = "WITH target AS (" \
+          "SELECT id FROM #{collection}#{cte_where} " \
+          "LIMIT 1" \
+          ") DELETE FROM #{collection} " \
+          "USING target WHERE #{collection}.id = target.id"
+    result = raw.exec_params(sql, filter_params)
     result.cmd_tuples
   end
 
   def self.doc_count(conn, collection, filter: nil)
     _validate_identifier(collection)
     raw = _raw_conn(conn)
-    if filter && !filter.empty?
-      result = raw.exec_params(
-        "SELECT COUNT(*) FROM #{collection} WHERE data @> $1::jsonb",
-        [JSON.generate(filter)]
-      )
+    sql = "SELECT COUNT(*) FROM #{collection}"
+    where_clause, filter_params, _idx = _build_filter(filter, 1)
+    if where_clause.empty?
+      result = raw.exec(sql)
     else
-      result = raw.exec("SELECT COUNT(*) FROM #{collection}")
+      sql += " WHERE #{where_clause}"
+      result = raw.exec_params(sql, filter_params)
     end
     result[0]["count"].to_i
   end
@@ -868,9 +960,11 @@ module GoldLapel
       sql = "SELECT #{select_parts.join(', ')} FROM #{collection}"
 
       if match_stage && !match_stage.empty?
-        sql += " WHERE data @> $#{idx}::jsonb"
-        params << JSON.generate(match_stage)
-        idx += 1
+        where_clause, filter_params, idx = _build_filter(match_stage, idx)
+        unless where_clause.empty?
+          sql += " WHERE #{where_clause}"
+          params.concat(filter_params)
+        end
       end
 
       if group_id.nil?
@@ -893,9 +987,11 @@ module GoldLapel
       sql = "SELECT id, data, created_at FROM #{collection}"
 
       if match_stage && !match_stage.empty?
-        sql += " WHERE data @> $#{idx}::jsonb"
-        params << JSON.generate(match_stage)
-        idx += 1
+        where_clause, filter_params, idx = _build_filter(match_stage, idx)
+        unless where_clause.empty?
+          sql += " WHERE #{where_clause}"
+          params.concat(filter_params)
+        end
       end
 
       if sort_stage
