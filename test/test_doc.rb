@@ -1080,3 +1080,518 @@ class TestDocAggregate < Minitest::Test
     assert_equal [JSON.generate({ "status" => "complete" }), 5], call[:params]
   end
 end
+
+# --- Logical operators ($or, $and, $not) ---
+
+class TestLogicalOperators < Minitest::Test
+  def test_or_operator
+    mock = DocMockConnection.new
+    GoldLapel.doc_find(mock, "users", filter: {
+      "$or" => [
+        { "status" => "active" },
+        { "role" => "admin" }
+      ]
+    })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params }
+    refute_nil call
+    assert_includes call[:sql], "WHERE (data @> $1::jsonb OR data @> $2::jsonb)"
+    assert_equal [
+      JSON.generate({ "status" => "active" }),
+      JSON.generate({ "role" => "admin" })
+    ], call[:params]
+  end
+
+  def test_and_operator
+    mock = DocMockConnection.new
+    GoldLapel.doc_find(mock, "users", filter: {
+      "$and" => [
+        { "age" => { "$gte" => 18 } },
+        { "age" => { "$lte" => 65 } }
+      ]
+    })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params }
+    refute_nil call
+    assert_includes call[:sql], "WHERE ((data->>'age')::numeric >= $1 AND (data->>'age')::numeric <= $2)"
+    assert_equal [18, 65], call[:params]
+  end
+
+  def test_not_operator
+    mock = DocMockConnection.new
+    GoldLapel.doc_find(mock, "users", filter: {
+      "$not" => { "status" => "banned" }
+    })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params }
+    refute_nil call
+    assert_includes call[:sql], "WHERE NOT (data @> $1::jsonb)"
+    assert_equal [JSON.generate({ "status" => "banned" })], call[:params]
+  end
+
+  def test_or_with_operators
+    mock = DocMockConnection.new
+    GoldLapel.doc_find(mock, "products", filter: {
+      "$or" => [
+        { "price" => { "$lt" => 10 } },
+        { "price" => { "$gt" => 1000 } }
+      ]
+    })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params }
+    refute_nil call
+    assert_includes call[:sql], "((data->>'price')::numeric < $1 OR (data->>'price')::numeric > $2)"
+    assert_equal [10, 1000], call[:params]
+  end
+
+  def test_or_rejects_non_array
+    mock = DocMockConnection.new
+    assert_raises(ArgumentError) do
+      GoldLapel.doc_find(mock, "users", filter: { "$or" => { "a" => 1 } })
+    end
+  end
+
+  def test_or_rejects_empty_array
+    mock = DocMockConnection.new
+    assert_raises(ArgumentError) do
+      GoldLapel.doc_find(mock, "users", filter: { "$or" => [] })
+    end
+  end
+
+  def test_and_rejects_non_array
+    mock = DocMockConnection.new
+    assert_raises(ArgumentError) do
+      GoldLapel.doc_find(mock, "users", filter: { "$and" => "not an array" })
+    end
+  end
+
+  def test_not_rejects_non_hash
+    mock = DocMockConnection.new
+    assert_raises(ArgumentError) do
+      GoldLapel.doc_find(mock, "users", filter: { "$not" => [{ "a" => 1 }] })
+    end
+  end
+
+  def test_nested_or_and
+    mock = DocMockConnection.new
+    GoldLapel.doc_find(mock, "users", filter: {
+      "$or" => [
+        { "$and" => [
+          { "status" => "active" },
+          { "age" => { "$gte" => 18 } }
+        ]},
+        { "role" => "admin" }
+      ]
+    })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params }
+    refute_nil call
+    assert_includes call[:sql], "((data @> $1::jsonb AND (data->>'age')::numeric >= $2) OR data @> $3::jsonb)"
+    assert_equal [
+      JSON.generate({ "status" => "active" }),
+      18,
+      JSON.generate({ "role" => "admin" })
+    ], call[:params]
+  end
+
+  def test_not_with_operators
+    mock = DocMockConnection.new
+    GoldLapel.doc_find(mock, "users", filter: {
+      "$not" => { "age" => { "$lt" => 18 } }
+    })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params }
+    refute_nil call
+    assert_includes call[:sql], "NOT ((data->>'age')::numeric < $1)"
+    assert_equal [18], call[:params]
+  end
+
+  def test_logical_with_regular_filter
+    mock = DocMockConnection.new
+    GoldLapel.doc_find(mock, "users", filter: {
+      "status" => "active",
+      "$or" => [
+        { "role" => "admin" },
+        { "role" => "superadmin" }
+      ]
+    })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params }
+    refute_nil call
+    # The containment and $or both appear
+    assert_includes call[:sql], "(data @> $1::jsonb OR data @> $2::jsonb)"
+    assert_includes call[:sql], "data @> $3::jsonb"
+  end
+end
+
+# --- Field update operators ($set, $inc, $unset, $mul, $rename) ---
+
+class TestUpdateOperators < Minitest::Test
+  def test_set_operator
+    mock = DocMockConnection.new
+    GoldLapel.doc_update(mock, "users", { "name" => "Alice" }, {
+      "$set" => { "status" => "active", "role" => "admin" }
+    })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("UPDATE") }
+    refute_nil call
+    assert_includes call[:sql], "SET data = (data || $2::jsonb)"
+    assert_equal JSON.generate({ "name" => "Alice" }), call[:params][0]
+    assert_equal JSON.generate({ "status" => "active", "role" => "admin" }), call[:params][1]
+  end
+
+  def test_inc_operator
+    mock = DocMockConnection.new
+    GoldLapel.doc_update(mock, "counters", { "name" => "views" }, {
+      "$inc" => { "count" => 1 }
+    })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("UPDATE") }
+    refute_nil call
+    assert_includes call[:sql], "jsonb_set(data, $2::text[], to_jsonb(COALESCE((data->>'count')::numeric, 0) + $3))"
+    assert_equal "{count}", call[:params][1]
+    assert_equal 1, call[:params][2]
+  end
+
+  def test_unset_top_level
+    mock = DocMockConnection.new
+    GoldLapel.doc_update(mock, "users", { "name" => "Alice" }, {
+      "$unset" => { "temp_field" => "" }
+    })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("UPDATE") }
+    refute_nil call
+    assert_includes call[:sql], "(data - $2)"
+    assert_equal "temp_field", call[:params][1]
+  end
+
+  def test_unset_nested
+    mock = DocMockConnection.new
+    GoldLapel.doc_update(mock, "users", { "name" => "Alice" }, {
+      "$unset" => { "addr.zip" => "" }
+    })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("UPDATE") }
+    refute_nil call
+    assert_includes call[:sql], "(data #- $2::text[])"
+    assert_equal "{addr,zip}", call[:params][1]
+  end
+
+  def test_mul_operator
+    mock = DocMockConnection.new
+    GoldLapel.doc_update(mock, "products", { "sku" => "A1" }, {
+      "$mul" => { "price" => 1.1 }
+    })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("UPDATE") }
+    refute_nil call
+    assert_includes call[:sql], "jsonb_set(data, $2::text[], to_jsonb(COALESCE((data->>'price')::numeric, 0) * $3))"
+    assert_equal "{price}", call[:params][1]
+    assert_in_delta 1.1, call[:params][2], 0.001
+  end
+
+  def test_rename_operator
+    mock = DocMockConnection.new
+    GoldLapel.doc_update(mock, "users", { "name" => "Alice" }, {
+      "$rename" => { "old_field" => "new_field" }
+    })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("UPDATE") }
+    refute_nil call
+    assert_includes call[:sql], "jsonb_set((data - $2), $3::text[], data->'old_field')"
+    assert_equal "old_field", call[:params][1]
+    assert_equal "{new_field}", call[:params][2]
+  end
+
+  def test_rename_nested_source
+    mock = DocMockConnection.new
+    GoldLapel.doc_update(mock, "users", { "name" => "Alice" }, {
+      "$rename" => { "addr.zip" => "postal" }
+    })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("UPDATE") }
+    refute_nil call
+    assert_includes call[:sql], "jsonb_set((data #- $2::text[]), $3::text[], data->'addr'->'zip')"
+    assert_equal "{addr,zip}", call[:params][1]
+    assert_equal "{postal}", call[:params][2]
+  end
+
+  def test_plain_update_still_works
+    mock = DocMockConnection.new
+    GoldLapel.doc_update(mock, "users", { "name" => "Alice" }, { "name" => "Bob" })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("UPDATE") }
+    refute_nil call
+    assert_includes call[:sql], "SET data = data || $2::jsonb"
+    assert_equal JSON.generate({ "name" => "Bob" }), call[:params][1]
+  end
+
+  def test_combined_set_and_inc
+    mock = DocMockConnection.new
+    GoldLapel.doc_update(mock, "users", {}, {
+      "$set" => { "status" => "active" },
+      "$inc" => { "login_count" => 1 }
+    })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("UPDATE") }
+    refute_nil call
+    assert_includes call[:sql], "(data || $1::jsonb)"
+    assert_includes call[:sql], "jsonb_set("
+    assert_includes call[:sql], "to_jsonb(COALESCE((data->>'login_count')::numeric, 0) + $3)"
+    assert_equal JSON.generate({ "status" => "active" }), call[:params][0]
+    assert_equal "{login_count}", call[:params][1]
+    assert_equal 1, call[:params][2]
+  end
+
+  def test_update_one_with_set
+    mock = DocMockConnection.new
+    GoldLapel.doc_update_one(mock, "users", { "name" => "Alice" }, {
+      "$set" => { "age" => 31 }
+    })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("UPDATE") }
+    refute_nil call
+    assert_includes call[:sql], "WITH target AS ("
+    assert_includes call[:sql], "SET data = (data || $2::jsonb)"
+    assert_includes call[:sql], "FROM target WHERE users.id = target.id"
+    assert_equal JSON.generate({ "name" => "Alice" }), call[:params][0]
+    assert_equal JSON.generate({ "age" => 31 }), call[:params][1]
+  end
+end
+
+# --- Array update operators ($push, $pull, $addToSet) ---
+
+class TestArrayUpdateOperators < Minitest::Test
+  def test_push_operator
+    mock = DocMockConnection.new
+    GoldLapel.doc_update(mock, "users", { "name" => "Alice" }, {
+      "$push" => { "tags" => "ruby" }
+    })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("UPDATE") }
+    refute_nil call
+    assert_includes call[:sql], "jsonb_set(data, $2::text[], COALESCE(data->'tags', '[]'::jsonb) || to_jsonb($3::text))"
+    assert_equal "{tags}", call[:params][1]
+    assert_equal "ruby", call[:params][2]
+  end
+
+  def test_push_numeric
+    mock = DocMockConnection.new
+    GoldLapel.doc_update(mock, "docs", {}, {
+      "$push" => { "scores" => 95 }
+    })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("UPDATE") }
+    refute_nil call
+    assert_includes call[:sql], "COALESCE(data->'scores', '[]'::jsonb) || to_jsonb($2::numeric)"
+    assert_equal "{scores}", call[:params][0]
+    assert_equal 95, call[:params][1]
+  end
+
+  def test_pull_operator
+    mock = DocMockConnection.new
+    GoldLapel.doc_update(mock, "users", { "name" => "Alice" }, {
+      "$pull" => { "tags" => "old_tag" }
+    })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("UPDATE") }
+    refute_nil call
+    assert_includes call[:sql], "jsonb_set(data, $2::text[],"
+    assert_includes call[:sql], "SELECT jsonb_agg(elem) FROM jsonb_array_elements(data->'tags') AS elem"
+    assert_includes call[:sql], "WHERE elem != to_jsonb($3::text)"
+    assert_equal "{tags}", call[:params][1]
+    assert_equal "old_tag", call[:params][2]
+  end
+
+  def test_add_to_set_operator
+    mock = DocMockConnection.new
+    GoldLapel.doc_update(mock, "users", { "name" => "Alice" }, {
+      "$addToSet" => { "tags" => "unique" }
+    })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("UPDATE") }
+    refute_nil call
+    assert_includes call[:sql], "jsonb_set(data, $2::text[],"
+    assert_includes call[:sql], "CASE WHEN COALESCE(data->'tags', '[]'::jsonb) @> to_jsonb($3::text)"
+    assert_includes call[:sql], "ELSE COALESCE(data->'tags', '[]'::jsonb) || to_jsonb($4::text) END)"
+    assert_equal "{tags}", call[:params][1]
+    assert_equal "unique", call[:params][2]
+    assert_equal "unique", call[:params][3]
+  end
+
+  def test_push_with_filter_params
+    mock = DocMockConnection.new
+    GoldLapel.doc_update(mock, "users", { "status" => "active" }, {
+      "$push" => { "log" => "event1" }
+    })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("UPDATE") }
+    refute_nil call
+    # Filter param is $1, push path is $2, push value is $3
+    assert_equal JSON.generate({ "status" => "active" }), call[:params][0]
+    assert_equal "{log}", call[:params][1]
+    assert_equal "event1", call[:params][2]
+  end
+end
+
+# --- doc_find_one_and_update ---
+
+class TestDocFindOneAndUpdate < Minitest::Test
+  def test_returns_updated_doc
+    update_result = DocMockResult.new(
+      [{ "id" => "1", "data" => '{"name":"Alice","age":31}', "created_at" => "2026-04-07 00:00:00+00" }],
+      ["id", "data", "created_at"]
+    )
+    mock = DocMockConnection.new("UPDATE" => update_result)
+    result = GoldLapel.doc_find_one_and_update(mock, "users", { "name" => "Alice" }, { "age" => 31 })
+
+    refute_nil result
+    assert_equal 1, result["id"]
+    assert_equal({ "name" => "Alice", "age" => 31 }, result["data"])
+  end
+
+  def test_sql_structure
+    mock = DocMockConnection.new
+    GoldLapel.doc_find_one_and_update(mock, "users", { "name" => "Alice" }, { "age" => 31 })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("UPDATE") }
+    refute_nil call
+    assert_includes call[:sql], "WITH target AS ("
+    assert_includes call[:sql], "SELECT id FROM users"
+    assert_includes call[:sql], "WHERE data @> $1::jsonb"
+    assert_includes call[:sql], "LIMIT 1"
+    assert_includes call[:sql], "SET data = data || $2::jsonb"
+    assert_includes call[:sql], "FROM target WHERE users.id = target.id"
+    assert_includes call[:sql], "RETURNING users.id, users.data, users.created_at"
+    assert_equal [JSON.generate({ "name" => "Alice" }), JSON.generate({ "age" => 31 })], call[:params]
+  end
+
+  def test_returns_nil_when_no_match
+    mock = DocMockConnection.new
+    result = GoldLapel.doc_find_one_and_update(mock, "users", { "name" => "nobody" }, { "age" => 99 })
+
+    assert_nil result
+  end
+
+  def test_with_set_operator
+    mock = DocMockConnection.new
+    GoldLapel.doc_find_one_and_update(mock, "users", { "name" => "Alice" }, {
+      "$set" => { "verified" => true }
+    })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("UPDATE") }
+    refute_nil call
+    assert_includes call[:sql], "SET data = (data || $2::jsonb)"
+    assert_includes call[:sql], "RETURNING users.id, users.data, users.created_at"
+  end
+
+  def test_rejects_invalid_collection
+    mock = DocMockConnection.new
+    assert_raises(ArgumentError) { GoldLapel.doc_find_one_and_update(mock, "bad table!", {}, {}) }
+  end
+end
+
+# --- doc_find_one_and_delete ---
+
+class TestDocFindOneAndDelete < Minitest::Test
+  def test_returns_deleted_doc
+    delete_result = DocMockResult.new(
+      [{ "id" => "1", "data" => '{"name":"Alice","age":30}', "created_at" => "2026-04-07 00:00:00+00" }],
+      ["id", "data", "created_at"]
+    )
+    mock = DocMockConnection.new("DELETE" => delete_result)
+    result = GoldLapel.doc_find_one_and_delete(mock, "users", { "name" => "Alice" })
+
+    refute_nil result
+    assert_equal 1, result["id"]
+    assert_equal({ "name" => "Alice", "age" => 30 }, result["data"])
+  end
+
+  def test_sql_structure
+    mock = DocMockConnection.new
+    GoldLapel.doc_find_one_and_delete(mock, "users", { "name" => "Alice" })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("DELETE") }
+    refute_nil call
+    assert_includes call[:sql], "WITH target AS ("
+    assert_includes call[:sql], "SELECT id FROM users"
+    assert_includes call[:sql], "WHERE data @> $1::jsonb"
+    assert_includes call[:sql], "LIMIT 1"
+    assert_includes call[:sql], "DELETE FROM users"
+    assert_includes call[:sql], "USING target WHERE users.id = target.id"
+    assert_includes call[:sql], "RETURNING users.id, users.data, users.created_at"
+    assert_equal [JSON.generate({ "name" => "Alice" })], call[:params]
+  end
+
+  def test_returns_nil_when_no_match
+    mock = DocMockConnection.new
+    result = GoldLapel.doc_find_one_and_delete(mock, "users", { "name" => "nobody" })
+
+    assert_nil result
+  end
+
+  def test_rejects_invalid_collection
+    mock = DocMockConnection.new
+    assert_raises(ArgumentError) { GoldLapel.doc_find_one_and_delete(mock, "bad table!", {}) }
+  end
+end
+
+# --- doc_distinct ---
+
+class TestDocDistinct < Minitest::Test
+  def test_returns_distinct_values
+    distinct_result = DocMockResult.new(
+      [{ "val" => "active" }, { "val" => "inactive" }, { "val" => "banned" }],
+      ["val"]
+    )
+    mock = DocMockConnection.new("DISTINCT" => distinct_result)
+    result = GoldLapel.doc_distinct(mock, "users", "status")
+
+    assert_equal ["active", "inactive", "banned"], result
+  end
+
+  def test_sql_without_filter
+    mock = DocMockConnection.new
+    GoldLapel.doc_distinct(mock, "users", "status")
+
+    call = mock.calls.find { |c| c[:method] == :exec_params }
+    refute_nil call
+    assert_includes call[:sql], "SELECT DISTINCT data->>'status' AS val FROM users"
+    assert_includes call[:sql], "WHERE data->>'status' IS NOT NULL"
+    assert_equal [], call[:params]
+  end
+
+  def test_sql_with_filter
+    mock = DocMockConnection.new
+    GoldLapel.doc_distinct(mock, "users", "role", filter: { "status" => "active" })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params }
+    refute_nil call
+    assert_includes call[:sql], "SELECT DISTINCT data->>'role' AS val FROM users"
+    assert_includes call[:sql], "data->>'role' IS NOT NULL"
+    assert_includes call[:sql], "data @> $1::jsonb"
+    assert_equal [JSON.generate({ "status" => "active" })], call[:params]
+  end
+
+  def test_nested_field
+    mock = DocMockConnection.new
+    GoldLapel.doc_distinct(mock, "users", "addr.city")
+
+    call = mock.calls.find { |c| c[:method] == :exec_params }
+    refute_nil call
+    assert_includes call[:sql], "data->'addr'->>'city' AS val"
+    assert_includes call[:sql], "data->'addr'->>'city' IS NOT NULL"
+  end
+
+  def test_rejects_invalid_collection
+    mock = DocMockConnection.new
+    assert_raises(ArgumentError) { GoldLapel.doc_distinct(mock, "bad table!", "field") }
+  end
+
+  def test_returns_empty_array_when_no_results
+    mock = DocMockConnection.new
+    result = GoldLapel.doc_distinct(mock, "users", "status")
+
+    assert_equal [], result
+  end
+end
