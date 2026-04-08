@@ -654,7 +654,13 @@ module GoldLapel
 
     filter.each do |key, value|
       key_s = key.to_s
-      if LOGICAL_OPS.include?(key_s)
+      if key_s == "$text"
+        raise ArgumentError, "$text requires {$search: 'query'}" unless value.is_a?(Hash) && value.key?("$search")
+        lang = value.fetch("$language", "english")
+        clauses << "to_tsvector($#{idx}, data::text) @@ plainto_tsquery($#{idx + 1}, $#{idx + 2})"
+        params.concat([lang, lang, value["$search"]])
+        idx += 3
+      elsif LOGICAL_OPS.include?(key_s)
         if key_s == "$not"
           raise ArgumentError, "$not value must be a Hash" unless value.is_a?(Hash)
           sc, sp, idx = _build_filter(value, idx)
@@ -713,6 +719,40 @@ module GoldLapel
             clauses << "#{field_expr} ~ $#{idx}"
             params << operand.to_s
             idx += 1
+          elsif op_s == "$elemMatch"
+            raise ArgumentError, "$elemMatch value must be an object" unless operand.is_a?(Hash)
+            field_json = _field_path_json(key)
+            elem_clauses = []
+            operand.each do |sub_op, sub_val|
+              sub_op_s = sub_op.to_s
+              if COMPARISON_OPS.key?(sub_op_s)
+                sql_op = COMPARISON_OPS[sub_op_s]
+                if sub_val.is_a?(Numeric)
+                  elem_clauses << "(elem#>>'{}')::numeric #{sql_op} $#{idx}"
+                  params << sub_val
+                  idx += 1
+                else
+                  elem_clauses << "elem#>>'{}' #{sql_op} $#{idx}"
+                  params << sub_val.to_s
+                  idx += 1
+                end
+              elsif sub_op_s == "$regex"
+                elem_clauses << "elem#>>'{}' ~ $#{idx}"
+                params << sub_val.to_s
+                idx += 1
+              else
+                raise ArgumentError, "Unsupported $elemMatch operator: #{sub_op_s}"
+              end
+            end
+            unless elem_clauses.empty?
+              clauses << "EXISTS (SELECT 1 FROM jsonb_array_elements(#{field_json}) AS elem WHERE #{elem_clauses.join(' AND ')})"
+            end
+          elsif op_s == "$text"
+            raise ArgumentError, "$text requires {$search: 'query'}" unless operand.is_a?(Hash) && operand.key?("$search")
+            lang = operand.fetch("$language", "english")
+            clauses << "to_tsvector($#{idx}, #{field_expr}) @@ plainto_tsquery($#{idx + 1}, $#{idx + 2})"
+            params.concat([lang, lang, operand["$search"]])
+            idx += 3
           else
             raise ArgumentError, "Unsupported filter operator: #{op_s}"
           end
@@ -991,6 +1031,53 @@ module GoldLapel
     result = raw.exec_params(sql, params)
     result.map do |row|
       { "id" => row["id"].to_i, "data" => JSON.parse(row["data"]), "created_at" => row["created_at"] }
+    end
+  end
+
+  def self.doc_find_cursor(conn, collection, filter: nil, sort: nil, limit: nil, skip: nil, batch_size: 100)
+    _validate_identifier(collection)
+    raw = _raw_conn(conn)
+    sql = "SELECT id, data, created_at FROM #{collection}"
+    params = []
+    idx = 1
+    where_clause, filter_params, idx = _build_filter(filter, idx)
+    unless where_clause.empty?
+      sql += " WHERE #{where_clause}"
+      params.concat(filter_params)
+    end
+    if sort
+      clauses = sort.map do |key, dir|
+        unless key.to_s.match?(SORT_KEY_PATTERN)
+          raise ArgumentError, "Invalid sort key: #{key}"
+        end
+        order = dir.to_i < 0 ? "DESC" : "ASC"
+        "data->>'#{key}' #{order}"
+      end
+      sql += " ORDER BY #{clauses.join(', ')}"
+    end
+    if limit
+      sql += " LIMIT $#{idx}"
+      params << limit
+      idx += 1
+    end
+    if skip
+      sql += " OFFSET $#{idx}"
+      params << skip
+    end
+    cursor_name = "gl_cursor_#{collection}_#{conn.object_id}"
+    raw.exec("BEGIN")
+    raw.exec_params("DECLARE #{cursor_name} CURSOR FOR #{sql}", params)
+    Enumerator.new do |yielder|
+      begin
+        loop do
+          result = raw.exec("FETCH #{batch_size} FROM #{cursor_name}")
+          break if result.ntuples == 0
+          result.each { |row| yielder.yield row }
+        end
+      ensure
+        raw.exec("CLOSE #{cursor_name}")
+        raw.exec("COMMIT")
+      end
     end
   end
 

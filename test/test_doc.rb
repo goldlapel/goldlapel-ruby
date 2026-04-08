@@ -1595,3 +1595,363 @@ class TestDocDistinct < Minitest::Test
     assert_equal [], result
   end
 end
+
+# --- $elemMatch ---
+
+class TestElemMatch < Minitest::Test
+  def test_numeric_range
+    mock = DocMockConnection.new
+    GoldLapel.doc_find(mock, "users", filter: {
+      "scores" => { "$elemMatch" => { "$gt" => 80, "$lt" => 90 } }
+    })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params }
+    refute_nil call
+    assert_includes call[:sql], "EXISTS"
+    assert_includes call[:sql], "jsonb_array_elements"
+    assert_includes call[:sql], "elem#>>'{}'"
+    assert_includes call[:sql], "::numeric"
+    assert_includes call[:params], 80
+    assert_includes call[:params], 90
+  end
+
+  def test_string_regex
+    mock = DocMockConnection.new
+    GoldLapel.doc_find(mock, "users", filter: {
+      "tags" => { "$elemMatch" => { "$regex" => "^py" } }
+    })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params }
+    refute_nil call
+    assert_includes call[:sql], "EXISTS"
+    assert_includes call[:sql], "elem#>>'{}' ~ $1"
+    assert_equal ["^py"], call[:params]
+  end
+
+  def test_single_condition
+    mock = DocMockConnection.new
+    GoldLapel.doc_find(mock, "users", filter: {
+      "scores" => { "$elemMatch" => { "$eq" => 100 } }
+    })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params }
+    refute_nil call
+    assert_includes call[:sql], "EXISTS"
+    assert_includes call[:sql], "elem#>>'{}'"
+    assert_equal [100], call[:params]
+  end
+
+  def test_invalid_operand_raises
+    mock = DocMockConnection.new
+    assert_raises(ArgumentError) do
+      GoldLapel.doc_find(mock, "users", filter: {
+        "scores" => { "$elemMatch" => [1, 2] }
+      })
+    end
+  end
+
+  def test_unsupported_sub_op_raises
+    mock = DocMockConnection.new
+    assert_raises(ArgumentError) do
+      GoldLapel.doc_find(mock, "users", filter: {
+        "scores" => { "$elemMatch" => { "$foo" => 1 } }
+      })
+    end
+  end
+
+  def test_elem_match_uses_field_path_json
+    mock = DocMockConnection.new
+    GoldLapel.doc_find(mock, "users", filter: {
+      "results.scores" => { "$elemMatch" => { "$gt" => 50 } }
+    })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params }
+    refute_nil call
+    assert_includes call[:sql], "jsonb_array_elements(data->'results'->'scores')"
+  end
+
+  def test_elem_match_string_comparison
+    mock = DocMockConnection.new
+    GoldLapel.doc_find(mock, "users", filter: {
+      "names" => { "$elemMatch" => { "$eq" => "Alice" } }
+    })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params }
+    refute_nil call
+    assert_includes call[:sql], "elem#>>'{}' = $1"
+    assert_equal ["Alice"], call[:params]
+  end
+end
+
+# --- $text in filters ---
+
+class TestTextFilter < Minitest::Test
+  def test_top_level
+    mock = DocMockConnection.new
+    GoldLapel.doc_find(mock, "users", filter: {
+      "$text" => { "$search" => "hello world" }
+    })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params }
+    refute_nil call
+    assert_includes call[:sql], "to_tsvector"
+    assert_includes call[:sql], "plainto_tsquery"
+    assert_includes call[:sql], "data::text"
+    assert_equal ["english", "english", "hello world"], call[:params]
+  end
+
+  def test_field_level
+    mock = DocMockConnection.new
+    GoldLapel.doc_find(mock, "users", filter: {
+      "content" => { "$text" => { "$search" => "hello" } }
+    })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params }
+    refute_nil call
+    assert_includes call[:sql], "to_tsvector"
+    assert_includes call[:sql], "plainto_tsquery"
+    assert_includes call[:sql], "data->>'content'"
+    assert_equal ["english", "english", "hello"], call[:params]
+  end
+
+  def test_custom_language
+    mock = DocMockConnection.new
+    GoldLapel.doc_find(mock, "users", filter: {
+      "$text" => { "$search" => "bonjour", "$language" => "french" }
+    })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params }
+    refute_nil call
+    assert_includes call[:sql], "to_tsvector"
+    assert_equal ["french", "french", "bonjour"], call[:params]
+  end
+
+  def test_missing_search_raises
+    mock = DocMockConnection.new
+    assert_raises(ArgumentError) do
+      GoldLapel.doc_find(mock, "users", filter: {
+        "$text" => { "$language" => "english" }
+      })
+    end
+  end
+
+  def test_non_dict_raises
+    mock = DocMockConnection.new
+    assert_raises(ArgumentError) do
+      GoldLapel.doc_find(mock, "users", filter: {
+        "$text" => "hello"
+      })
+    end
+  end
+
+  def test_field_level_missing_search_raises
+    mock = DocMockConnection.new
+    assert_raises(ArgumentError) do
+      GoldLapel.doc_find(mock, "users", filter: {
+        "content" => { "$text" => { "$language" => "english" } }
+      })
+    end
+  end
+
+  def test_in_doc_count
+    count_result = DocMockResult.new(
+      [{ "count" => "3" }],
+      ["count"]
+    )
+    mock = DocMockConnection.new("COUNT" => count_result)
+    GoldLapel.doc_count(mock, "users", filter: {
+      "bio" => { "$text" => { "$search" => "python" } }
+    })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("COUNT") }
+    refute_nil call
+    assert_includes call[:sql], "to_tsvector"
+    assert_includes call[:sql], "@@"
+  end
+
+  def test_top_level_param_indices
+    mock = DocMockConnection.new
+    GoldLapel.doc_find(mock, "users", filter: {
+      "$text" => { "$search" => "search" }
+    })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params }
+    refute_nil call
+    assert_includes call[:sql], "to_tsvector($1, data::text) @@ plainto_tsquery($2, $3)"
+  end
+
+  def test_field_level_param_indices
+    mock = DocMockConnection.new
+    GoldLapel.doc_find(mock, "users", filter: {
+      "bio" => { "$text" => { "$search" => "search" } }
+    })
+
+    call = mock.calls.find { |c| c[:method] == :exec_params }
+    refute_nil call
+    assert_includes call[:sql], "to_tsvector($1, data->>'bio') @@ plainto_tsquery($2, $3)"
+  end
+end
+
+# --- doc_find_cursor ---
+
+class CursorMockResult
+  attr_reader :values, :fields
+
+  def initialize(rows)
+    @rows = rows
+  end
+
+  def ntuples; @rows.length; end
+
+  def [](index)
+    @rows[index]
+  end
+
+  def each(&block)
+    @rows.each(&block)
+  end
+end
+
+class CursorMockConnection
+  attr_reader :calls
+
+  def initialize(fetch_batches: [])
+    @calls = []
+    @fetch_batches = fetch_batches
+    @fetch_index = 0
+  end
+
+  def exec(sql, &block)
+    @calls << { method: :exec, sql: sql }
+    if sql.include?("FETCH")
+      batch = @fetch_index < @fetch_batches.length ? @fetch_batches[@fetch_index] : []
+      @fetch_index += 1
+      result = CursorMockResult.new(batch)
+      block&.call(result)
+      result
+    else
+      result = CursorMockResult.new([])
+      block&.call(result)
+      result
+    end
+  end
+
+  def exec_params(sql, params = [], result_format = 0, &block)
+    @calls << { method: :exec_params, sql: sql, params: params }
+    result = CursorMockResult.new([])
+    block&.call(result)
+    result
+  end
+
+  def close; end
+  def finished?; false; end
+end
+
+class TestDocFindCursor < Minitest::Test
+  def test_returns_enumerator
+    mock = CursorMockConnection.new(fetch_batches: [])
+    result = GoldLapel.doc_find_cursor(mock, "users")
+
+    assert_kind_of Enumerator, result
+  end
+
+  def test_yields_rows
+    rows = [
+      { "id" => "1", "data" => '{"name":"Alice"}', "created_at" => "2026-04-07" },
+      { "id" => "2", "data" => '{"name":"Bob"}', "created_at" => "2026-04-07" }
+    ]
+    mock = CursorMockConnection.new(fetch_batches: [rows, []])
+    results = GoldLapel.doc_find_cursor(mock, "users").to_a
+
+    assert_equal 2, results.length
+    assert_equal "1", results[0]["id"]
+    assert_equal '{"name":"Alice"}', results[0]["data"]
+  end
+
+  def test_multiple_batches
+    batch1 = [{ "id" => "1", "data" => '{"a":1}', "created_at" => "ts" }]
+    batch2 = [{ "id" => "2", "data" => '{"b":2}', "created_at" => "ts" }]
+    mock = CursorMockConnection.new(fetch_batches: [batch1, batch2, []])
+    results = GoldLapel.doc_find_cursor(mock, "users").to_a
+
+    assert_equal 2, results.length
+  end
+
+  def test_with_filter
+    mock = CursorMockConnection.new(fetch_batches: [])
+    GoldLapel.doc_find_cursor(mock, "users", filter: { "status" => "active" }).to_a
+
+    declare_call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("DECLARE") }
+    refute_nil declare_call
+    assert_includes declare_call[:sql], "WHERE"
+  end
+
+  def test_declare_and_close
+    mock = CursorMockConnection.new(fetch_batches: [])
+    GoldLapel.doc_find_cursor(mock, "users").to_a
+
+    begin_call = mock.calls.find { |c| c[:method] == :exec && c[:sql] == "BEGIN" }
+    refute_nil begin_call
+
+    declare_call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("DECLARE") }
+    refute_nil declare_call
+    assert_includes declare_call[:sql], "CURSOR FOR SELECT id, data, created_at FROM users"
+
+    close_call = mock.calls.find { |c| c[:method] == :exec && c[:sql].include?("CLOSE") }
+    refute_nil close_call
+
+    commit_call = mock.calls.find { |c| c[:method] == :exec && c[:sql] == "COMMIT" }
+    refute_nil commit_call
+  end
+
+  def test_batch_size
+    mock = CursorMockConnection.new(fetch_batches: [])
+    GoldLapel.doc_find_cursor(mock, "users", batch_size: 50).to_a
+
+    fetch_call = mock.calls.find { |c| c[:method] == :exec && c[:sql].include?("FETCH") }
+    refute_nil fetch_call
+    assert_includes fetch_call[:sql], "FETCH 50"
+  end
+
+  def test_rejects_invalid_collection
+    mock = CursorMockConnection.new(fetch_batches: [])
+    assert_raises(ArgumentError) do
+      GoldLapel.doc_find_cursor(mock, "bad table!")
+    end
+  end
+
+  def test_cursor_name_contains_collection
+    mock = CursorMockConnection.new(fetch_batches: [])
+    GoldLapel.doc_find_cursor(mock, "orders").to_a
+
+    declare_call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("DECLARE") }
+    refute_nil declare_call
+    assert_includes declare_call[:sql], "gl_cursor_orders_"
+  end
+
+  def test_with_sort_limit_skip
+    mock = CursorMockConnection.new(fetch_batches: [])
+    GoldLapel.doc_find_cursor(mock, "users", sort: { "name" => 1 }, limit: 10, skip: 5).to_a
+
+    declare_call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("DECLARE") }
+    refute_nil declare_call
+    assert_includes declare_call[:sql], "ORDER BY data->>'name' ASC"
+    assert_includes declare_call[:sql], "LIMIT"
+    assert_includes declare_call[:sql], "OFFSET"
+  end
+
+  def test_cleanup_on_early_break
+    rows = [
+      { "id" => "1", "data" => '{"a":1}', "created_at" => "ts" },
+      { "id" => "2", "data" => '{"b":2}', "created_at" => "ts" }
+    ]
+    # Provide extra batches that won't be consumed
+    mock = CursorMockConnection.new(fetch_batches: [rows, rows, []])
+    enum = GoldLapel.doc_find_cursor(mock, "users")
+    # Only take the first row
+    first = enum.next
+
+    refute_nil first
+    assert_equal "1", first["id"]
+  end
+end
