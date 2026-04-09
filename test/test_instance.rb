@@ -125,14 +125,14 @@ end
 class TestInstanceDocInsert < Minitest::Test
   def test_delegates_to_module
     insert_result = InstanceMockResult.new(
-      [{ "id" => "1", "data" => '{"name":"Alice"}', "created_at" => "2026-04-07 00:00:00+00" }],
-      ["id", "data", "created_at"]
+      [{ "_id" => "550e8400-e29b-41d4-a716-446655440000", "data" => '{"name":"Alice"}', "created_at" => "2026-04-07 00:00:00+00" }],
+      ["_id", "data", "created_at"]
     )
     mock = InstanceMockConnection.new("INSERT" => insert_result)
     inst = make_test_instance(mock)
 
     result = inst.doc_insert("users", { name: "Alice" })
-    assert_equal 1, result["id"]
+    assert_equal "550e8400-e29b-41d4-a716-446655440000", result["_id"]
     assert_equal({ "name" => "Alice" }, result["data"])
 
     insert_call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("INSERT") }
@@ -147,10 +147,10 @@ class TestInstanceDocFind < Minitest::Test
   def test_delegates_to_module
     find_result = InstanceMockResult.new(
       [
-        { "id" => "1", "data" => '{"name":"Alice"}', "created_at" => "2026-04-07" },
-        { "id" => "2", "data" => '{"name":"Bob"}', "created_at" => "2026-04-07" },
+        { "_id" => "550e8400-e29b-41d4-a716-446655440001", "data" => '{"name":"Alice"}', "created_at" => "2026-04-07" },
+        { "_id" => "550e8400-e29b-41d4-a716-446655440002", "data" => '{"name":"Bob"}', "created_at" => "2026-04-07" },
       ],
-      ["id", "data", "created_at"]
+      ["_id", "data", "created_at"]
     )
     mock = InstanceMockConnection.new("SELECT" => find_result)
     inst = make_test_instance(mock)
@@ -162,8 +162,8 @@ class TestInstanceDocFind < Minitest::Test
 
   def test_passes_filter
     find_result = InstanceMockResult.new(
-      [{ "id" => "1", "data" => '{"name":"Alice"}', "created_at" => "2026-04-07" }],
-      ["id", "data", "created_at"]
+      [{ "_id" => "550e8400-e29b-41d4-a716-446655440000", "data" => '{"name":"Alice"}', "created_at" => "2026-04-07" }],
+      ["_id", "data", "created_at"]
     )
     mock = InstanceMockConnection.new("SELECT" => find_result)
     inst = make_test_instance(mock)

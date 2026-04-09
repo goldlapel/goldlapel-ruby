@@ -966,16 +966,16 @@ module GoldLapel
     _validate_identifier(collection)
     raw = _raw_conn(conn)
     raw.exec("CREATE TABLE IF NOT EXISTS #{collection} (" \
-             "id BIGSERIAL PRIMARY KEY, " \
+             "_id UUID PRIMARY KEY DEFAULT gen_random_uuid(), " \
              "data JSONB NOT NULL, " \
              "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
     result = raw.exec_params(
       "INSERT INTO #{collection} (data) VALUES ($1::jsonb) " \
-      "RETURNING id, data, created_at",
+      "RETURNING _id, data, created_at",
       [JSON.generate(document)]
     )
     row = result[0]
-    { "id" => row["id"].to_i, "data" => JSON.parse(row["data"]), "created_at" => row["created_at"] }
+    { "_id" => row["_id"], "data" => JSON.parse(row["data"]), "created_at" => row["created_at"] }
   end
 
   def self.doc_insert_many(conn, collection, documents)
@@ -983,25 +983,25 @@ module GoldLapel
     raise ArgumentError, "documents must be a non-empty array" if !documents.is_a?(Array) || documents.empty?
     raw = _raw_conn(conn)
     raw.exec("CREATE TABLE IF NOT EXISTS #{collection} (" \
-             "id BIGSERIAL PRIMARY KEY, " \
+             "_id UUID PRIMARY KEY DEFAULT gen_random_uuid(), " \
              "data JSONB NOT NULL, " \
              "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
     placeholders = documents.each_with_index.map { |_, i| "($#{i + 1}::jsonb)" }.join(", ")
     params = documents.map { |doc| JSON.generate(doc) }
     result = raw.exec_params(
       "INSERT INTO #{collection} (data) VALUES #{placeholders} " \
-      "RETURNING id, data, created_at",
+      "RETURNING _id, data, created_at",
       params
     )
     result.map do |row|
-      { "id" => row["id"].to_i, "data" => JSON.parse(row["data"]), "created_at" => row["created_at"] }
+      { "_id" => row["_id"], "data" => JSON.parse(row["data"]), "created_at" => row["created_at"] }
     end
   end
 
   def self.doc_find(conn, collection, filter: nil, sort: nil, limit: nil, skip: nil)
     _validate_identifier(collection)
     raw = _raw_conn(conn)
-    sql = "SELECT id, data, created_at FROM #{collection}"
+    sql = "SELECT _id, data, created_at FROM #{collection}"
     params = []
     idx = 1
     where_clause, filter_params, idx = _build_filter(filter, idx)
@@ -1030,14 +1030,14 @@ module GoldLapel
     end
     result = raw.exec_params(sql, params)
     result.map do |row|
-      { "id" => row["id"].to_i, "data" => JSON.parse(row["data"]), "created_at" => row["created_at"] }
+      { "_id" => row["_id"], "data" => JSON.parse(row["data"]), "created_at" => row["created_at"] }
     end
   end
 
   def self.doc_find_cursor(conn, collection, filter: nil, sort: nil, limit: nil, skip: nil, batch_size: 100)
     _validate_identifier(collection)
     raw = _raw_conn(conn)
-    sql = "SELECT id, data, created_at FROM #{collection}"
+    sql = "SELECT _id, data, created_at FROM #{collection}"
     params = []
     idx = 1
     where_clause, filter_params, idx = _build_filter(filter, idx)
@@ -1084,7 +1084,7 @@ module GoldLapel
   def self.doc_find_one(conn, collection, filter: nil)
     _validate_identifier(collection)
     raw = _raw_conn(conn)
-    sql = "SELECT id, data, created_at FROM #{collection}"
+    sql = "SELECT _id, data, created_at FROM #{collection}"
     params = []
     where_clause, filter_params, _idx = _build_filter(filter, 1)
     unless where_clause.empty?
@@ -1095,7 +1095,7 @@ module GoldLapel
     result = raw.exec_params(sql, params)
     return nil if result.ntuples.zero?
     row = result[0]
-    { "id" => row["id"].to_i, "data" => JSON.parse(row["data"]), "created_at" => row["created_at"] }
+    { "_id" => row["_id"], "data" => JSON.parse(row["data"]), "created_at" => row["created_at"] }
   end
 
   def self.doc_update(conn, collection, filter, update)
@@ -1119,10 +1119,10 @@ module GoldLapel
     update_expr, update_params, _idx = _build_update(update, idx)
     cte_where = where_clause.empty? ? "" : " WHERE #{where_clause}"
     sql = "WITH target AS (" \
-          "SELECT id FROM #{collection}#{cte_where} " \
+          "SELECT _id FROM #{collection}#{cte_where} " \
           "LIMIT 1" \
           ") UPDATE #{collection} SET data = #{update_expr} " \
-          "FROM target WHERE #{collection}.id = target.id"
+          "FROM target WHERE #{collection}._id = target._id"
     params = filter_params + update_params
     result = raw.exec_params(sql, params)
     result.cmd_tuples
@@ -1146,10 +1146,10 @@ module GoldLapel
     where_clause, filter_params, _idx = _build_filter(filter, 1)
     cte_where = where_clause.empty? ? "" : " WHERE #{where_clause}"
     sql = "WITH target AS (" \
-          "SELECT id FROM #{collection}#{cte_where} " \
+          "SELECT _id FROM #{collection}#{cte_where} " \
           "LIMIT 1" \
           ") DELETE FROM #{collection} " \
-          "USING target WHERE #{collection}.id = target.id"
+          "USING target WHERE #{collection}._id = target._id"
     result = raw.exec_params(sql, filter_params)
     result.cmd_tuples
   end
@@ -1175,16 +1175,16 @@ module GoldLapel
     update_expr, update_params, _idx = _build_update(update, idx)
     cte_where = where_clause.empty? ? "" : " WHERE #{where_clause}"
     sql = "WITH target AS (" \
-          "SELECT id FROM #{collection}#{cte_where} " \
+          "SELECT _id FROM #{collection}#{cte_where} " \
           "LIMIT 1" \
           ") UPDATE #{collection} SET data = #{update_expr} " \
-          "FROM target WHERE #{collection}.id = target.id " \
-          "RETURNING #{collection}.id, #{collection}.data, #{collection}.created_at"
+          "FROM target WHERE #{collection}._id = target._id " \
+          "RETURNING #{collection}._id, #{collection}.data, #{collection}.created_at"
     params = filter_params + update_params
     result = raw.exec_params(sql, params)
     return nil if result.ntuples.zero?
     row = result[0]
-    { "id" => row["id"].to_i, "data" => JSON.parse(row["data"]), "created_at" => row["created_at"] }
+    { "_id" => row["_id"], "data" => JSON.parse(row["data"]), "created_at" => row["created_at"] }
   end
 
   def self.doc_find_one_and_delete(conn, collection, filter)
@@ -1193,15 +1193,15 @@ module GoldLapel
     where_clause, filter_params, _idx = _build_filter(filter, 1)
     cte_where = where_clause.empty? ? "" : " WHERE #{where_clause}"
     sql = "WITH target AS (" \
-          "SELECT id FROM #{collection}#{cte_where} " \
+          "SELECT _id FROM #{collection}#{cte_where} " \
           "LIMIT 1" \
           ") DELETE FROM #{collection} " \
-          "USING target WHERE #{collection}.id = target.id " \
-          "RETURNING #{collection}.id, #{collection}.data, #{collection}.created_at"
+          "USING target WHERE #{collection}._id = target._id " \
+          "RETURNING #{collection}._id, #{collection}.data, #{collection}.created_at"
     result = raw.exec_params(sql, filter_params)
     return nil if result.ntuples.zero?
     row = result[0]
-    { "id" => row["id"].to_i, "data" => JSON.parse(row["data"]), "created_at" => row["created_at"] }
+    { "_id" => row["_id"], "data" => JSON.parse(row["data"]), "created_at" => row["created_at"] }
   end
 
   def self.doc_distinct(conn, collection, field, filter: nil)
@@ -1370,7 +1370,7 @@ module GoldLapel
         else
           # Include field: val == 1 or val == true
           if key.to_s == "_id"
-            select_parts << "id AS _id"
+            select_parts << "_id"
           else
             select_parts << "#{_resolve_field_ref("$#{key}", unwind_map)} AS #{key}"
           end
@@ -1382,7 +1382,7 @@ module GoldLapel
         # _id excluded, do nothing
       elsif !project_stage.key?("_id")
         # _id included by default
-        select_parts.unshift("id AS _id")
+        select_parts.unshift("_id")
       end
 
       all_parts = select_parts + lookup_sqls
@@ -1491,7 +1491,7 @@ module GoldLapel
         sql += " ORDER BY #{clauses.join(', ')}"
       end
     else
-      base_cols = ["id", "data", "created_at"]
+      base_cols = ["_id", "data", "created_at"]
       all_parts = base_cols + lookup_sqls
       sql = "SELECT #{all_parts.join(', ')} FROM #{collection}"
 
@@ -1548,7 +1548,7 @@ module GoldLapel
       "BEGIN " \
         "PERFORM pg_notify('#{channel}', json_build_object(" \
           "'op', TG_OP, " \
-          "'id', COALESCE(NEW.id, OLD.id), " \
+          "'_id', COALESCE(NEW._id, OLD._id), " \
           "'data', COALESCE(NEW.data, OLD.data)" \
         ")::text); " \
         "RETURN COALESCE(NEW, OLD); " \
@@ -1626,7 +1626,7 @@ module GoldLapel
     raw = _raw_conn(conn)
 
     raw.exec("CREATE TABLE IF NOT EXISTS #{collection} (" \
-             "id BIGSERIAL PRIMARY KEY, " \
+             "_id UUID PRIMARY KEY DEFAULT gen_random_uuid(), " \
              "data JSONB NOT NULL, " \
              "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
 
@@ -1635,9 +1635,9 @@ module GoldLapel
     raw.exec(
       "CREATE OR REPLACE FUNCTION #{fn_name}() RETURNS trigger AS $$ " \
       "BEGIN " \
-        "DELETE FROM #{collection} WHERE id IN (" \
-          "SELECT id FROM #{collection} " \
-          "ORDER BY id DESC " \
+        "DELETE FROM #{collection} WHERE _id IN (" \
+          "SELECT _id FROM #{collection} " \
+          "ORDER BY created_at DESC " \
           "OFFSET #{max.to_i}" \
         "); " \
         "RETURN NULL; " \

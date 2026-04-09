@@ -65,21 +65,21 @@ end
 class TestDocInsert < Minitest::Test
   def test_creates_table_and_inserts
     insert_result = DocMockResult.new(
-      [{ "id" => "1", "data" => '{"name":"Alice","age":30}', "created_at" => "2026-04-07 00:00:00+00" }],
-      ["id", "data", "created_at"]
+      [{ "_id" => "550e8400-e29b-41d4-a716-446655440000", "data" => '{"name":"Alice","age":30}', "created_at" => "2026-04-07 00:00:00+00" }],
+      ["_id", "data", "created_at"]
     )
     mock = DocMockConnection.new("INSERT" => insert_result)
     result = GoldLapel.doc_insert(mock, "users", { name: "Alice", age: 30 })
 
-    assert_equal 1, result["id"]
+    assert_equal "550e8400-e29b-41d4-a716-446655440000", result["_id"]
     assert_equal({ "name" => "Alice", "age" => 30 }, result["data"])
     assert_equal "2026-04-07 00:00:00+00", result["created_at"]
   end
 
   def test_table_ddl
     insert_result = DocMockResult.new(
-      [{ "id" => "1", "data" => '{"name":"Alice"}', "created_at" => "2026-04-07 00:00:00+00" }],
-      ["id", "data", "created_at"]
+      [{ "_id" => "550e8400-e29b-41d4-a716-446655440000", "data" => '{"name":"Alice"}', "created_at" => "2026-04-07 00:00:00+00" }],
+      ["_id", "data", "created_at"]
     )
     mock = DocMockConnection.new("INSERT" => insert_result)
     GoldLapel.doc_insert(mock, "users", { name: "Alice" })
@@ -87,15 +87,15 @@ class TestDocInsert < Minitest::Test
     create_call = mock.calls.find { |c| c[:method] == :exec && c[:sql].include?("CREATE TABLE") }
     refute_nil create_call
     assert_includes create_call[:sql], "CREATE TABLE IF NOT EXISTS users"
-    assert_includes create_call[:sql], "id BIGSERIAL PRIMARY KEY"
+    assert_includes create_call[:sql], "_id UUID PRIMARY KEY DEFAULT gen_random_uuid()"
     assert_includes create_call[:sql], "data JSONB NOT NULL"
     assert_includes create_call[:sql], "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"
   end
 
   def test_insert_sql_and_params
     insert_result = DocMockResult.new(
-      [{ "id" => "1", "data" => '{"name":"Alice"}', "created_at" => "2026-04-07 00:00:00+00" }],
-      ["id", "data", "created_at"]
+      [{ "_id" => "550e8400-e29b-41d4-a716-446655440000", "data" => '{"name":"Alice"}', "created_at" => "2026-04-07 00:00:00+00" }],
+      ["_id", "data", "created_at"]
     )
     mock = DocMockConnection.new("INSERT" => insert_result)
     GoldLapel.doc_insert(mock, "users", { name: "Alice" })
@@ -103,7 +103,7 @@ class TestDocInsert < Minitest::Test
     insert_call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("INSERT") }
     refute_nil insert_call
     assert_includes insert_call[:sql], "INSERT INTO users (data) VALUES ($1::jsonb)"
-    assert_includes insert_call[:sql], "RETURNING id, data, created_at"
+    assert_includes insert_call[:sql], "RETURNING _id, data, created_at"
     assert_equal [JSON.generate({ name: "Alice" })], insert_call[:params]
   end
 
@@ -119,18 +119,18 @@ class TestDocInsertMany < Minitest::Test
   def test_batch_inserts
     insert_result = DocMockResult.new(
       [
-        { "id" => "1", "data" => '{"name":"Alice"}', "created_at" => "2026-04-07 00:00:00+00" },
-        { "id" => "2", "data" => '{"name":"Bob"}', "created_at" => "2026-04-07 00:00:00+00" }
+        { "_id" => "550e8400-e29b-41d4-a716-446655440001", "data" => '{"name":"Alice"}', "created_at" => "2026-04-07 00:00:00+00" },
+        { "_id" => "550e8400-e29b-41d4-a716-446655440002", "data" => '{"name":"Bob"}', "created_at" => "2026-04-07 00:00:00+00" }
       ],
-      ["id", "data", "created_at"]
+      ["_id", "data", "created_at"]
     )
     mock = DocMockConnection.new("INSERT" => insert_result)
     result = GoldLapel.doc_insert_many(mock, "users", [{ name: "Alice" }, { name: "Bob" }])
 
     assert_equal 2, result.length
-    assert_equal 1, result[0]["id"]
+    assert_equal "550e8400-e29b-41d4-a716-446655440001", result[0]["_id"]
     assert_equal({ "name" => "Alice" }, result[0]["data"])
-    assert_equal 2, result[1]["id"]
+    assert_equal "550e8400-e29b-41d4-a716-446655440002", result[1]["_id"]
     assert_equal({ "name" => "Bob" }, result[1]["data"])
   end
 
@@ -169,10 +169,10 @@ class TestDocFind < Minitest::Test
   def test_find_all_without_filter
     find_result = DocMockResult.new(
       [
-        { "id" => "1", "data" => '{"name":"Alice"}', "created_at" => "2026-04-07 00:00:00+00" },
-        { "id" => "2", "data" => '{"name":"Bob"}', "created_at" => "2026-04-07 00:00:00+00" }
+        { "_id" => "550e8400-e29b-41d4-a716-446655440001", "data" => '{"name":"Alice"}', "created_at" => "2026-04-07 00:00:00+00" },
+        { "_id" => "550e8400-e29b-41d4-a716-446655440002", "data" => '{"name":"Bob"}', "created_at" => "2026-04-07 00:00:00+00" }
       ],
-      ["id", "data", "created_at"]
+      ["_id", "data", "created_at"]
     )
     mock = DocMockConnection.new("SELECT" => find_result)
     result = GoldLapel.doc_find(mock, "users")
@@ -258,14 +258,14 @@ end
 class TestDocFindOne < Minitest::Test
   def test_returns_single_hash
     find_result = DocMockResult.new(
-      [{ "id" => "1", "data" => '{"name":"Alice"}', "created_at" => "2026-04-07 00:00:00+00" }],
-      ["id", "data", "created_at"]
+      [{ "_id" => "550e8400-e29b-41d4-a716-446655440000", "data" => '{"name":"Alice"}', "created_at" => "2026-04-07 00:00:00+00" }],
+      ["_id", "data", "created_at"]
     )
     mock = DocMockConnection.new("SELECT" => find_result)
     result = GoldLapel.doc_find_one(mock, "users", filter: { name: "Alice" })
 
     refute_nil result
-    assert_equal 1, result["id"]
+    assert_equal "550e8400-e29b-41d4-a716-446655440000", result["_id"]
     assert_equal({ "name" => "Alice" }, result["data"])
   end
 
@@ -361,11 +361,11 @@ class TestDocUpdateOne < Minitest::Test
     call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("UPDATE") }
     refute_nil call
     assert_includes call[:sql], "WITH target AS ("
-    assert_includes call[:sql], "SELECT id FROM users"
+    assert_includes call[:sql], "SELECT _id FROM users"
     assert_includes call[:sql], "WHERE data @> $1::jsonb"
     assert_includes call[:sql], "LIMIT 1"
     assert_includes call[:sql], "UPDATE users SET data = data || $2::jsonb"
-    assert_includes call[:sql], "FROM target WHERE users.id = target.id"
+    assert_includes call[:sql], "FROM target WHERE users._id = target._id"
     assert_equal [JSON.generate({ name: "Alice" }), JSON.generate({ age: 31 })], call[:params]
   end
 
@@ -440,11 +440,11 @@ class TestDocDeleteOne < Minitest::Test
     call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("DELETE") }
     refute_nil call
     assert_includes call[:sql], "WITH target AS ("
-    assert_includes call[:sql], "SELECT id FROM users"
+    assert_includes call[:sql], "SELECT _id FROM users"
     assert_includes call[:sql], "WHERE data @> $1::jsonb"
     assert_includes call[:sql], "LIMIT 1"
     assert_includes call[:sql], "DELETE FROM users"
-    assert_includes call[:sql], "USING target WHERE users.id = target.id"
+    assert_includes call[:sql], "USING target WHERE users._id = target._id"
     assert_equal [JSON.generate({ name: "Alice" })], call[:params]
   end
 
@@ -664,7 +664,7 @@ class TestDocAggregate < Minitest::Test
 
     call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("SELECT") }
     refute_nil call
-    assert_includes call[:sql], "SELECT id, data, created_at FROM orders"
+    assert_includes call[:sql], "SELECT _id, data, created_at FROM orders"
     assert_includes call[:sql], "WHERE data @> $1::jsonb"
     assert_equal [JSON.generate({ "status" => "pending" })], call[:params]
   end
@@ -906,7 +906,7 @@ class TestDocAggregate < Minitest::Test
 
     call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("SELECT") }
     refute_nil call
-    assert_includes call[:sql], "id AS _id"
+    assert_includes call[:sql], "_id"
     assert_includes call[:sql], "data->>'name' AS name"
     assert_includes call[:sql], "data->>'status' AS status"
   end
@@ -919,7 +919,7 @@ class TestDocAggregate < Minitest::Test
 
     call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("SELECT") }
     refute_nil call
-    refute_includes call[:sql], "id AS _id"
+    refute_includes call[:sql], "_id"
     assert_includes call[:sql], "data->>'name' AS name"
     assert_includes call[:sql], "data->>'price' AS price"
   end
@@ -934,7 +934,7 @@ class TestDocAggregate < Minitest::Test
     refute_nil call
     assert_includes call[:sql], "data->>'name' AS customer_name"
     assert_includes call[:sql], "data->>'amount' AS total"
-    refute_includes call[:sql], "id AS _id"
+    refute_includes call[:sql], "SELECT _id"
   end
 
   def test_project_dot_notation
@@ -1353,7 +1353,7 @@ class TestUpdateOperators < Minitest::Test
     refute_nil call
     assert_includes call[:sql], "WITH target AS ("
     assert_includes call[:sql], "SET data = (data || $2::jsonb)"
-    assert_includes call[:sql], "FROM target WHERE users.id = target.id"
+    assert_includes call[:sql], "FROM target WHERE users._id = target._id"
     assert_equal JSON.generate({ "name" => "Alice" }), call[:params][0]
     assert_equal JSON.generate({ "age" => 31 }), call[:params][1]
   end
@@ -1439,14 +1439,14 @@ end
 class TestDocFindOneAndUpdate < Minitest::Test
   def test_returns_updated_doc
     update_result = DocMockResult.new(
-      [{ "id" => "1", "data" => '{"name":"Alice","age":31}', "created_at" => "2026-04-07 00:00:00+00" }],
-      ["id", "data", "created_at"]
+      [{ "_id" => "550e8400-e29b-41d4-a716-446655440000", "data" => '{"name":"Alice","age":31}', "created_at" => "2026-04-07 00:00:00+00" }],
+      ["_id", "data", "created_at"]
     )
     mock = DocMockConnection.new("UPDATE" => update_result)
     result = GoldLapel.doc_find_one_and_update(mock, "users", { "name" => "Alice" }, { "age" => 31 })
 
     refute_nil result
-    assert_equal 1, result["id"]
+    assert_equal "550e8400-e29b-41d4-a716-446655440000", result["_id"]
     assert_equal({ "name" => "Alice", "age" => 31 }, result["data"])
   end
 
@@ -1457,12 +1457,12 @@ class TestDocFindOneAndUpdate < Minitest::Test
     call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("UPDATE") }
     refute_nil call
     assert_includes call[:sql], "WITH target AS ("
-    assert_includes call[:sql], "SELECT id FROM users"
+    assert_includes call[:sql], "SELECT _id FROM users"
     assert_includes call[:sql], "WHERE data @> $1::jsonb"
     assert_includes call[:sql], "LIMIT 1"
     assert_includes call[:sql], "SET data = data || $2::jsonb"
-    assert_includes call[:sql], "FROM target WHERE users.id = target.id"
-    assert_includes call[:sql], "RETURNING users.id, users.data, users.created_at"
+    assert_includes call[:sql], "FROM target WHERE users._id = target._id"
+    assert_includes call[:sql], "RETURNING users._id, users.data, users.created_at"
     assert_equal [JSON.generate({ "name" => "Alice" }), JSON.generate({ "age" => 31 })], call[:params]
   end
 
@@ -1482,7 +1482,7 @@ class TestDocFindOneAndUpdate < Minitest::Test
     call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("UPDATE") }
     refute_nil call
     assert_includes call[:sql], "SET data = (data || $2::jsonb)"
-    assert_includes call[:sql], "RETURNING users.id, users.data, users.created_at"
+    assert_includes call[:sql], "RETURNING users._id, users.data, users.created_at"
   end
 
   def test_rejects_invalid_collection
@@ -1496,14 +1496,14 @@ end
 class TestDocFindOneAndDelete < Minitest::Test
   def test_returns_deleted_doc
     delete_result = DocMockResult.new(
-      [{ "id" => "1", "data" => '{"name":"Alice","age":30}', "created_at" => "2026-04-07 00:00:00+00" }],
-      ["id", "data", "created_at"]
+      [{ "_id" => "550e8400-e29b-41d4-a716-446655440000", "data" => '{"name":"Alice","age":30}', "created_at" => "2026-04-07 00:00:00+00" }],
+      ["_id", "data", "created_at"]
     )
     mock = DocMockConnection.new("DELETE" => delete_result)
     result = GoldLapel.doc_find_one_and_delete(mock, "users", { "name" => "Alice" })
 
     refute_nil result
-    assert_equal 1, result["id"]
+    assert_equal "550e8400-e29b-41d4-a716-446655440000", result["_id"]
     assert_equal({ "name" => "Alice", "age" => 30 }, result["data"])
   end
 
@@ -1514,12 +1514,12 @@ class TestDocFindOneAndDelete < Minitest::Test
     call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("DELETE") }
     refute_nil call
     assert_includes call[:sql], "WITH target AS ("
-    assert_includes call[:sql], "SELECT id FROM users"
+    assert_includes call[:sql], "SELECT _id FROM users"
     assert_includes call[:sql], "WHERE data @> $1::jsonb"
     assert_includes call[:sql], "LIMIT 1"
     assert_includes call[:sql], "DELETE FROM users"
-    assert_includes call[:sql], "USING target WHERE users.id = target.id"
-    assert_includes call[:sql], "RETURNING users.id, users.data, users.created_at"
+    assert_includes call[:sql], "USING target WHERE users._id = target._id"
+    assert_includes call[:sql], "RETURNING users._id, users.data, users.created_at"
     assert_equal [JSON.generate({ "name" => "Alice" })], call[:params]
   end
 
@@ -1857,20 +1857,20 @@ class TestDocFindCursor < Minitest::Test
 
   def test_yields_rows
     rows = [
-      { "id" => "1", "data" => '{"name":"Alice"}', "created_at" => "2026-04-07" },
-      { "id" => "2", "data" => '{"name":"Bob"}', "created_at" => "2026-04-07" }
+      { "_id" => "550e8400-e29b-41d4-a716-446655440001", "data" => '{"name":"Alice"}', "created_at" => "2026-04-07" },
+      { "_id" => "550e8400-e29b-41d4-a716-446655440002", "data" => '{"name":"Bob"}', "created_at" => "2026-04-07" }
     ]
     mock = CursorMockConnection.new(fetch_batches: [rows, []])
     results = GoldLapel.doc_find_cursor(mock, "users").to_a
 
     assert_equal 2, results.length
-    assert_equal "1", results[0]["id"]
+    assert_equal "550e8400-e29b-41d4-a716-446655440001", results[0]["_id"]
     assert_equal '{"name":"Alice"}', results[0]["data"]
   end
 
   def test_multiple_batches
-    batch1 = [{ "id" => "1", "data" => '{"a":1}', "created_at" => "ts" }]
-    batch2 = [{ "id" => "2", "data" => '{"b":2}', "created_at" => "ts" }]
+    batch1 = [{ "_id" => "550e8400-e29b-41d4-a716-446655440001", "data" => '{"a":1}', "created_at" => "ts" }]
+    batch2 = [{ "_id" => "550e8400-e29b-41d4-a716-446655440002", "data" => '{"b":2}', "created_at" => "ts" }]
     mock = CursorMockConnection.new(fetch_batches: [batch1, batch2, []])
     results = GoldLapel.doc_find_cursor(mock, "users").to_a
 
@@ -1895,7 +1895,7 @@ class TestDocFindCursor < Minitest::Test
 
     declare_call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("DECLARE") }
     refute_nil declare_call
-    assert_includes declare_call[:sql], "CURSOR FOR SELECT id, data, created_at FROM users"
+    assert_includes declare_call[:sql], "CURSOR FOR SELECT _id, data, created_at FROM users"
 
     close_call = mock.calls.find { |c| c[:method] == :exec && c[:sql].include?("CLOSE") }
     refute_nil close_call
@@ -1942,8 +1942,8 @@ class TestDocFindCursor < Minitest::Test
 
   def test_cleanup_on_early_break
     rows = [
-      { "id" => "1", "data" => '{"a":1}', "created_at" => "ts" },
-      { "id" => "2", "data" => '{"b":2}', "created_at" => "ts" }
+      { "_id" => "550e8400-e29b-41d4-a716-446655440001", "data" => '{"a":1}', "created_at" => "ts" },
+      { "_id" => "550e8400-e29b-41d4-a716-446655440002", "data" => '{"b":2}', "created_at" => "ts" }
     ]
     # Provide extra batches that won't be consumed
     mock = CursorMockConnection.new(fetch_batches: [rows, rows, []])
@@ -1952,6 +1952,6 @@ class TestDocFindCursor < Minitest::Test
     first = enum.next
 
     refute_nil first
-    assert_equal "1", first["id"]
+    assert_equal "550e8400-e29b-41d4-a716-446655440001", first["_id"]
   end
 end
