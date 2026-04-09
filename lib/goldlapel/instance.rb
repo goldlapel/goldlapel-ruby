@@ -256,6 +256,12 @@ module GoldLapel
       GoldLapel.doc_remove_ttl_index(require_conn, collection)
     end
 
+    # --- Collection management ---
+
+    def doc_create_collection(collection, **opts)
+      GoldLapel.doc_create_collection(require_conn, collection, **opts)
+    end
+
     # --- Capped collections ---
 
     def doc_create_capped(collection, max:)

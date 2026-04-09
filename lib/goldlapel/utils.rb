@@ -965,10 +965,7 @@ module GoldLapel
   def self.doc_insert(conn, collection, document)
     _validate_identifier(collection)
     raw = _raw_conn(conn)
-    raw.exec("CREATE TABLE IF NOT EXISTS #{collection} (" \
-             "_id UUID PRIMARY KEY DEFAULT gen_random_uuid(), " \
-             "data JSONB NOT NULL, " \
-             "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
+    _ensure_collection(raw, collection)
     result = raw.exec_params(
       "INSERT INTO #{collection} (data) VALUES ($1::jsonb) " \
       "RETURNING _id, data, created_at",
@@ -982,10 +979,7 @@ module GoldLapel
     _validate_identifier(collection)
     raise ArgumentError, "documents must be a non-empty array" if !documents.is_a?(Array) || documents.empty?
     raw = _raw_conn(conn)
-    raw.exec("CREATE TABLE IF NOT EXISTS #{collection} (" \
-             "_id UUID PRIMARY KEY DEFAULT gen_random_uuid(), " \
-             "data JSONB NOT NULL, " \
-             "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
+    _ensure_collection(raw, collection)
     placeholders = documents.each_with_index.map { |_, i| "($#{i + 1}::jsonb)" }.join(", ")
     params = documents.map { |doc| JSON.generate(doc) }
     result = raw.exec_params(
@@ -1625,10 +1619,7 @@ module GoldLapel
     _validate_identifier(collection)
     raw = _raw_conn(conn)
 
-    raw.exec("CREATE TABLE IF NOT EXISTS #{collection} (" \
-             "_id UUID PRIMARY KEY DEFAULT gen_random_uuid(), " \
-             "data JSONB NOT NULL, " \
-             "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
+    _ensure_collection(raw, collection)
 
     fn_name = "_gl_cap_#{collection}"
 
@@ -1659,6 +1650,21 @@ module GoldLapel
     raw.exec("DROP TRIGGER IF EXISTS #{fn_name}_trg ON #{collection}")
     raw.exec("DROP FUNCTION IF EXISTS #{fn_name}()")
   end
+
+  def self.doc_create_collection(conn, collection, unlogged: false)
+    _validate_identifier(collection)
+    raw = _raw_conn(conn)
+    _ensure_collection(raw, collection, unlogged: unlogged)
+  end
+
+  def self._ensure_collection(raw, collection, unlogged: false)
+    prefix = unlogged ? "CREATE UNLOGGED TABLE" : "CREATE TABLE"
+    raw.exec("#{prefix} IF NOT EXISTS #{collection} (" \
+             "_id UUID PRIMARY KEY DEFAULT gen_random_uuid(), " \
+             "data JSONB NOT NULL, " \
+             "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
+  end
+  private_class_method :_ensure_collection
 
   def self._validate_identifier(name)
     unless name.to_s.match?(/\A[a-zA-Z_][a-zA-Z0-9_]*\z/)

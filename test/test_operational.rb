@@ -212,7 +212,7 @@ class TestDocCreateCapped < Minitest::Test
 
     create_table = mock.calls.find { |c| c[:sql].include?("CREATE TABLE IF NOT EXISTS logs") }
     refute_nil create_table
-    assert_includes create_table[:sql], "BIGSERIAL PRIMARY KEY"
+    assert_includes create_table[:sql], "_id UUID PRIMARY KEY DEFAULT gen_random_uuid()"
     assert_includes create_table[:sql], "JSONB NOT NULL"
 
     fn_calls = mock.calls.select { |c| c[:sql].include?("CREATE OR REPLACE FUNCTION") }
@@ -232,7 +232,7 @@ class TestDocCreateCapped < Minitest::Test
     GoldLapel.doc_create_capped(mock, "events", max: 500)
 
     fn_sql = mock.calls.find { |c| c[:sql].include?("CREATE OR REPLACE FUNCTION") }[:sql]
-    assert_includes fn_sql, "ORDER BY id DESC"
+    assert_includes fn_sql, "ORDER BY created_at DESC"
     assert_includes fn_sql, "OFFSET 500"
     assert_includes fn_sql, "DELETE FROM events"
   end

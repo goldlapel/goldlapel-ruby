@@ -93,6 +93,7 @@ class TestInstanceConn < Minitest::Test
     inst.instance_variable_set(:@upstream, "postgresql://localhost/test")
 
     methods_with_args = {
+      doc_create_collection: ["col"],
       doc_insert: ["col", { a: 1 }],
       doc_find: ["col"],
       doc_find_one: ["col"],
@@ -117,6 +118,30 @@ class TestInstanceConn < Minitest::Test
       error = assert_raises(RuntimeError, "Expected #{method} to raise") { inst.send(method, *args) }
       assert_match(/Connection not available/, error.message, "#{method} error message mismatch")
     end
+  end
+end
+
+# --- doc_create_collection delegation ---
+
+class TestInstanceDocCreateCollection < Minitest::Test
+  def test_delegates_to_module
+    mock = InstanceMockConnection.new
+    inst = make_test_instance(mock)
+
+    inst.doc_create_collection("events")
+    create_call = mock.calls.find { |c| c[:method] == :exec && c[:sql].include?("CREATE TABLE") }
+    refute_nil create_call
+    assert_includes create_call[:sql], "CREATE TABLE IF NOT EXISTS events"
+  end
+
+  def test_delegates_unlogged
+    mock = InstanceMockConnection.new
+    inst = make_test_instance(mock)
+
+    inst.doc_create_collection("temp_data", unlogged: true)
+    create_call = mock.calls.find { |c| c[:method] == :exec && c[:sql].include?("CREATE") }
+    refute_nil create_call
+    assert_includes create_call[:sql], "CREATE UNLOGGED TABLE IF NOT EXISTS temp_data"
   end
 end
 

@@ -113,6 +113,45 @@ class TestDocInsert < Minitest::Test
   end
 end
 
+# --- doc_create_collection ---
+
+class TestDocCreateCollection < Minitest::Test
+  def test_creates_table_with_default_options
+    mock = DocMockConnection.new
+    GoldLapel.doc_create_collection(mock, "users")
+
+    create_call = mock.calls.find { |c| c[:method] == :exec && c[:sql].include?("CREATE TABLE") }
+    refute_nil create_call
+    assert_includes create_call[:sql], "CREATE TABLE IF NOT EXISTS users"
+    refute_includes create_call[:sql], "UNLOGGED"
+  end
+
+  def test_creates_unlogged_table
+    mock = DocMockConnection.new
+    GoldLapel.doc_create_collection(mock, "ephemeral", unlogged: true)
+
+    create_call = mock.calls.find { |c| c[:method] == :exec && c[:sql].include?("CREATE") }
+    refute_nil create_call
+    assert_includes create_call[:sql], "CREATE UNLOGGED TABLE IF NOT EXISTS ephemeral"
+  end
+
+  def test_schema_correctness
+    mock = DocMockConnection.new
+    GoldLapel.doc_create_collection(mock, "items")
+
+    create_call = mock.calls.find { |c| c[:method] == :exec && c[:sql].include?("CREATE TABLE") }
+    refute_nil create_call
+    assert_includes create_call[:sql], "_id UUID PRIMARY KEY DEFAULT gen_random_uuid()"
+    assert_includes create_call[:sql], "data JSONB NOT NULL"
+    assert_includes create_call[:sql], "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"
+  end
+
+  def test_rejects_invalid_collection
+    mock = DocMockConnection.new
+    assert_raises(ArgumentError) { GoldLapel.doc_create_collection(mock, "bad table!") }
+  end
+end
+
 # --- doc_insert_many ---
 
 class TestDocInsertMany < Minitest::Test
