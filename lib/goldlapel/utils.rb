@@ -158,7 +158,6 @@ module GoldLapel
 
   def self.geoadd(conn, table, name_column, geom_column, name, lon, lat)
     raw = _raw_conn(conn)
-    raw.exec("CREATE EXTENSION IF NOT EXISTS postgis")
     raw.exec("CREATE TABLE IF NOT EXISTS #{table} (" \
              "id BIGSERIAL PRIMARY KEY, " \
              "#{name_column} TEXT NOT NULL, " \
@@ -253,7 +252,6 @@ module GoldLapel
 
   def self.script(conn, lua_code, *args)
     raw = _raw_conn(conn)
-    raw.exec("CREATE EXTENSION IF NOT EXISTS pllua")
     func_name = "_gl_lua_#{rand(16**8).to_s(16)}"
     params = args.each_with_index.map { |_, i| "p#{i + 1} text" }.join(", ")
     raw.exec("CREATE OR REPLACE FUNCTION pg_temp.#{func_name}(#{params}) " \
@@ -422,7 +420,6 @@ module GoldLapel
     _validate_identifier(table)
     _validate_identifier(column)
     raw = _raw_conn(conn)
-    raw.exec("CREATE EXTENSION IF NOT EXISTS pg_trgm")
     result = raw.exec_params(
       "SELECT *, similarity(#{column}, $1) AS _score " \
       "FROM #{table} " \
@@ -437,8 +434,6 @@ module GoldLapel
     _validate_identifier(table)
     _validate_identifier(column)
     raw = _raw_conn(conn)
-    raw.exec("CREATE EXTENSION IF NOT EXISTS fuzzystrmatch")
-    raw.exec("CREATE EXTENSION IF NOT EXISTS pg_trgm")
     result = raw.exec_params(
       "SELECT *, similarity(#{column}, $1) AS _score " \
       "FROM #{table} " \
@@ -453,7 +448,6 @@ module GoldLapel
     _validate_identifier(table)
     _validate_identifier(column)
     raw = _raw_conn(conn)
-    raw.exec("CREATE EXTENSION IF NOT EXISTS vector")
     vec_literal = "[" + vector.map { |v| v.to_f.to_s }.join(",") + "]"
     result = raw.exec_params(
       "SELECT *, (#{column} <=> $1::vector) AS _score " \
@@ -468,7 +462,6 @@ module GoldLapel
     _validate_identifier(table)
     _validate_identifier(column)
     raw = _raw_conn(conn)
-    raw.exec("CREATE EXTENSION IF NOT EXISTS pg_trgm")
     pattern = prefix + "%"
     result = raw.exec_params(
       "SELECT *, similarity(#{column}, $1) AS _score " \

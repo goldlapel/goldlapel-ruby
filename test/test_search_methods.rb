@@ -236,11 +236,6 @@ class TestSearchFuzzy < Minitest::Test
     mock = SearchMethodsMockConnection.new
     GoldLapel.search_fuzzy(mock, "tools", "name", "postgre")
 
-    # First call creates the extension
-    ext_call = mock.calls.find { |c| c[:method] == :exec && c[:sql].include?("pg_trgm") }
-    refute_nil ext_call
-    assert_includes ext_call[:sql], "CREATE EXTENSION IF NOT EXISTS pg_trgm"
-
     call = mock.calls.find { |c| c[:method] == :exec_params }
     refute_nil call
     assert_includes call[:sql], "similarity(name, $1) AS _score"
@@ -307,12 +302,6 @@ class TestSearchPhonetic < Minitest::Test
     mock = SearchMethodsMockConnection.new
     GoldLapel.search_phonetic(mock, "people", "name", "Smith")
 
-    # Creates both extensions
-    ext_calls = mock.calls.select { |c| c[:method] == :exec && c[:sql].include?("CREATE EXTENSION") }
-    ext_names = ext_calls.map { |c| c[:sql] }
-    assert ext_names.any? { |s| s.include?("fuzzystrmatch") }
-    assert ext_names.any? { |s| s.include?("pg_trgm") }
-
     call = mock.calls.find { |c| c[:method] == :exec_params }
     refute_nil call
     assert_includes call[:sql], "similarity(name, $1) AS _score"
@@ -370,11 +359,6 @@ class TestSimilar < Minitest::Test
   def test_sql_structure
     mock = SearchMethodsMockConnection.new
     GoldLapel.similar(mock, "docs", "embedding", [0.1, 0.2, 0.3])
-
-    # Creates the extension
-    ext_call = mock.calls.find { |c| c[:method] == :exec && c[:sql].include?("vector") }
-    refute_nil ext_call
-    assert_includes ext_call[:sql], "CREATE EXTENSION IF NOT EXISTS vector"
 
     call = mock.calls.find { |c| c[:method] == :exec_params }
     refute_nil call
@@ -441,10 +425,6 @@ class TestSuggest < Minitest::Test
   def test_sql_structure
     mock = SearchMethodsMockConnection.new
     GoldLapel.suggest(mock, "tools", "name", "post")
-
-    # Creates the extension
-    ext_call = mock.calls.find { |c| c[:method] == :exec && c[:sql].include?("pg_trgm") }
-    refute_nil ext_call
 
     call = mock.calls.find { |c| c[:method] == :exec_params }
     refute_nil call
