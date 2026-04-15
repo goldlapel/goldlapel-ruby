@@ -542,7 +542,7 @@ module GoldLapel
              "metadata JSONB, " \
              "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
     raw.exec("CREATE INDEX IF NOT EXISTS #{name}_tsq_idx " \
-             "ON #{name} USING GIN (tsquery)")
+             "ON #{name} USING GIST (tsquery)")
     raw.exec_params(
       "INSERT INTO #{name} (query_id, query_text, tsquery, lang, metadata) " \
       "VALUES ($1, $2, plainto_tsquery($3, $2), $3, $4) " \
