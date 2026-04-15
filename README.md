@@ -21,33 +21,38 @@ gem "goldlapel"
 ```ruby
 require "goldlapel"
 
-# Start the proxy — returns a database connection with L1 cache built in
-conn = GoldLapel.start("postgresql://user:pass@localhost:5432/mydb")
+# Create a proxy instance and start it
+gl = GoldLapel.new("postgresql://user:pass@localhost:5432/mydb")
+gl.start
 
-# Use the connection directly — no driver setup needed
-conn.exec("SELECT * FROM users WHERE id = $1", [42])
+# Use the proxy connection directly — no driver setup needed
+gl.exec("SELECT * FROM users WHERE id = $1", [42])
 ```
 
 ## API
 
-### `GoldLapel.start(upstream, port: nil, config: {}, extra_args: [])`
+### `GoldLapel.new(upstream, port: nil, config: {}, extra_args: [])`
 
-Starts the Gold Lapel proxy and returns a database connection with L1 cache.
+Creates a Gold Lapel proxy instance.
 
 - `upstream` — your Postgres connection string (e.g. `postgresql://user:pass@localhost:5432/mydb`)
 - `port` — proxy port (default: 7932)
 - `config` — configuration hash (see [Configuration](#configuration) below)
 - `extra_args` — additional CLI flags passed to the binary (e.g. `["--threshold-impact", "5000"]`)
 
-### `GoldLapel.stop`
+### `gl.start`
+
+Starts the proxy. Returns the instance for chaining.
+
+### `gl.stop`
 
 Stops the proxy. Also called automatically on process exit.
 
-### `GoldLapel.proxy_url`
+### `gl.proxy_url`
 
 Returns the current proxy URL, or `nil` if not running.
 
-### `GoldLapel.dashboard_url`
+### `gl.dashboard_url`
 
 Returns the dashboard URL (e.g. `http://127.0.0.1:7933`), or `nil` if not running. The dashboard port defaults to 7933 and can be configured via `config: { dashboard_port: 9090 }` or disabled with `dashboard_port: 0`.
 
@@ -55,30 +60,20 @@ Returns the dashboard URL (e.g. `http://127.0.0.1:7933`), or `nil` if not runnin
 
 Returns an array of all valid configuration key names (as strings).
 
-### `GoldLapel::Proxy.new(upstream, port: nil, config: {}, extra_args: [])`
-
-Class interface for managing multiple instances:
-
-```ruby
-proxy = GoldLapel::Proxy.new("postgresql://user:pass@localhost:5432/mydb", port: 7932)
-conn = proxy.start
-# ...
-proxy.stop
-```
-
 ## Configuration
 
-Pass a config hash to configure the proxy:
+Pass a config hash to the constructor to configure the proxy:
 
 ```ruby
 require "goldlapel"
 
-conn = GoldLapel.start("postgresql://user:pass@localhost/mydb", config: {
+gl = GoldLapel.new("postgresql://user:pass@localhost/mydb", config: {
   mode: "waiter",
   pool_size: 50,
   disable_matviews: true,
   replica: ["postgresql://user:pass@replica1/mydb"],
 })
+gl.start
 ```
 
 Keys use `snake_case` (symbols or strings) and map to CLI flags (`pool_size` -> `--pool-size`). Boolean keys are flags -- `true` enables them. Array keys produce repeated flags.
