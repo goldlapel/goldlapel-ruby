@@ -88,7 +88,7 @@ module GoldLapel
       @dashboard_port = if config.key?(:dashboard_port) || config.key?("dashboard_port")
         config.fetch(:dashboard_port, config.fetch("dashboard_port", DEFAULT_DASHBOARD_PORT)).to_i
       else
-        DEFAULT_DASHBOARD_PORT
+        @port + 1
       end
     end
 
