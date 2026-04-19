@@ -77,6 +77,12 @@ class TestCli < Minitest::Test
       "GOLDLAPEL_BINARY" => nil,
       "PATH" => "",
       "RUBYLIB" => LIB,
+      # Clear RUBYOPT so bundler/setup (injected by `bundle exec`) doesn't
+      # shell out through the empty PATH and crash the child with 127 before
+      # our code runs. Local dev rarely hits this, but CI via bundle exec
+      # does.
+      "RUBYOPT" => nil,
+      "BUNDLE_GEMFILE" => nil,
     }
     _stdout, stderr, status = Open3.capture3(env, RUBY, EXE)
 
