@@ -88,7 +88,7 @@ Spawns the proxy, opens the internal Postgres connection, and returns a `GoldLap
 
 - `upstream` — Postgres connection string (e.g. `postgresql://user:pass@localhost:5432/mydb`)
 - `port` — proxy port (default: 7932)
-- `log_level` — optional, one of `trace`, `debug`, `info`, `warn`, `error` (translated to the proxy's `-v/-vv/-vvv` verbosity flag; `warn` and `error` use the binary default and add no flag)
+- `log_level` — optional: `trace`, `debug`, `info`, `warn`, or `error`. Translates to the proxy's `-v/-vv/-vvv` flag. The binary defaults to `warn` (banner only); `info`, `debug`, and `trace` progressively add detail.
 - `config` — hash of proxy config (see [Configuration](#configuration))
 - `extra_args` — additional CLI flags for the binary
 
