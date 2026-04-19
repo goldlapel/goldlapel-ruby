@@ -17,11 +17,12 @@ module GoldLapel
   class Instance
     attr_reader :upstream
 
-    def initialize(upstream, port: nil, config: {}, extra_args: [], eager_connect: true)
+    def initialize(upstream, port: nil, config: {}, extra_args: [], eager_connect: true, silent: false)
       @upstream = upstream
       @port = port
       @config = config || {}
       @extra_args = extra_args || []
+      @silent = silent ? true : false
       @proxy = nil
       @internal_conn = nil
       @wrapped_conn = nil
@@ -40,7 +41,7 @@ module GoldLapel
     def start!
       return self if @proxy&.running?
 
-      @proxy = Proxy.new(@upstream, port: @port, config: @config, extra_args: @extra_args)
+      @proxy = Proxy.new(@upstream, port: @port, config: @config, extra_args: @extra_args, silent: @silent)
 
       # Register the proxy in the module-level registry so GoldLapel.stop,
       # GoldLapel.proxy_url, etc. still see it — and so at_exit cleanup works.

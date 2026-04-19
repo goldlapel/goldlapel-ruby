@@ -35,9 +35,10 @@ class FakeProxy
   attr_accessor :wrapped_conn
   attr_reader :upstream, :port, :start_calls, :stop_calls
 
-  def initialize(upstream, port: nil, config: {}, extra_args: [])
+  def initialize(upstream, port: nil, config: {}, extra_args: [], silent: false)
     @upstream = upstream
     @port = port || GoldLapel::DEFAULT_PORT
+    @silent = silent
     @running = false
     @start_calls = 0
     @stop_calls = 0

@@ -43,11 +43,11 @@ module GoldLapel
   module Async
     # Factory — start a proxy + internal connection inside an async reactor.
     # Must be called from within an `Async do ... end` block (or equivalent).
-    def self.start(upstream, port: nil, log_level: nil, config: {}, extra_args: [])
+    def self.start(upstream, port: nil, log_level: nil, config: {}, extra_args: [], silent: false)
       unless ::Async::Task.current?
         raise "Goldlapel::Async.start must be called inside an Async { ... } block"
       end
-      GoldLapel.start(upstream, port: port, log_level: log_level, config: config, extra_args: extra_args)
+      GoldLapel.start(upstream, port: port, log_level: log_level, config: config, extra_args: extra_args, silent: silent)
     end
   end
 end

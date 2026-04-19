@@ -76,11 +76,17 @@ module GoldLapel
       args
     end
 
-    def initialize(upstream, port: nil, config: {}, extra_args: [])
+    # `silent` is a wrapper-only concern: when true the startup banner is
+    # suppressed entirely. Default (false) prints the banner to $stderr (never
+    # $stdout — libraries shouldn't pollute app stdout or captured test output).
+    # `silent` is deliberately NOT part of @config, so it is never forwarded to
+    # the Rust binary as a CLI flag.
+    def initialize(upstream, port: nil, config: {}, extra_args: [], silent: false)
       @upstream = upstream
       @port = port || DEFAULT_PORT
       @config = config
       @extra_args = extra_args
+      @silent = silent ? true : false
       @pid = nil
       @url = nil
       @dashboard_url = nil
@@ -130,10 +136,16 @@ module GoldLapel
       @url = self.class.make_proxy_url(@upstream, @port)
       @dashboard_url = @dashboard_port > 0 ? "http://127.0.0.1:#{@dashboard_port}" : nil
 
-      if @dashboard_port > 0
-        puts "goldlapel → :#{@port} (proxy) | http://127.0.0.1:#{@dashboard_port} (dashboard)"
-      else
-        puts "goldlapel → :#{@port} (proxy)"
+      # Banner — $stderr (not $stdout), and only when not silenced. Library
+      # code must never unconditionally write to $stdout: it pollutes app
+      # output, CI logs, and stdout captured in test runs. `silent: true`
+      # suppresses the banner entirely.
+      unless @silent
+        if @dashboard_port > 0
+          $stderr.puts "goldlapel → :#{@port} (proxy) | http://127.0.0.1:#{@dashboard_port} (dashboard)"
+        else
+          $stderr.puts "goldlapel → :#{@port} (proxy)"
+        end
       end
 
       @url
@@ -243,12 +255,12 @@ module GoldLapel
       # Low-level entry point — spawns a Proxy and returns the proxy URL
       # string. Does NOT open a PG connection or wrap it. Used by
       # `GoldLapel.start_proxy` and tests.
-      def start(upstream, port: nil, config: {}, extra_args: [])
+      def start(upstream, port: nil, config: {}, extra_args: [], silent: false)
         @mutex.synchronize do
           existing = @instances[upstream]
           return existing.url if existing&.running?
 
-          proxy = Proxy.new(upstream, port: port, config: config, extra_args: extra_args)
+          proxy = Proxy.new(upstream, port: port, config: config, extra_args: extra_args, silent: silent)
           unless @cleanup_registered
             at_exit { cleanup }
             @cleanup_registered = true
