@@ -24,30 +24,41 @@ require "securerandom"
 class TestAsyncNativeIntegration < Minitest::Test
   DATABASE_URL = ENV["DATABASE_URL"] || "postgresql://localhost/postgres"
 
-  def setup
-    @async_available = false
-    @pg_available = false
-    @db_reachable = false
+  # Cache the probe across tests — each setup would otherwise pay the full
+  # connect timeout to an unreachable host.
+  @@probe_done = false
+  @@async_available = false
+  @@pg_available = false
+  @@db_reachable = false
 
+  def self.run_probe
+    return if @@probe_done
+    @@probe_done = true
     begin
       require "async"
       require "pg"
       require_relative "../lib/goldlapel/async"
-      @async_available = true
-      @pg_available = true
+      @@async_available = true
+      @@pg_available = true
     rescue LoadError
       return
     end
-
-    # Try connecting to probe reachability, then discard the probe conn.
-    # Each test opens its own to avoid cross-test contamination.
+    sep = DATABASE_URL.include?("?") ? "&" : "?"
+    probe_url = "#{DATABASE_URL}#{sep}connect_timeout=3"
     begin
-      probe = PG.connect(DATABASE_URL)
+      probe = PG.connect(probe_url)
       probe.close
-      @db_reachable = true
+      @@db_reachable = true
     rescue PG::Error, StandardError
-      @db_reachable = false
+      @@db_reachable = false
     end
+  end
+
+  def setup
+    self.class.run_probe
+    @async_available = @@async_available
+    @pg_available = @@pg_available
+    @db_reachable = @@db_reachable
 
     @collection = "_gl_async_native_test_#{SecureRandom.hex(4)}"
     @counter_table = "_gl_async_native_counter_#{SecureRandom.hex(4)}"
