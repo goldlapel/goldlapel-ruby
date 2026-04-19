@@ -240,35 +240,41 @@ module GoldLapel
     @cleanup_registered = false
 
     class << self
+      # Low-level entry point — spawns a Proxy and returns the proxy URL
+      # string. Does NOT open a PG connection or wrap it. Used by
+      # `GoldLapel.start_proxy` and tests.
       def start(upstream, port: nil, config: {}, extra_args: [])
         @mutex.synchronize do
           existing = @instances[upstream]
-          if existing&.running?
-            return existing.wrapped_conn || existing.url
-          end
+          return existing.url if existing&.running?
 
           proxy = Proxy.new(upstream, port: port, config: config, extra_args: extra_args)
           unless @cleanup_registered
             at_exit { cleanup }
             @cleanup_registered = true
           end
-          url = proxy.start
+          proxy.start
           @instances[upstream] = proxy
+          proxy.url
+        end
+      end
 
-          # Require pg gem — raise if not installed
-          begin
-            require "pg"
-          rescue LoadError
-            raise LoadError,
-              "No supported database driver found. " \
-              "Install one (e.g. gem install pg) " \
-              "or use proxy_url() if you only need the connection string."
+      # Register an externally-constructed proxy in the module registry
+      # (used by Instance so the at_exit cleanup covers it).
+      def register(proxy)
+        @mutex.synchronize do
+          unless @cleanup_registered
+            at_exit { cleanup }
+            @cleanup_registered = true
           end
-          conn = PG.connect(url)
-          inv_port = Integer(config[:invalidation_port] || config["invalidation_port"] || (proxy.port + 2))
-          wrapped = GoldLapel.wrap(conn, invalidation_port: inv_port)
-          proxy.wrapped_conn = wrapped
-          wrapped
+          @instances[proxy.upstream] = proxy
+        end
+      end
+
+      def unregister(proxy)
+        @mutex.synchronize do
+          existing = @instances[proxy.upstream]
+          @instances.delete(proxy.upstream) if existing.equal?(proxy)
         end
       end
 

@@ -15,7 +15,7 @@ module GoldLapel
     @wrap_calls
   end
 
-  def self.start(upstream, config: nil, port: nil, extra_args: [])
+  def self.start_proxy(upstream, config: nil, port: nil, extra_args: [])
     @start_calls << { upstream: upstream, config: config, port: port, extra_args: extra_args }
   end
 
@@ -346,7 +346,7 @@ class TestConnect < Minitest::Test
 
   def test_graceful_fallback_on_start_failure
     # Temporarily make GoldLapel.start raise
-    GoldLapel.define_singleton_method(:start) do |upstream, config: nil, port: nil, extra_args: []|
+    GoldLapel.define_singleton_method(:start_proxy) do |upstream, config: nil, port: nil, extra_args: []|
       raise RuntimeError, "binary not found"
     end
 
@@ -372,7 +372,7 @@ class TestConnect < Minitest::Test
     assert Rails.logger.warnings.any? { |w| w.include?("binary not found") }
   ensure
     # Restore original GoldLapel.start
-    GoldLapel.define_singleton_method(:start) do |upstream, config: nil, port: nil, extra_args: []|
+    GoldLapel.define_singleton_method(:start_proxy) do |upstream, config: nil, port: nil, extra_args: []|
       @start_calls << { upstream: upstream, config: config, port: port, extra_args: extra_args }
     end
   end
@@ -494,7 +494,7 @@ class TestL1CacheWrapping < Minitest::Test
   end
 
   def test_no_wrap_on_fallback
-    GoldLapel.define_singleton_method(:start) do |upstream, config: nil, port: nil, extra_args: []|
+    GoldLapel.define_singleton_method(:start_proxy) do |upstream, config: nil, port: nil, extra_args: []|
       raise RuntimeError, "binary not found"
     end
 
@@ -513,7 +513,7 @@ class TestL1CacheWrapping < Minitest::Test
     # raw_connection should be the unwrapped FakePgConnection
     assert_kind_of FakePgConnection, adapter.raw_connection
   ensure
-    GoldLapel.define_singleton_method(:start) do |upstream, config: nil, port: nil, extra_args: []|
+    GoldLapel.define_singleton_method(:start_proxy) do |upstream, config: nil, port: nil, extra_args: []|
       @start_calls << { upstream: upstream, config: config, port: port, extra_args: extra_args }
     end
   end

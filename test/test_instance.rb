@@ -64,8 +64,22 @@ end
 # Helper: build an Instance with a mock conn without spawning the proxy
 def make_test_instance(mock_conn)
   inst = GoldLapel::Instance.allocate
-  inst.instance_variable_set(:@conn, mock_conn)
   inst.instance_variable_set(:@upstream, "postgresql://localhost/test")
+  inst.instance_variable_set(:@internal_conn, mock_conn)
+  inst.instance_variable_set(:@wrapped_conn, mock_conn)
+  inst.instance_variable_set(:@proxy, nil)
+  inst.instance_variable_set(:@fiber_key, :"__goldlapel_conn_#{inst.object_id}")
+  inst
+end
+
+# Helper: build an Instance with no conn (simulates stopped proxy)
+def make_stopped_instance
+  inst = GoldLapel::Instance.allocate
+  inst.instance_variable_set(:@upstream, "postgresql://localhost/test")
+  inst.instance_variable_set(:@internal_conn, nil)
+  inst.instance_variable_set(:@wrapped_conn, nil)
+  inst.instance_variable_set(:@proxy, nil)
+  inst.instance_variable_set(:@fiber_key, :"__goldlapel_conn_#{inst.object_id}")
   inst
 end
 
@@ -79,18 +93,14 @@ class TestInstanceConn < Minitest::Test
   end
 
   def test_conn_nil_after_stop_raises
-    inst = GoldLapel::Instance.allocate
-    inst.instance_variable_set(:@conn, nil)
-    inst.instance_variable_set(:@upstream, "postgresql://localhost/test")
+    inst = make_stopped_instance
 
     error = assert_raises(RuntimeError) { inst.doc_insert("col", { a: 1 }) }
     assert_match(/Connection not available/, error.message)
   end
 
   def test_all_methods_raise_when_stopped
-    inst = GoldLapel::Instance.allocate
-    inst.instance_variable_set(:@conn, nil)
-    inst.instance_variable_set(:@upstream, "postgresql://localhost/test")
+    inst = make_stopped_instance
 
     methods_with_args = {
       doc_create_collection: ["col"],
