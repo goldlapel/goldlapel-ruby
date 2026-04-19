@@ -1,8 +1,14 @@
 require "minitest/autorun"
 
-# Stub goldlapel gem BEFORE requiring rails.rb (which does `require "goldlapel"`)
+# Stub goldlapel gem BEFORE requiring rails.rb (which does `require "goldlapel"`).
+#
+# We only define the module skeleton + helpers that other test files don't
+# provide (reset!, WrappedConnection, start_calls/wrap_calls accessors).
+# The `start_proxy` and `wrap` stubs that record calls are installed per-test
+# in `setup` and restored in `teardown` — defining them at file-load time
+# leaks into every other test file loaded in the same process.
 module GoldLapel
-  DEFAULT_PORT = 7932
+  DEFAULT_PORT = 7932 unless defined?(DEFAULT_PORT)
 
   @start_calls = []
   @wrap_calls = []
@@ -15,30 +21,70 @@ module GoldLapel
     @wrap_calls
   end
 
-  def self.start_proxy(upstream, config: nil, port: nil, extra_args: [])
-    @start_calls << { upstream: upstream, config: config, port: port, extra_args: extra_args }
-  end
-
-  def self.wrap(conn, invalidation_port: nil)
-    @wrap_calls << { conn: conn, invalidation_port: invalidation_port }
-    WrappedConnection.new(conn, invalidation_port)
-  end
-
   def self.reset!
     @start_calls = []
     @wrap_calls = []
   end
 
-  class WrappedConnection
-    attr_reader :real_conn, :invalidation_port
+  unless defined?(WrappedConnection)
+    class WrappedConnection
+      attr_reader :real_conn, :invalidation_port
 
-    def initialize(real_conn, invalidation_port)
-      @real_conn = real_conn
-      @invalidation_port = invalidation_port
+      def initialize(real_conn, invalidation_port)
+        @real_conn = real_conn
+        @invalidation_port = invalidation_port
+      end
     end
   end
 end
 $LOADED_FEATURES << "goldlapel.rb"
+
+# Helpers to install/restore the `start_proxy` + `wrap` stubs. Called from
+# each Rails test class's `setup` / `teardown` so the stubs only apply while
+# a Rails test is actually running — never across unrelated test files.
+module RailsTestGoldLapelStub
+  def self.install
+    verbose_was = $VERBOSE
+    $VERBOSE = nil
+
+    @original_start_proxy = GoldLapel.method(:start_proxy) if GoldLapel.respond_to?(:start_proxy)
+    @original_wrap = GoldLapel.method(:wrap) if GoldLapel.respond_to?(:wrap)
+
+    GoldLapel.define_singleton_method(:start_proxy) do |upstream, config: nil, port: nil, extra_args: []|
+      @start_calls << { upstream: upstream, config: config, port: port, extra_args: extra_args }
+    end
+    GoldLapel.define_singleton_method(:wrap) do |conn, invalidation_port: nil|
+      @wrap_calls << { conn: conn, invalidation_port: invalidation_port }
+      GoldLapel::WrappedConnection.new(conn, invalidation_port)
+    end
+  ensure
+    $VERBOSE = verbose_was
+  end
+
+  def self.restore
+    verbose_was = $VERBOSE
+    $VERBOSE = nil
+
+    if @original_start_proxy
+      GoldLapel.define_singleton_method(:start_proxy, &@original_start_proxy)
+    elsif GoldLapel.singleton_class.method_defined?(:start_proxy) ||
+          GoldLapel.singleton_class.private_method_defined?(:start_proxy)
+      GoldLapel.singleton_class.send(:remove_method, :start_proxy)
+    end
+
+    if @original_wrap
+      GoldLapel.define_singleton_method(:wrap, &@original_wrap)
+    elsif GoldLapel.singleton_class.method_defined?(:wrap) ||
+          GoldLapel.singleton_class.private_method_defined?(:wrap)
+      GoldLapel.singleton_class.send(:remove_method, :wrap)
+    end
+
+    @original_start_proxy = nil
+    @original_wrap = nil
+  ensure
+    $VERBOSE = verbose_was
+  end
+end
 
 # Stub out Rails/ActiveRecord so we can load our code without a full Rails app.
 module Rails
@@ -180,7 +226,12 @@ end
 
 class TestConnect < Minitest::Test
   def setup
+    RailsTestGoldLapelStub.install
     GoldLapel.reset!
+  end
+
+  def teardown
+    RailsTestGoldLapelStub.restore
   end
 
   def test_starts_proxy_and_swaps_params
@@ -383,7 +434,12 @@ end
 # ---------------------------------------------------------------------------
 class TestL1CacheWrapping < Minitest::Test
   def setup
+    RailsTestGoldLapelStub.install
     GoldLapel.reset!
+  end
+
+  def teardown
+    RailsTestGoldLapelStub.restore
   end
 
   def test_connect_wraps_raw_connection
