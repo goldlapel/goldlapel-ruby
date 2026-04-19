@@ -108,6 +108,141 @@ class TestFactoryStartAlias < Minitest::Test
   end
 end
 
+# --- log_level translation ---
+#
+# The proxy binary uses a count-based `-v/-vv/-vvv` flag, not `--log-level`.
+# The wrapper must translate friendly strings to the right `-v` count (or
+# omit the flag for default-verbosity levels), and must raise on bad values.
+class TestLogLevelTranslation < Minitest::Test
+  def test_trace_maps_to_vvv
+    assert_equal ["-vvv"], GoldLapel.log_level_to_args("trace")
+  end
+
+  def test_debug_maps_to_vv
+    assert_equal ["-vv"], GoldLapel.log_level_to_args("debug")
+  end
+
+  def test_info_maps_to_v
+    assert_equal ["-v"], GoldLapel.log_level_to_args("info")
+  end
+
+  def test_warn_is_default_no_flag
+    assert_equal [], GoldLapel.log_level_to_args("warn")
+  end
+
+  def test_warning_alias_is_default_no_flag
+    assert_equal [], GoldLapel.log_level_to_args("warning")
+  end
+
+  def test_error_is_default_no_flag
+    assert_equal [], GoldLapel.log_level_to_args("error")
+  end
+
+  def test_nil_produces_no_flag
+    assert_equal [], GoldLapel.log_level_to_args(nil)
+  end
+
+  def test_symbol_accepted
+    assert_equal ["-vv"], GoldLapel.log_level_to_args(:debug)
+  end
+
+  def test_case_insensitive
+    assert_equal ["-vv"], GoldLapel.log_level_to_args("DEBUG")
+    assert_equal ["-v"], GoldLapel.log_level_to_args("Info")
+  end
+
+  def test_invalid_value_raises_argument_error
+    err = assert_raises(ArgumentError) do
+      GoldLapel.log_level_to_args("invalid")
+    end
+    assert_match(/log_level must be one of: trace, debug, info, warn, error/, err.message)
+  end
+
+  def test_empty_string_raises_argument_error
+    err = assert_raises(ArgumentError) do
+      GoldLapel.log_level_to_args("")
+    end
+    assert_match(/log_level must be one of/, err.message)
+  end
+
+  def test_numeric_value_raises_argument_error
+    err = assert_raises(ArgumentError) do
+      GoldLapel.log_level_to_args(2)
+    end
+    assert_match(/log_level must be one of/, err.message)
+  end
+
+  # End-to-end: GoldLapel.new threads log_level through to extra_args on the
+  # underlying Instance without spawning a binary. This asserts the call site
+  # in `start` translates correctly when it wires up Instance.new.
+  def test_start_translates_log_level_through_extra_args
+    # We stub out Instance.new so we don't spawn anything — we just want to
+    # inspect the `extra_args` it would have received.
+    captured = {}
+    original = GoldLapel::Instance.method(:new)
+    GoldLapel::Instance.singleton_class.send(:define_method, :new) do |*args, **kwargs|
+      captured[:args] = args
+      captured[:kwargs] = kwargs
+      # Return a dummy so `start` can return without exploding
+      Object.new
+    end
+
+    begin
+      GoldLapel.start("postgresql://localhost/test", log_level: "debug")
+      assert_includes captured[:kwargs][:extra_args], "-vv"
+      refute_includes captured[:kwargs][:extra_args], "--log-level"
+      refute_includes captured[:kwargs][:extra_args], "debug"
+    ensure
+      GoldLapel::Instance.singleton_class.send(:define_method, :new, original)
+    end
+  end
+
+  def test_start_omits_flag_when_log_level_nil
+    captured = {}
+    original = GoldLapel::Instance.method(:new)
+    GoldLapel::Instance.singleton_class.send(:define_method, :new) do |*args, **kwargs|
+      captured[:kwargs] = kwargs
+      Object.new
+    end
+
+    begin
+      GoldLapel.start("postgresql://localhost/test")
+      assert_equal [], captured[:kwargs][:extra_args]
+    ensure
+      GoldLapel::Instance.singleton_class.send(:define_method, :new, original)
+    end
+  end
+
+  def test_start_raises_on_invalid_log_level
+    assert_raises(ArgumentError) do
+      GoldLapel.start("postgresql://localhost/test", log_level: "invalid")
+    end
+  end
+
+  def test_start_preserves_caller_extra_args_alongside_log_level
+    captured = {}
+    original = GoldLapel::Instance.method(:new)
+    GoldLapel::Instance.singleton_class.send(:define_method, :new) do |*args, **kwargs|
+      captured[:kwargs] = kwargs
+      Object.new
+    end
+
+    begin
+      GoldLapel.start(
+        "postgresql://localhost/test",
+        log_level: "info",
+        extra_args: ["--custom-flag", "value"]
+      )
+      extra = captured[:kwargs][:extra_args]
+      assert_includes extra, "--custom-flag"
+      assert_includes extra, "value"
+      assert_includes extra, "-v"
+    ensure
+      GoldLapel::Instance.singleton_class.send(:define_method, :new, original)
+    end
+  end
+end
+
 # --- conn: kwarg ---
 
 class TestConnKwarg < Minitest::Test
