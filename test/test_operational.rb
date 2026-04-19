@@ -64,6 +64,24 @@ class OpMockConnection
   def finished?; false; end
 end
 
+# Mimics pg 1.6's dense conninfo_hash, which returns every known key with
+# unset entries as `nil` (e.g. :service => nil). See regression tests below.
+class OpMockConnectionWithNilConninfo < OpMockConnection
+  def conninfo_hash
+    {
+      host: "localhost",
+      port: 5432,
+      dbname: "test",
+      user: "steve",
+      password: nil,
+      service: nil,
+      options: nil,
+      sslmode: nil,
+      connect_timeout: nil
+    }
+  end
+end
+
 def suppress_warnings
   original = $VERBOSE
   $VERBOSE = nil
@@ -259,5 +277,84 @@ class TestDocRemoveCap < Minitest::Test
     assert_raises(ArgumentError) do
       GoldLapel.doc_remove_cap(mock, "Robert'); DROP TABLE students;--")
     end
+  end
+end
+
+# --- listener conninfo stripping (regression for pg 1.6) ---
+#
+# pg 1.6's PG::Connection#conninfo_hash returns every known key, with unset
+# values as nil (e.g. :service => nil). Passing the raw hash back into
+# PG.connect raises `definition of service "" not found`. subscribe and
+# doc_watch must strip nils via _listener_conninfo before reconnecting.
+
+class TestListenerConninfoStripping < Minitest::Test
+  def capture_listener_hash
+    captured = nil
+    pg_mock = Module.new
+    pg_mock.define_singleton_method(:connect) do |hash|
+      captured = hash
+      raise StopIteration, "stop"
+    end
+
+    original_pg = Object.const_defined?(:PG) ? Object.const_get(:PG) : nil
+    suppress_warnings do
+      Object.const_set(:PG, pg_mock)
+    end
+
+    begin
+      yield
+    rescue StopIteration
+      # expected -- we intercepted PG.connect
+    ensure
+      suppress_warnings do
+        Object.send(:remove_const, :PG)
+        Object.const_set(:PG, original_pg) if original_pg
+      end
+    end
+
+    captured
+  end
+
+  def test_doc_watch_strips_nils_from_conninfo_hash
+    mock = OpMockConnectionWithNilConninfo.new
+    captured = capture_listener_hash do
+      GoldLapel.doc_watch(mock, "orders") { |e| }
+    end
+
+    refute_nil captured, "PG.connect should have been called"
+    refute captured.key?(:service), "nil :service must be stripped (pg 1.6 rejects empty service)"
+    refute captured.key?(:password), "nil :password must be stripped"
+    refute captured.key?(:options), "nil :options must be stripped"
+    refute captured.key?(:sslmode), "nil :sslmode must be stripped"
+    refute captured.key?(:connect_timeout), "nil :connect_timeout must be stripped"
+    # Non-nil keys preserved
+    assert_equal "localhost", captured[:host]
+    assert_equal 5432, captured[:port]
+    assert_equal "test", captured[:dbname]
+    assert_equal "steve", captured[:user]
+    # No nil values remain
+    refute captured.any? { |_, v| v.nil? }, "listener conninfo must not contain any nil values"
+  end
+
+  def test_subscribe_strips_nils_from_conninfo_hash
+    mock = OpMockConnectionWithNilConninfo.new
+    captured = capture_listener_hash do
+      GoldLapel.subscribe(mock, "events") { |_ch, _payload| }
+    end
+
+    refute_nil captured, "PG.connect should have been called"
+    refute captured.any? { |_, v| v.nil? }, "listener conninfo must not contain any nil values"
+    assert_equal "localhost", captured[:host]
+    assert_equal "test", captured[:dbname]
+  end
+
+  def test_listener_conninfo_preserves_hash_when_no_nils
+    mock = OpMockConnection.new  # returns a hash with no nils
+    captured = capture_listener_hash do
+      GoldLapel.doc_watch(mock, "orders") { |e| }
+    end
+
+    refute_nil captured
+    assert_equal({ host: "localhost", port: 5432, dbname: "test" }, captured)
   end
 end

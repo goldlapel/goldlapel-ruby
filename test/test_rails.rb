@@ -1,8 +1,14 @@
 require "minitest/autorun"
 
-# Stub goldlapel gem BEFORE requiring rails.rb (which does `require "goldlapel"`)
+# Stub goldlapel gem BEFORE requiring rails.rb (which does `require "goldlapel"`).
+#
+# We only define the module skeleton + helpers that other test files don't
+# provide (reset!, WrappedConnection, start_calls/wrap_calls accessors).
+# The `start_proxy` and `wrap` stubs that record calls are installed per-test
+# in `setup` and restored in `teardown` — defining them at file-load time
+# leaks into every other test file loaded in the same process.
 module GoldLapel
-  DEFAULT_PORT = 7932
+  DEFAULT_PORT = 7932 unless defined?(DEFAULT_PORT)
 
   @start_calls = []
   @wrap_calls = []
@@ -15,30 +21,89 @@ module GoldLapel
     @wrap_calls
   end
 
-  def self.start(upstream, config: nil, port: nil, extra_args: [])
-    @start_calls << { upstream: upstream, config: config, port: port, extra_args: extra_args }
-  end
-
-  def self.wrap(conn, invalidation_port: nil)
-    @wrap_calls << { conn: conn, invalidation_port: invalidation_port }
-    WrappedConnection.new(conn, invalidation_port)
-  end
-
   def self.reset!
     @start_calls = []
     @wrap_calls = []
   end
 
-  class WrappedConnection
-    attr_reader :real_conn, :invalidation_port
+  unless defined?(WrappedConnection)
+    class WrappedConnection
+      attr_reader :real_conn, :invalidation_port
 
-    def initialize(real_conn, invalidation_port)
-      @real_conn = real_conn
-      @invalidation_port = invalidation_port
+      def initialize(real_conn, invalidation_port)
+        @real_conn = real_conn
+        @invalidation_port = invalidation_port
+      end
     end
   end
 end
 $LOADED_FEATURES << "goldlapel.rb"
+
+# Helpers to install/restore the `start_proxy` + `wrap` stubs. Called from
+# each Rails test class's `setup` / `teardown` so the stubs only apply while
+# a Rails test is actually running — never across unrelated test files.
+module RailsTestGoldLapelStub
+  def self.install
+    verbose_was = $VERBOSE
+    $VERBOSE = nil
+
+    @original_start_proxy = GoldLapel.method(:start_proxy) if GoldLapel.respond_to?(:start_proxy)
+    @original_wrap = GoldLapel.method(:wrap) if GoldLapel.respond_to?(:wrap)
+
+    GoldLapel.define_singleton_method(:start_proxy) do |upstream, config: nil, port: nil, extra_args: []|
+      @start_calls << { upstream: upstream, config: config, port: port, extra_args: extra_args }
+    end
+    GoldLapel.define_singleton_method(:wrap) do |conn, invalidation_port: nil|
+      @wrap_calls << { conn: conn, invalidation_port: invalidation_port }
+      GoldLapel::WrappedConnection.new(conn, invalidation_port)
+    end
+  ensure
+    $VERBOSE = verbose_was
+  end
+
+  def self.restore
+    verbose_was = $VERBOSE
+    $VERBOSE = nil
+
+    if @original_start_proxy
+      GoldLapel.define_singleton_method(:start_proxy, &@original_start_proxy)
+    elsif GoldLapel.singleton_class.method_defined?(:start_proxy) ||
+          GoldLapel.singleton_class.private_method_defined?(:start_proxy)
+      GoldLapel.singleton_class.send(:remove_method, :start_proxy)
+    end
+
+    if @original_wrap
+      GoldLapel.define_singleton_method(:wrap, &@original_wrap)
+    elsif GoldLapel.singleton_class.method_defined?(:wrap) ||
+          GoldLapel.singleton_class.private_method_defined?(:wrap)
+      GoldLapel.singleton_class.send(:remove_method, :wrap)
+    end
+
+    @original_start_proxy = nil
+    @original_wrap = nil
+  ensure
+    $VERBOSE = verbose_was
+  end
+
+  # Per-test helpers to override the recording stub (e.g. to make start_proxy
+  # raise). The install/restore pair in setup/teardown reinstates the recording
+  # stub between tests, so no ensure block is needed at the call site.
+  def self.override_start_proxy(&block)
+    verbose_was = $VERBOSE
+    $VERBOSE = nil
+    GoldLapel.define_singleton_method(:start_proxy, &block)
+  ensure
+    $VERBOSE = verbose_was
+  end
+
+  def self.override_wrap(&block)
+    verbose_was = $VERBOSE
+    $VERBOSE = nil
+    GoldLapel.define_singleton_method(:wrap, &block)
+  ensure
+    $VERBOSE = verbose_was
+  end
+end
 
 # Stub out Rails/ActiveRecord so we can load our code without a full Rails app.
 module Rails
@@ -180,7 +245,12 @@ end
 
 class TestConnect < Minitest::Test
   def setup
+    RailsTestGoldLapelStub.install
     GoldLapel.reset!
+  end
+
+  def teardown
+    RailsTestGoldLapelStub.restore
   end
 
   def test_starts_proxy_and_swaps_params
@@ -345,8 +415,7 @@ class TestConnect < Minitest::Test
   end
 
   def test_graceful_fallback_on_start_failure
-    # Temporarily make GoldLapel.start raise
-    GoldLapel.define_singleton_method(:start) do |upstream, config: nil, port: nil, extra_args: []|
+    RailsTestGoldLapelStub.override_start_proxy do |upstream, config: nil, port: nil, extra_args: []|
       raise RuntimeError, "binary not found"
     end
 
@@ -370,11 +439,6 @@ class TestConnect < Minitest::Test
 
     # Warning logged
     assert Rails.logger.warnings.any? { |w| w.include?("binary not found") }
-  ensure
-    # Restore original GoldLapel.start
-    GoldLapel.define_singleton_method(:start) do |upstream, config: nil, port: nil, extra_args: []|
-      @start_calls << { upstream: upstream, config: config, port: port, extra_args: extra_args }
-    end
   end
 end
 
@@ -383,7 +447,12 @@ end
 # ---------------------------------------------------------------------------
 class TestL1CacheWrapping < Minitest::Test
   def setup
+    RailsTestGoldLapelStub.install
     GoldLapel.reset!
+  end
+
+  def teardown
+    RailsTestGoldLapelStub.restore
   end
 
   def test_connect_wraps_raw_connection
@@ -494,7 +563,7 @@ class TestL1CacheWrapping < Minitest::Test
   end
 
   def test_no_wrap_on_fallback
-    GoldLapel.define_singleton_method(:start) do |upstream, config: nil, port: nil, extra_args: []|
+    RailsTestGoldLapelStub.override_start_proxy do |upstream, config: nil, port: nil, extra_args: []|
       raise RuntimeError, "binary not found"
     end
 
@@ -512,14 +581,10 @@ class TestL1CacheWrapping < Minitest::Test
     assert_equal 0, GoldLapel.wrap_calls.length
     # raw_connection should be the unwrapped FakePgConnection
     assert_kind_of FakePgConnection, adapter.raw_connection
-  ensure
-    GoldLapel.define_singleton_method(:start) do |upstream, config: nil, port: nil, extra_args: []|
-      @start_calls << { upstream: upstream, config: config, port: port, extra_args: extra_args }
-    end
   end
 
   def test_graceful_fallback_on_wrap_failure
-    GoldLapel.define_singleton_method(:wrap) do |conn, invalidation_port: nil|
+    RailsTestGoldLapelStub.override_wrap do |conn, invalidation_port: nil|
       @wrap_calls << { conn: conn, invalidation_port: invalidation_port }
       raise RuntimeError, "wrap exploded"
     end
@@ -540,10 +605,5 @@ class TestL1CacheWrapping < Minitest::Test
 
     # Warning logged
     assert Rails.logger.warnings.any? { |w| w.include?("L1 cache wrap failed") }
-  ensure
-    GoldLapel.define_singleton_method(:wrap) do |conn, invalidation_port: nil|
-      @wrap_calls << { conn: conn, invalidation_port: invalidation_port }
-      GoldLapel::WrappedConnection.new(conn, invalidation_port)
-    end
   end
 end

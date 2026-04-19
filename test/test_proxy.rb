@@ -283,6 +283,28 @@ class TestDashboardUrl < Minitest::Test
                  proxy.instance_variable_get(:@dashboard_port)
   end
 
+  def test_dashboard_port_derives_from_custom_proxy_port
+    # Regression: when proxy_port is customized and dashboard_port is NOT
+    # set explicitly, the dashboard port must be proxy_port + 1 (matching
+    # what the Rust proxy binary binds), not the default 7933.
+    proxy = GoldLapel::Proxy.new(
+      "postgresql://localhost:5432/mydb",
+      port: 17932
+    )
+    assert_equal 17933, proxy.instance_variable_get(:@dashboard_port)
+  end
+
+  def test_explicit_dashboard_port_overrides_derivation
+    # When dashboard_port is explicitly set in config, it wins over the
+    # proxy_port + 1 derivation.
+    proxy = GoldLapel::Proxy.new(
+      "postgresql://localhost:5432/mydb",
+      port: 17932,
+      config: { dashboard_port: 25000 }
+    )
+    assert_equal 25000, proxy.instance_variable_get(:@dashboard_port)
+  end
+
   def test_custom_dashboard_port_from_config_symbol
     proxy = GoldLapel::Proxy.new(
       "postgresql://localhost:5432/mydb",

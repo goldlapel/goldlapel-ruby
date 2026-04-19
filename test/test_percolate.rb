@@ -79,7 +79,8 @@ class TestPercolateAdd < Minitest::Test
     idx_call = mock.calls.find { |c| c[:method] == :exec && c[:sql].include?("CREATE INDEX IF NOT EXISTS") }
     refute_nil idx_call
     assert_includes idx_call[:sql], "alerts_tsq_idx"
-    assert_includes idx_call[:sql], "USING GIN"
+    # GIST (not GIN) — tsquery columns only have a GIST operator class in Postgres
+    assert_includes idx_call[:sql], "USING GIST (tsquery)"
   end
 
   def test_upsert_with_defaults
