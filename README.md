@@ -61,7 +61,7 @@ You can also pass `conn:` explicitly to any method:
 gl.doc_insert("events", { type: "x" }, conn: my_conn)
 ```
 
-## Async (experimental)
+## Async
 
 For fiber-based concurrency via the `async` gem:
 
@@ -78,7 +78,7 @@ end
 
 The `async` gem is an optional dependency — install it separately (`gem install async`).
 
-**v0.2.0 caveat — the API is stable but IO is still blocking.** `GoldLapel::Async.start` gives you the factory shape inside an `Async { ... }` block, and the returned instance's methods are callable from fiber tasks. Under the hood, however, wrapper methods delegate to sync `pg` calls (`PG.connect`, `conn.exec_params`), which block the reactor's thread for the duration of each query — other fibers do NOT run while a query is in flight. Treat it as "same API, same performance as sync" for now. Native non-blocking IO (via `async-pg`) is planned for a later release; only the internals will change, so code written against this API keeps working.
+Under the hood, `GoldLapel::Async::Instance` routes every wrapper call through a parallel utility layer (`GoldLapel::Async::Utils`) that uses `pg`'s native non-blocking method variants: `async_exec_params`, `async_exec`, and `wait_for_notify` (which is already fiber-scheduler aware). Inside an `Async { ... }` block, Postgres IO yields cooperatively via Ruby's Fiber scheduler — other fibers continue to run while a query is in flight. Same `pg` gem, same `PG::Result` return shapes, same error classes; the only change versus the sync path is that the call sites explicitly ask for the non-blocking variants.
 
 ## API Reference
 
