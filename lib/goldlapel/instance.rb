@@ -31,6 +31,12 @@ module GoldLapel
 
     # Start the proxy and open the internal connection. Idempotent.
     # Returns self.
+    #
+    # Between spawning the proxy subprocess and opening the PG connection we
+    # can hit: LoadError (pg gem missing), PG::Error (bad creds, upstream
+    # unreachable), or any error from the wrap layer. Each of those would
+    # otherwise leave an orphaned goldlapel subprocess running. Guard with a
+    # rescue that tears the proxy back down before re-raising.
     def start!
       return self if @proxy&.running?
 
@@ -41,20 +47,53 @@ module GoldLapel
       Proxy.register(@proxy)
       @proxy.start
 
-      # Lazily require pg only on connect
+      raw = nil
       begin
-        require "pg"
-      rescue LoadError
-        raise LoadError,
-          "The `pg` gem is required. Add `gem \"pg\"` to your Gemfile " \
-          "or `gem install pg`."
+        # Lazily require pg only on connect
+        begin
+          require "pg"
+        rescue LoadError
+          raise LoadError,
+            "The `pg` gem is required. Add `gem \"pg\"` to your Gemfile " \
+            "or `gem install pg`."
+        end
+
+        raw = PG.connect(@proxy.url)
+        inv_port = Integer(@config[:invalidation_port] || @config["invalidation_port"] || (@proxy.port + 2))
+        @wrapped_conn = GoldLapel.wrap(raw, invalidation_port: inv_port)
+        @internal_conn = @wrapped_conn
+        @proxy.wrapped_conn = @wrapped_conn
+      rescue Exception # rubocop:disable Lint/RescueException
+        # Any failure between spawn and connect leaks the subprocess.
+        # Stop the proxy (idempotent — SIGTERM with 5s timeout, then SIGKILL),
+        # unregister it from the module-level registry, and clear internal
+        # state before re-raising so the caller sees the original error.
+        # Also close any raw PG connection we opened, in case the failure
+        # was later in the pipeline (e.g. GoldLapel.wrap raising).
+        begin
+          if @wrapped_conn
+            begin
+              @wrapped_conn.close
+            rescue StandardError
+              # closing a partially-initialised conn is fine
+            end
+          elsif raw
+            begin
+              raw.close
+            rescue StandardError
+              # closing a partially-initialised conn is fine
+            end
+          end
+          Proxy.unregister(@proxy)
+          @proxy.stop
+        ensure
+          @wrapped_conn = nil
+          @internal_conn = nil
+          @proxy = nil
+        end
+        raise
       end
 
-      raw = PG.connect(@proxy.url)
-      inv_port = Integer(@config[:invalidation_port] || @config["invalidation_port"] || (@proxy.port + 2))
-      @wrapped_conn = GoldLapel.wrap(raw, invalidation_port: inv_port)
-      @internal_conn = @wrapped_conn
-      @proxy.wrapped_conn = @wrapped_conn
       self
     end
 
