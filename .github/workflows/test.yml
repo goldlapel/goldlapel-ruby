@@ -35,6 +35,12 @@ jobs:
           ruby-version: '3.2'
           bundler-cache: true
 
+      - name: Install pg gem (used by integration-style tests)
+        # pg isn't in the Gemfile (it's an optional runtime dep — users bring
+        # their own Postgres driver), but test_v02_subprocess_cleanup.rb and
+        # test_async_native.rb require it to exercise the real connect paths.
+        run: gem install pg
+
       - name: Download goldlapel binary
         # Source from the public goldlapel-go repo (which commits binaries for
         # the Go module proxy). Avoids needing a PAT to reach the private
