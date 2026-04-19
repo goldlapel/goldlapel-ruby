@@ -76,7 +76,9 @@ Async do
 end
 ```
 
-The `async` gem is an optional dependency — install it separately (`gem install async`). Native non-blocking PG calls land in v0.2.1; for v0.2.0, wrapper methods use blocking PG under the hood but the fiber scheduler keeps other tasks responsive during IO.
+The `async` gem is an optional dependency — install it separately (`gem install async`).
+
+**v0.2.0 caveat — the API is stable but IO is still blocking.** `Goldlapel::Async.start` gives you the factory shape inside an `Async { ... }` block, and the returned instance's methods are callable from fiber tasks. Under the hood, however, wrapper methods delegate to sync `pg` calls (`PG.connect`, `conn.exec_params`), which block the reactor's thread for the duration of each query — other fibers do NOT run while a query is in flight. Treat it as "same API, same performance as sync" for now. Native non-blocking IO (via `async-pg`) is planned for a later release; only the internals will change, so code written against this API keeps working.
 
 ## API Reference
 

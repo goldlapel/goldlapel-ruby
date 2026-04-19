@@ -14,14 +14,20 @@
 #
 # Implementation notes (v0.2.0):
 #
-# This first cut provides the factory API shape and fiber-scheduler-friendly
-# behavior, but internally the wrapper methods still issue synchronous PG
-# calls. When run inside an `async` reactor, Ruby's default fiber scheduler
-# (via the `async` gem) yields during IO, so other fibers keep running; you
-# get cooperative concurrency without blocking the reactor, even though the
-# underlying calls are not native-async.
+# This first cut provides the factory API shape only: `Goldlapel::Async.start`
+# returns an ordinary `Goldlapel::Instance`, and its wrapper methods are
+# callable from inside fiber tasks. The public API is stable.
 #
-# Native async (via async-pg) is planned for v0.2.1.
+# HONEST CAVEAT — v0.2.0 does NOT cooperatively yield during Postgres IO.
+# Wrapper methods delegate to the sync implementation, which uses `PG.connect`
+# and `conn.exec_params`. Those are blocking C calls: they do not invoke
+# Ruby's fiber scheduler, so while a query is in flight on one fiber the
+# reactor's thread is parked and other fibers cannot run. Inside an
+# `Async { ... }` block you get the API shape today, not true non-blocking IO.
+#
+# Native non-blocking IO (via `async-pg` or `pg`'s `async_exec_params` +
+# `socket_io.wait_readable`) is planned for a later release. When that lands,
+# only the internals change — code written against this API keeps working.
 
 begin
   require "async"
