@@ -24,7 +24,7 @@ require "goldlapel"
 require "pg"
 
 # Factory — spawns the proxy, opens an internal connection, returns an instance.
-gl = Goldlapel.start("postgresql://user:pass@localhost:5432/mydb",
+gl = GoldLapel.start("postgresql://user:pass@localhost:5432/mydb",
                      port: 7932,
                      log_level: "info")
 
@@ -70,7 +70,7 @@ require "async"
 require "goldlapel/async"
 
 Async do
-  gl = Goldlapel::Async.start("postgresql://user:pass@localhost/mydb")
+  gl = GoldLapel::Async.start("postgresql://user:pass@localhost/mydb")
   hits = gl.search("articles", "body", "query")
   gl.stop
 end
@@ -78,13 +78,13 @@ end
 
 The `async` gem is an optional dependency — install it separately (`gem install async`).
 
-**v0.2.0 caveat — the API is stable but IO is still blocking.** `Goldlapel::Async.start` gives you the factory shape inside an `Async { ... }` block, and the returned instance's methods are callable from fiber tasks. Under the hood, however, wrapper methods delegate to sync `pg` calls (`PG.connect`, `conn.exec_params`), which block the reactor's thread for the duration of each query — other fibers do NOT run while a query is in flight. Treat it as "same API, same performance as sync" for now. Native non-blocking IO (via `async-pg`) is planned for a later release; only the internals will change, so code written against this API keeps working.
+**v0.2.0 caveat — the API is stable but IO is still blocking.** `GoldLapel::Async.start` gives you the factory shape inside an `Async { ... }` block, and the returned instance's methods are callable from fiber tasks. Under the hood, however, wrapper methods delegate to sync `pg` calls (`PG.connect`, `conn.exec_params`), which block the reactor's thread for the duration of each query — other fibers do NOT run while a query is in flight. Treat it as "same API, same performance as sync" for now. Native non-blocking IO (via `async-pg`) is planned for a later release; only the internals will change, so code written against this API keeps working.
 
 ## API Reference
 
-### `Goldlapel.start(upstream, port:, log_level:, config:, extra_args:)`
+### `GoldLapel.start(upstream, port:, log_level:, config:, extra_args:)`
 
-Spawns the proxy, opens the internal Postgres connection, and returns a `Goldlapel::Instance`. This is the primary entry point.
+Spawns the proxy, opens the internal Postgres connection, and returns a `GoldLapel::Instance`. This is the primary entry point.
 
 - `upstream` — Postgres connection string (e.g. `postgresql://user:pass@localhost:5432/mydb`)
 - `port` — proxy port (default: 7932)
@@ -108,7 +108,7 @@ Scopes the block to use `conn` for every wrapper method call inside. Fiber-local
 
 Dashboard URL (e.g. `http://127.0.0.1:7933`), or `nil` if not running. Defaults to `proxy_port + 1`, configurable via `config: { dashboard_port: 9090 }` or disabled with `dashboard_port: 0`.
 
-### `Goldlapel.config_keys`
+### `GoldLapel.config_keys`
 
 Array of all valid configuration key names (as strings).
 
@@ -133,7 +133,7 @@ Every method accepts an optional `conn:` kwarg. When omitted, the active connect
 Pass a config hash to tune the proxy:
 
 ```ruby
-gl = Goldlapel.start("postgresql://user:pass@localhost/mydb", config: {
+gl = GoldLapel.start("postgresql://user:pass@localhost/mydb", config: {
   mode: "waiter",
   pool_size: 50,
   disable_matviews: true,
@@ -141,7 +141,7 @@ gl = Goldlapel.start("postgresql://user:pass@localhost/mydb", config: {
 })
 ```
 
-Keys use `snake_case` (symbols or strings) and map to CLI flags (`pool_size` → `--pool-size`). Boolean keys are flags — `true` enables them, `false` omits. Array keys produce repeated flags. Unknown keys raise `ArgumentError`. See `Goldlapel.config_keys` for the full list.
+Keys use `snake_case` (symbols or strings) and map to CLI flags (`pool_size` → `--pool-size`). Boolean keys are flags — `true` enables them, `false` omits. Array keys produce repeated flags. Unknown keys raise `ArgumentError`. See `GoldLapel.config_keys` for the full list.
 
 You can also pass raw CLI flags via `extra_args`, or set environment variables (`GOLDLAPEL_PROXY_PORT`, `GOLDLAPEL_UPSTREAM`, etc.) — the binary reads them automatically.
 
@@ -165,7 +165,7 @@ Rails will route its connections through the proxy transparently. If the proxy f
 
 ## How It Works
 
-This gem bundles the Gold Lapel Rust binary for your platform. When you call `Goldlapel.start`, it:
+This gem bundles the Gold Lapel Rust binary for your platform. When you call `GoldLapel.start`, it:
 
 1. Locates the binary (bundled in gem, on PATH, or via `GOLDLAPEL_BINARY` env var)
 2. Spawns it as a subprocess listening on localhost
@@ -191,7 +191,7 @@ is replaced by the factory form:
 
 ```ruby
 # NEW (v0.2)
-gl = Goldlapel.start(url)                    # spawns + connects eagerly
+gl = GoldLapel.start(url)                    # spawns + connects eagerly
 gl.doc_insert("events", { ... })             # no conn arg — uses internal
 gl.doc_insert("events", { ... }, conn: c)    # or pass one explicitly
 gl.using(c) { |gl| gl.doc_insert(...) }      # or scope a block
