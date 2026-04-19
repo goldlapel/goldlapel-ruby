@@ -189,7 +189,7 @@ class TestSilentNotForwardedToBinary < Minitest::Test
 end
 
 class TestSilentPlumbsThroughPublicAPI < Minitest::Test
-  # Regression: silent must plumb from Goldlapel.start → Instance → Proxy, not
+  # Regression: silent must plumb from GoldLapel.start → Instance → Proxy, not
   # get stored and ignored along the way. We use `eager_connect: false` to
   # skip the pg connection step and just verify the value lands in the
   # Instance's stored state (which is what `start!` forwards to `Proxy.new`).

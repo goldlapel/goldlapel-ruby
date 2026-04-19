@@ -43,7 +43,7 @@ module GoldLapel
             ENV["GOLDLAPEL_CLIENT"] = "rails"
             # Rails manages its own pg connections; only spawn the proxy here.
             # (`start_proxy` is the low-level, connection-less variant of
-            # `Goldlapel.start` that returns the proxy URL, not an instance.)
+            # `GoldLapel.start` that returns the proxy URL, not an instance.)
             GoldLapel.start_proxy(upstream, config: config, port: port, extra_args: extra_args)
           rescue => e
             ::Rails.logger.warn("[Gold Lapel] Proxy failed to start: #{e.message} — falling back to direct connection")

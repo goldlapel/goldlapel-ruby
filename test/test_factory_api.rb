@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 # Tests for the v0.2.0 factory API:
-#   - Goldlapel.start(url, **opts) returns an Instance
+#   - GoldLapel.start(url, **opts) returns an Instance
 #   - gl.using(conn) { |gl| ... } scopes conn for nested calls
 #   - conn: kwarg overrides the internal connection
 
@@ -86,15 +86,10 @@ end
 
 # --- Module-level factory ---
 
-class TestFactoryStartAlias < Minitest::Test
-  def test_goldlapel_constant_alias
-    assert_equal GoldLapel, Goldlapel
-  end
-
+class TestFactoryStart < Minitest::Test
   def test_start_method_exists
     # Can't call without spawning the binary; just verify the method is there.
     assert GoldLapel.respond_to?(:start)
-    assert Goldlapel.respond_to?(:start)
   end
 
   def test_new_is_lazy
@@ -472,8 +467,8 @@ class TestAsyncSubmodule < Minitest::Test
   # This test pins down the current (intentionally blocking) behavior of the
   # async submodule, and guards the honesty of the public docs.
   #
-  # In v0.2.0, `Goldlapel::Async.start` is a thin factory that returns the
-  # same `Goldlapel::Instance` as the sync entry point. Its wrapper methods
+  # In v0.2.0, `GoldLapel::Async.start` is a thin factory that returns the
+  # same `GoldLapel::Instance` as the sync entry point. Its wrapper methods
   # call straight into `pg`'s sync `PG.connect` / `conn.exec_params`, which
   # do NOT yield to the fiber scheduler during Postgres IO. That's fine for
   # v0.2.0 (API parity) but it must not be silently advertised as true
@@ -489,9 +484,6 @@ class TestAsyncSubmodule < Minitest::Test
     rescue LoadError
       skip "async gem not installed"
     end
-
-    # Same module alias used throughout the gem.
-    assert_equal GoldLapel, Goldlapel
 
     # The async factory is a thin wrapper around the sync factory — it does
     # not introduce an async-specific Instance class.

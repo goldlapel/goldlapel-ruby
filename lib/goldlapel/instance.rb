@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 module GoldLapel
-  # Wrapper instance returned by `Goldlapel.start(url, **opts)`.
+  # Wrapper instance returned by `GoldLapel.start(url, **opts)`.
   #
   # Holds:
   #   - the spawned proxy (single upstream per instance)
@@ -441,7 +441,7 @@ module GoldLapel
       unless @internal_conn
         raise RuntimeError,
           "Connection not available (proxy stopped or not started). " \
-          "Call Goldlapel.start(...) or pass conn: explicitly."
+          "Call GoldLapel.start(...) or pass conn: explicitly."
       end
       @internal_conn
     end

@@ -37,7 +37,7 @@ module GoldLapel
   # v0.2.0 factory API — the primary entry point.
   #
   # Spawns the Gold Lapel binary, opens an internal Postgres connection, and
-  # returns a Goldlapel::GoldLapel instance with all wrapper methods attached.
+  # returns a GoldLapel::Instance with all wrapper methods attached.
   #
   # The returned instance responds to:
   #   - `gl.url`        — proxy connection string (use with PG.connect for raw SQL)
@@ -49,7 +49,7 @@ module GoldLapel
   # connection (or the scoped `using` connection) is used.
   #
   # Example:
-  #   gl = Goldlapel.start("postgresql://localhost/mydb", port: 7932)
+  #   gl = GoldLapel.start("postgresql://localhost/mydb", port: 7932)
   #   hits = gl.search("articles", "body", "postgres tuning")
   #   PG.connect(gl.url) { |conn| conn.exec("SELECT ...") }
   #   gl.stop
@@ -90,8 +90,3 @@ module GoldLapel
     Proxy.config_keys
   end
 end
-
-# Alias the camel-case name to the snake-style module so existing integrations
-# (goldlapel/rails, 3rd-party plugins) can `require "goldlapel"` and either
-# `GoldLapel.start(...)` or `Goldlapel.start(...)` — matches the PR spec.
-Goldlapel = GoldLapel unless defined?(Goldlapel)
