@@ -48,7 +48,7 @@ module GoldLapel
 
   def self.subscribe(conn, channel, &block)
     raw = _raw_conn(conn)
-    listen_conn = PG.connect(raw.conninfo_hash)
+    listen_conn = PG.connect(_listener_conninfo(raw))
     listen_conn.async_exec("LISTEN #{channel}")
     loop do
       listen_conn.wait_for_notify(5) do |ch, _pid, payload|
@@ -1572,7 +1572,7 @@ module GoldLapel
       "FOR EACH ROW EXECUTE FUNCTION #{fn_name}()"
     )
 
-    listen_conn = PG.connect(raw.conninfo_hash)
+    listen_conn = PG.connect(_listener_conninfo(raw))
     listen_conn.async_exec("LISTEN #{channel}")
     loop do
       listen_conn.wait_for_notify(5) do |_ch, _pid, payload|
@@ -1691,6 +1691,17 @@ module GoldLapel
     conn.is_a?(GoldLapel::CachedConnection) ? conn.send(:instance_variable_get, :@real) : conn
   end
   private_class_method :_raw_conn
+
+  # `PG::Connection#conninfo_hash` on pg 1.6 returns a dense hash including
+  # unset keys as `nil` (e.g. `:service => nil`). Passing that straight to
+  # `PG.connect` fails with `definition of service "" not found` because
+  # pg treats the empty-string service as a lookup request. Strip nils
+  # before reconnecting so LISTEN/NOTIFY listeners inherit only the keys
+  # that were actually set on the source connection.
+  def self._listener_conninfo(raw)
+    raw.conninfo_hash.reject { |_, v| v.nil? }
+  end
+  private_class_method :_listener_conninfo
     end
   end
 end
