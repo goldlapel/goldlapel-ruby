@@ -462,22 +462,17 @@ class TestAsyncSubmodule < Minitest::Test
     assert_match(/Async \{/, error.message)
   end
 
-  # --- v0.2.0 honesty guard ---------------------------------------------
+  # --- Native async code-path guard -------------------------------------
   #
-  # This test pins down the current (intentionally blocking) behavior of the
-  # async submodule, and guards the honesty of the public docs.
+  # This test pins down the architecture of the async submodule: an
+  # async-specific Instance class (mirroring the sync one) routes every
+  # wrapper call through the `GoldLapel::Async::Utils` layer, which calls
+  # pg's native non-blocking method variants (`async_exec_params`,
+  # `async_exec`, `wait_for_notify`).
   #
-  # In v0.2.0, `GoldLapel::Async.start` is a thin factory that returns the
-  # same `GoldLapel::Instance` as the sync entry point. Its wrapper methods
-  # call straight into `pg`'s sync `PG.connect` / `conn.exec_params`, which
-  # do NOT yield to the fiber scheduler during Postgres IO. That's fine for
-  # v0.2.0 (API parity) but it must not be silently advertised as true
-  # non-blocking concurrency.
-  #
-  # When native async-pg lands, this test is the canary: update it to assert
-  # the new behavior (scheduler-yielding IO, async-pg in use, etc.) and
-  # update the README + docblock in lockstep so the claims stay honest.
-  def test_async_v020_delegates_to_blocking_sync_factory
+  # The sync path (lib/goldlapel/utils.rb, lib/goldlapel/instance.rb) stays
+  # untouched — no async_exec_params / wait_readable there.
+  def test_async_instance_uses_native_async_pg_methods
     begin
       require "async"
       require_relative "../lib/goldlapel/async"
@@ -485,31 +480,25 @@ class TestAsyncSubmodule < Minitest::Test
       skip "async gem not installed"
     end
 
-    # The async factory is a thin wrapper around the sync factory — it does
-    # not introduce an async-specific Instance class.
-    refute defined?(GoldLapel::Async::Instance),
-      "v0.2.0 should not define an async-specific Instance; " \
-      "if this changes, update README + async.rb docblock to match."
+    # The async factory returns an async-specific Instance class.
+    assert defined?(GoldLapel::Async::Instance),
+      "GoldLapel::Async::Instance must be defined — wrapper methods route " \
+      "through it to the native-async Utils layer."
 
-    # Wrapper methods still dispatch through the sync `exec_params` path.
-    # Audit the two files that contain every SQL call site — neither should
-    # use `async_exec_params`, `wait_readable`, or pull in `async-pg`. The
-    # day one of these files gains those APIs is the day the README + the
-    # async.rb docblock need to be updated to stop claiming "blocking under
-    # the hood."
-    utils_src    = File.read(File.expand_path("../lib/goldlapel/utils.rb", __dir__))
-    instance_src = File.read(File.expand_path("../lib/goldlapel/instance.rb", __dir__))
+    # Async utils uses async_exec_params; no sync exec_params/exec leakage.
+    async_utils_src = File.read(File.expand_path("../lib/goldlapel/async/utils.rb", __dir__))
+    assert_match(/async_exec_params/, async_utils_src,
+      "async/utils.rb must call async_exec_params at SQL call sites")
+    refute_match(/\braw\.exec_params\b|\braw\.exec\b|\blisten_conn\.exec_params\b|\blisten_conn\.exec\b/, async_utils_src,
+      "async/utils.rb must not call sync exec/exec_params — " \
+      "those belong to the sync utils layer")
 
-    [utils_src, instance_src].each do |src|
-      refute_match(/async_exec_params|wait_readable|async-pg/, src,
-        "v0.2.0 is documented as blocking under the hood; " \
-        "if async_exec_params / wait_readable / async-pg appear in the " \
-        "wrapper, flip this test and update README + async.rb docblock.")
-    end
-
-    # And the sync call surface is still live — `exec_params` is still what
-    # utils uses to talk to Postgres.
-    assert_match(/exec_params/, utils_src,
-      "utils.rb should still use sync exec_params in v0.2.0")
+    # Sync utils still uses sync exec_params — the two layers are independent.
+    utils_src = File.read(File.expand_path("../lib/goldlapel/utils.rb", __dir__))
+    assert_match(/\braw\.exec_params\b/, utils_src,
+      "utils.rb should still use sync exec_params")
+    refute_match(/\braw\.async_exec_params\b/, utils_src,
+      "utils.rb (sync path) should NOT use async_exec_params — " \
+      "that's the async layer's job")
   end
 end

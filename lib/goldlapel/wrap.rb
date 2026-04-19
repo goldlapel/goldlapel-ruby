@@ -33,12 +33,18 @@ module GoldLapel
       handle_query(sql, nil, :exec, block)
     end
     alias_method :query, :exec
-    alias_method :async_exec, :exec
+
+    def async_exec(sql, &block)
+      handle_query(sql, nil, :async_exec, block)
+    end
 
     def exec_params(sql, params = [], result_format = 0, &block)
       handle_query(sql, params, :exec_params, block, result_format)
     end
-    alias_method :async_exec_params, :exec_params
+
+    def async_exec_params(sql, params = [], result_format = 0, &block)
+      handle_query(sql, params, :async_exec_params, block, result_format)
+    end
 
     def close
       @real.close
@@ -115,11 +121,19 @@ module GoldLapel
       case method
       when :exec
         @real.exec(sql, &block)
+      when :async_exec
+        @real.async_exec(sql, &block)
       when :exec_params
         if result_format
           @real.exec_params(sql, params, result_format, &block)
         else
           @real.exec_params(sql, params, &block)
+        end
+      when :async_exec_params
+        if result_format
+          @real.async_exec_params(sql, params, result_format, &block)
+        else
+          @real.async_exec_params(sql, params, &block)
         end
       end
     end
