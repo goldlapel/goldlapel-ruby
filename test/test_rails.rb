@@ -84,6 +84,25 @@ module RailsTestGoldLapelStub
   ensure
     $VERBOSE = verbose_was
   end
+
+  # Per-test helpers to override the recording stub (e.g. to make start_proxy
+  # raise). The install/restore pair in setup/teardown reinstates the recording
+  # stub between tests, so no ensure block is needed at the call site.
+  def self.override_start_proxy(&block)
+    verbose_was = $VERBOSE
+    $VERBOSE = nil
+    GoldLapel.define_singleton_method(:start_proxy, &block)
+  ensure
+    $VERBOSE = verbose_was
+  end
+
+  def self.override_wrap(&block)
+    verbose_was = $VERBOSE
+    $VERBOSE = nil
+    GoldLapel.define_singleton_method(:wrap, &block)
+  ensure
+    $VERBOSE = verbose_was
+  end
 end
 
 # Stub out Rails/ActiveRecord so we can load our code without a full Rails app.
@@ -396,8 +415,7 @@ class TestConnect < Minitest::Test
   end
 
   def test_graceful_fallback_on_start_failure
-    # Temporarily make GoldLapel.start raise
-    GoldLapel.define_singleton_method(:start_proxy) do |upstream, config: nil, port: nil, extra_args: []|
+    RailsTestGoldLapelStub.override_start_proxy do |upstream, config: nil, port: nil, extra_args: []|
       raise RuntimeError, "binary not found"
     end
 
@@ -421,11 +439,6 @@ class TestConnect < Minitest::Test
 
     # Warning logged
     assert Rails.logger.warnings.any? { |w| w.include?("binary not found") }
-  ensure
-    # Restore original GoldLapel.start
-    GoldLapel.define_singleton_method(:start_proxy) do |upstream, config: nil, port: nil, extra_args: []|
-      @start_calls << { upstream: upstream, config: config, port: port, extra_args: extra_args }
-    end
   end
 end
 
@@ -550,7 +563,7 @@ class TestL1CacheWrapping < Minitest::Test
   end
 
   def test_no_wrap_on_fallback
-    GoldLapel.define_singleton_method(:start_proxy) do |upstream, config: nil, port: nil, extra_args: []|
+    RailsTestGoldLapelStub.override_start_proxy do |upstream, config: nil, port: nil, extra_args: []|
       raise RuntimeError, "binary not found"
     end
 
@@ -568,14 +581,10 @@ class TestL1CacheWrapping < Minitest::Test
     assert_equal 0, GoldLapel.wrap_calls.length
     # raw_connection should be the unwrapped FakePgConnection
     assert_kind_of FakePgConnection, adapter.raw_connection
-  ensure
-    GoldLapel.define_singleton_method(:start_proxy) do |upstream, config: nil, port: nil, extra_args: []|
-      @start_calls << { upstream: upstream, config: config, port: port, extra_args: extra_args }
-    end
   end
 
   def test_graceful_fallback_on_wrap_failure
-    GoldLapel.define_singleton_method(:wrap) do |conn, invalidation_port: nil|
+    RailsTestGoldLapelStub.override_wrap do |conn, invalidation_port: nil|
       @wrap_calls << { conn: conn, invalidation_port: invalidation_port }
       raise RuntimeError, "wrap exploded"
     end
@@ -596,10 +605,5 @@ class TestL1CacheWrapping < Minitest::Test
 
     # Warning logged
     assert Rails.logger.warnings.any? { |w| w.include?("L1 cache wrap failed") }
-  ensure
-    GoldLapel.define_singleton_method(:wrap) do |conn, invalidation_port: nil|
-      @wrap_calls << { conn: conn, invalidation_port: invalidation_port }
-      GoldLapel::WrappedConnection.new(conn, invalidation_port)
-    end
   end
 end
