@@ -73,20 +73,29 @@ class TestCli < Minitest::Test
   end
 
   def test_error_when_no_binary_available
-    # Under `bundle exec`, the child ruby process inherits a BUNDLE_*
-    # environment that makes it re-exec bundler's setup — which shells out
-    # through PATH. With PATH cleared here (to simulate "no goldlapel on
-    # PATH"), that pre-flight crashes the child with 127 before our
-    # find_binary rescue runs. Skip on CI so the test still exercises the
-    # "no binary" happy-path locally without a false positive on CI.
-    skip "brittle under `bundle exec` — 127 from bundler setup via empty PATH" if ENV["CI"]
-
-    env = {
+    # Build a clean env with PATH="" to simulate "no goldlapel on PATH".
+    # We must strip all bundler-related env vars (BUNDLE_*, BUNDLER_*,
+    # BUNDLER_ORIG_*) plus RUBYOPT and the GEM_HOME/GEM_PATH vars from
+    # the parent env before spawning — otherwise, under `bundle exec`,
+    # the child Ruby process re-runs bundler/setup, which (a) prepends
+    # the bundled gem's bin dir to PATH, (b) finds a generated
+    # `goldlapel` wrapper script whose `#!/usr/bin/env ruby` shebang
+    # then fails because the cleared PATH has no `env` or `ruby`, dying
+    # with 127 before our find_binary rescue in exe/goldlapel can run.
+    # `unsetenv_others: true` is belt-and-suspenders: the child starts
+    # from an empty env populated only with what we explicitly pass.
+    env = ENV.to_h.reject { |k, _|
+      k.start_with?("BUNDLE_") ||
+        k.start_with?("BUNDLER_") ||
+        k == "RUBYOPT" ||
+        k == "GEM_HOME" ||
+        k == "GEM_PATH"
+    }.merge(
       "GOLDLAPEL_BINARY" => nil,
       "PATH" => "",
       "RUBYLIB" => LIB,
-    }
-    _stdout, stderr, status = Open3.capture3(env, RUBY, EXE)
+    )
+    _stdout, stderr, status = Open3.capture3(env, RUBY, EXE, unsetenv_others: true)
 
     assert_equal 1, status.exitstatus
     assert_match(/Error:/, stderr)
