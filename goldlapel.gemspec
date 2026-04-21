@@ -18,6 +18,6 @@ Gem::Specification.new do |spec|
   spec.metadata["source_code_uri"] = "https://github.com/goldlapel/goldlapel-ruby"
   spec.bindir = "exe"
   spec.executables = ["goldlapel"]
-  spec.files = Dir["lib/**/*.rb", "bin/*", "exe/*", "README.md"]
+  spec.files = Dir["lib/**/*.rb", "bin/*", "exe/*", "README.md", "LICENSE", "THIRD-PARTY-NOTICES.md"]
   spec.require_paths = ["lib"]
 end
