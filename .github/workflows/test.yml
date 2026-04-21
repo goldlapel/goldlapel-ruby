@@ -54,4 +54,4 @@ jobs:
           PGUSER: postgres
           PGPASSWORD: postgres
           PGDATABASE: postgres
-        run: bundle exec rake test
+        run: ./scripts/test.sh
