@@ -11,7 +11,7 @@ module GoldLapel
   STARTUP_POLL_INTERVAL = 0.05
 
   class Proxy
-    attr_reader :url, :upstream, :dashboard_url, :port, :config
+    attr_reader :url, :upstream, :dashboard_url, :port, :config, :dashboard_port, :dashboard_token
     attr_accessor :wrapped_conn
 
     VALID_CONFIG_KEYS = %w[
@@ -90,6 +90,7 @@ module GoldLapel
       @pid = nil
       @url = nil
       @dashboard_url = nil
+      @dashboard_token = nil
       @stderr_reader = nil
       @dashboard_port = if config.key?(:dashboard_port) || config.key?("dashboard_port")
         config.fetch(:dashboard_port, config.fetch("dashboard_port", DEFAULT_DASHBOARD_PORT)).to_i
@@ -112,6 +113,16 @@ module GoldLapel
 
       env = ENV.to_h
       env["GOLDLAPEL_CLIENT"] ||= "ruby"
+      # Provision a session-scoped dashboard token so ddl.rb can POST to
+      # /api/ddl/* without relying on ~/.goldlapel/dashboard_token. Pre-set
+      # env wins (user may already have their own token configured).
+      if env["GOLDLAPEL_DASHBOARD_TOKEN"] && !env["GOLDLAPEL_DASHBOARD_TOKEN"].empty?
+        @dashboard_token = env["GOLDLAPEL_DASHBOARD_TOKEN"]
+      else
+        require "securerandom"
+        @dashboard_token = SecureRandom.hex(32)
+        env["GOLDLAPEL_DASHBOARD_TOKEN"] = @dashboard_token
+      end
       stderr_read, stderr_write = IO.pipe
       @pid = Process.spawn(env, *cmd,
         in: File::NULL,
@@ -166,6 +177,7 @@ module GoldLapel
         @pid = nil
         @url = nil
         @dashboard_url = nil
+        @dashboard_token = nil
         @stderr_reader = nil
       end
     end

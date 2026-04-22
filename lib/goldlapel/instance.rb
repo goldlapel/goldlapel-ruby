@@ -124,6 +124,13 @@ module GoldLapel
     end
 
     def stop
+      # Drop any cached DDL patterns tied to this instance.
+      begin
+        require "goldlapel/ddl"
+        GoldLapel::DDL.invalidate(self)
+      rescue StandardError
+        # closing a dead cache is fine
+      end
       if @internal_conn
         begin
           @internal_conn.close
@@ -385,23 +392,38 @@ module GoldLapel
     # --- Stream methods ---
 
     def stream_add(stream, payload, conn: nil)
-      GoldLapel.stream_add(_resolve_conn(conn), stream, payload)
+      patterns = _stream_patterns(stream)
+      GoldLapel.stream_add(_resolve_conn(conn), stream, payload, patterns: patterns)
     end
 
     def stream_create_group(stream, group, conn: nil)
-      GoldLapel.stream_create_group(_resolve_conn(conn), stream, group)
+      patterns = _stream_patterns(stream)
+      GoldLapel.stream_create_group(_resolve_conn(conn), stream, group, patterns: patterns)
     end
 
     def stream_read(stream, group, consumer, count: 1, conn: nil)
-      GoldLapel.stream_read(_resolve_conn(conn), stream, group, consumer, count: count)
+      patterns = _stream_patterns(stream)
+      GoldLapel.stream_read(_resolve_conn(conn), stream, group, consumer, count: count, patterns: patterns)
     end
 
     def stream_ack(stream, group, message_id, conn: nil)
-      GoldLapel.stream_ack(_resolve_conn(conn), stream, group, message_id)
+      patterns = _stream_patterns(stream)
+      GoldLapel.stream_ack(_resolve_conn(conn), stream, group, message_id, patterns: patterns)
     end
 
     def stream_claim(stream, group, consumer, min_idle_ms: 60000, conn: nil)
-      GoldLapel.stream_claim(_resolve_conn(conn), stream, group, consumer, min_idle_ms: min_idle_ms)
+      patterns = _stream_patterns(stream)
+      GoldLapel.stream_claim(_resolve_conn(conn), stream, group, consumer, min_idle_ms: min_idle_ms, patterns: patterns)
+    end
+
+    # Fetch (and cache per-instance) canonical DDL + query patterns for a stream.
+    # The DDL itself runs on the proxy side — this returns only the patterns
+    # the wrapper should execute.
+    def _stream_patterns(stream)
+      require "goldlapel/ddl"
+      token = (@proxy&.dashboard_token) || GoldLapel::DDL.token_from_env_or_file
+      port = @proxy&.dashboard_port
+      GoldLapel::DDL.fetch(self, "stream", stream, port, token)
     end
 
     # --- Percolate methods ---

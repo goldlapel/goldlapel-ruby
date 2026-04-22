@@ -412,23 +412,36 @@ module GoldLapel
       # --- Stream methods ---
 
       def stream_add(stream, payload, conn: nil)
-        Utils.stream_add(_resolve_conn(conn), stream, payload)
+        patterns = _stream_patterns(stream)
+        Utils.stream_add(_resolve_conn(conn), stream, payload, patterns: patterns)
       end
 
       def stream_create_group(stream, group, conn: nil)
-        Utils.stream_create_group(_resolve_conn(conn), stream, group)
+        patterns = _stream_patterns(stream)
+        Utils.stream_create_group(_resolve_conn(conn), stream, group, patterns: patterns)
       end
 
       def stream_read(stream, group, consumer, count: 1, conn: nil)
-        Utils.stream_read(_resolve_conn(conn), stream, group, consumer, count: count)
+        patterns = _stream_patterns(stream)
+        Utils.stream_read(_resolve_conn(conn), stream, group, consumer, count: count, patterns: patterns)
       end
 
       def stream_ack(stream, group, message_id, conn: nil)
-        Utils.stream_ack(_resolve_conn(conn), stream, group, message_id)
+        patterns = _stream_patterns(stream)
+        Utils.stream_ack(_resolve_conn(conn), stream, group, message_id, patterns: patterns)
       end
 
       def stream_claim(stream, group, consumer, min_idle_ms: 60000, conn: nil)
-        Utils.stream_claim(_resolve_conn(conn), stream, group, consumer, min_idle_ms: min_idle_ms)
+        patterns = _stream_patterns(stream)
+        Utils.stream_claim(_resolve_conn(conn), stream, group, consumer, min_idle_ms: min_idle_ms, patterns: patterns)
+      end
+
+      # See GoldLapel::Instance#_stream_patterns — same semantics, cached on self.
+      def _stream_patterns(stream)
+        require "goldlapel/ddl"
+        token = (@proxy&.dashboard_token) || GoldLapel::DDL.token_from_env_or_file
+        port = @proxy&.dashboard_port
+        GoldLapel::DDL.fetch(self, "stream", stream, port, token)
       end
 
       # --- Percolate methods ---

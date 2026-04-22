@@ -172,7 +172,16 @@ class TestInstanceConn < Minitest::Test
 
     methods_with_args.each do |method, args|
       error = assert_raises(RuntimeError, "Expected #{method} to raise") { inst.send(method, *args) }
-      assert_match(/Connection not available/, error.message, "#{method} error message mismatch")
+      # stream_* hits the DDL fetch first (no dashboard when stopped — no port/token).
+      # The error surface is still "a clear RuntimeError the caller can't miss";
+      # the exact message differs for streams because the failure cascade reaches
+      # goldlapel/ddl.rb before _resolve_conn. Accept either pattern.
+      expected = if method.to_s.start_with?("stream_")
+        /Connection not available|No dashboard port|No dashboard token/
+      else
+        /Connection not available/
+      end
+      assert_match(expected, error.message, "#{method} error message mismatch")
     end
   end
 end
@@ -361,15 +370,25 @@ end
 class TestInstanceStreams < Minitest::Test
   def test_stream_add_delegates
     add_result = InstanceMockResult.new(
-      [{ "id" => "1", "payload" => '{"task":"test"}', "created_at" => "2026-04-07" }],
-      ["id", "payload", "created_at"]
+      [{ "id" => "1", "created_at" => "2026-04-07" }],
+      ["id", "created_at"],
     )
     mock = InstanceMockConnection.new("INSERT" => add_result)
     inst = make_test_instance(mock)
+    # Stub _stream_patterns so we don't POST to a fake dashboard — the DDL
+    # fetch is covered end-to-end in test_ddl.rb / test_streams_integration.rb.
+    inst.define_singleton_method(:_stream_patterns) do |_stream|
+      {
+        query_patterns: {
+          "insert" => "INSERT INTO _goldlapel.stream_events (payload) VALUES ($1) RETURNING id, created_at",
+        },
+      }
+    end
 
     result = inst.stream_add("events", { task: "test" })
     assert_equal 1, result["id"]
-    assert_equal({ "task" => "test" }, result["payload"])
+    # wrapper hydrates payload from the input hash (proxy pattern returns (id, created_at))
+    assert_equal({ task: "test" }, result["payload"])
   end
 end
 

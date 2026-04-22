@@ -296,97 +296,87 @@ module GoldLapel
     result.ntuples > 0 ? result[0][func_name] : nil
   end
 
-  def self.stream_add(conn, stream, payload)
-    _validate_identifier(stream)
-    raw = _raw_conn(conn)
-    raw.exec("CREATE TABLE IF NOT EXISTS #{stream} (" \
-             "id BIGSERIAL PRIMARY KEY, " \
-             "payload JSONB NOT NULL, " \
-             "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
-    result = raw.exec_params(
-      "INSERT INTO #{stream} (payload) VALUES ($1) RETURNING id, payload, created_at",
-      [JSON.generate(payload)]
-    )
-    row = result[0]
-    { "id" => row["id"].to_i, "payload" => JSON.parse(row["payload"]), "created_at" => row["created_at"] }
-  end
-
-  def self.stream_create_group(conn, stream, group)
-    _validate_identifier(stream)
-    raw = _raw_conn(conn)
-    raw.exec("CREATE TABLE IF NOT EXISTS #{stream}_groups (" \
-             "group_name TEXT PRIMARY KEY, " \
-             "last_id BIGINT NOT NULL DEFAULT 0, " \
-             "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
-    raw.exec("CREATE TABLE IF NOT EXISTS #{stream}_pending (" \
-             "id BIGSERIAL PRIMARY KEY, " \
-             "group_name TEXT NOT NULL, " \
-             "consumer TEXT NOT NULL, " \
-             "message_id BIGINT NOT NULL, " \
-             "claimed_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
-    raw.exec_params(
-      "INSERT INTO #{stream}_groups (group_name) VALUES ($1) " \
-      "ON CONFLICT (group_name) DO NOTHING",
-      [group]
-    )
-  end
-
-  def self.stream_read(conn, stream, group, consumer, count: 1)
-    _validate_identifier(stream)
-    raw = _raw_conn(conn)
-    result = raw.exec_params(
-      "WITH next AS (" \
-        "SELECT id, payload, created_at FROM #{stream} " \
-        "WHERE id > (SELECT last_id FROM #{stream}_groups WHERE group_name = $1) " \
-        "ORDER BY id FOR UPDATE SKIP LOCKED LIMIT $2" \
-      "), bumped AS (" \
-        "UPDATE #{stream}_groups SET last_id = COALESCE((SELECT MAX(id) FROM next), last_id) " \
-        "WHERE group_name = $3" \
-      ") SELECT id, payload, created_at FROM next",
-      [group, count, group]
-    )
-    messages = result.map do |row|
-      { "id" => row["id"].to_i, "payload" => JSON.parse(row["payload"]), "created_at" => row["created_at"] }
+  def self._require_patterns(patterns, fn)
+    unless patterns && patterns[:query_patterns]
+      raise RuntimeError,
+        "#{fn} requires DDL patterns from the proxy — call via " \
+        "`gl.#{fn}(...)` rather than the GoldLapel.#{fn} module function directly."
     end
-    messages.each do |msg|
-      raw.exec_params(
-        "INSERT INTO #{stream}_pending (group_name, consumer, message_id) VALUES ($1, $2, $3)",
-        [group, consumer, msg["id"]]
-      )
+    patterns[:query_patterns]
+  end
+
+  def self.stream_add(conn, stream, payload, patterns: nil)
+    _validate_identifier(stream)
+    qp = _require_patterns(patterns, "stream_add")
+    raw = _raw_conn(conn)
+    result = raw.exec_params(qp["insert"], [JSON.generate(payload)])
+    row = result[0]
+    # Preserve the Ruby public return-shape: the full hash including the
+    # payload the caller passed in. The canonical `insert` pattern returns
+    # only (id, created_at); we hydrate `payload` from the input.
+    { "id" => row["id"].to_i, "payload" => payload, "created_at" => row["created_at"] }
+  end
+
+  def self.stream_create_group(conn, stream, group, patterns: nil)
+    _validate_identifier(stream)
+    qp = _require_patterns(patterns, "stream_create_group")
+    raw = _raw_conn(conn)
+    raw.exec_params(qp["create_group"], [group])
+    nil
+  end
+
+  def self.stream_read(conn, stream, group, consumer, count: 1, patterns: nil)
+    _validate_identifier(stream)
+    qp = _require_patterns(patterns, "stream_read")
+    raw = _raw_conn(conn)
+    cursor_res = raw.exec_params(qp["group_get_cursor"], [group])
+    return [] if cursor_res.ntuples == 0
+
+    last_id = cursor_res[0]["last_delivered_id"].to_i
+    rows = raw.exec_params(qp["read_since"], [last_id, count])
+    messages = rows.map do |row|
+      payload_raw = row["payload"]
+      payload = payload_raw.is_a?(String) ? JSON.parse(payload_raw) : payload_raw
+      { "id" => row["id"].to_i, "payload" => payload, "created_at" => row["created_at"] }
+    end
+    unless messages.empty?
+      new_last = messages.last["id"]
+      raw.exec_params(qp["group_advance_cursor"], [new_last, group])
+      messages.each do |msg|
+        raw.exec_params(qp["pending_insert"], [msg["id"], group, consumer])
+      end
     end
     messages
   end
 
-  def self.stream_ack(conn, stream, group, message_id)
+  def self.stream_ack(conn, stream, group, message_id, patterns: nil)
     _validate_identifier(stream)
+    qp = _require_patterns(patterns, "stream_ack")
     raw = _raw_conn(conn)
-    result = raw.exec_params(
-      "DELETE FROM #{stream}_pending WHERE group_name = $1 AND message_id = $2",
-      [group, message_id]
-    )
+    result = raw.exec_params(qp["ack"], [group, message_id])
     result.cmd_tuples > 0
   end
 
-  def self.stream_claim(conn, stream, group, consumer, min_idle_ms: 60000)
+  def self.stream_claim(conn, stream, group, consumer, min_idle_ms: 60000, patterns: nil)
     _validate_identifier(stream)
+    qp = _require_patterns(patterns, "stream_claim")
     raw = _raw_conn(conn)
-    result = raw.exec_params(
-      "UPDATE #{stream}_pending SET consumer = $1, claimed_at = NOW() " \
-      "WHERE group_name = $2 " \
-      "AND claimed_at < NOW() - ($3 || ' milliseconds')::interval " \
-      "RETURNING message_id",
-      [consumer, group, min_idle_ms.to_s]
-    )
+    result = raw.exec_params(qp["claim"], [consumer, group, min_idle_ms])
     ids = result.map { |row| row["message_id"].to_i }
     return [] if ids.empty?
-    placeholders = ids.each_with_index.map { |_, i| "$#{i + 1}" }.join(", ")
-    messages = raw.exec_params(
-      "SELECT id, payload, created_at FROM #{stream} WHERE id IN (#{placeholders})",
-      ids
-    )
-    messages.map do |row|
-      { "id" => row["id"].to_i, "payload" => JSON.parse(row["payload"]), "created_at" => row["created_at"] }
+
+    read_by_id = qp["read_by_id"]
+    messages = []
+    ids.each do |msg_id|
+      r = raw.exec_params(read_by_id, [msg_id])
+      next if r.ntuples == 0
+
+      row = r[0]
+      payload_raw = row["payload"]
+      payload = payload_raw.is_a?(String) ? JSON.parse(payload_raw) : payload_raw
+      messages << { "id" => row["id"].to_i, "payload" => payload, "created_at" => row["created_at"] }
     end
+    messages
   end
 
   def self.search(conn, table, column, query, limit: 50, lang: 'english', highlight: false)
