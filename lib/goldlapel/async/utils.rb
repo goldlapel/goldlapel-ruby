@@ -1567,7 +1567,6 @@ module GoldLapel
     if skip_val
       sql += " OFFSET $#{idx}"
       params << skip_val
-      idx += 1
     end
 
     result = raw.async_exec_params(sql, params)
