@@ -5,3 +5,8 @@ Gemfile.lock
 .bundle/
 vendor/
 tmp/
+
+# Local secrets
+.env
+.env.local
+.env.*.local
