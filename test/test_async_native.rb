@@ -2,16 +2,15 @@
 
 # Native-async integration tests for `GoldLapel::Async::Instance`.
 #
-# These tests require:
-#   - `async` gem
-#   - `pg` gem
-#   - A reachable Postgres database via `DATABASE_URL`
+# Gated on GOLDLAPEL_INTEGRATION=1 + GOLDLAPEL_TEST_UPSTREAM — the
+# standardized integration-test convention shared across all Gold Lapel
+# wrappers. See test/_integration_gate.rb. Also requires `async` and `pg`
+# gems; if either is unavailable, tests skip.
 #
-# When any of those is missing, each test skips cleanly. When available,
-# each test exercises the native-async path end-to-end: a real Async
-# reactor, a real PG::Connection under the async utility layer, real
-# Postgres round-trips through `async_exec_params` / `async_exec` /
-# `wait_for_notify`.
+# When available, each test exercises the native-async path end-to-end:
+# a real Async reactor, a real PG::Connection under the async utility
+# layer, real Postgres round-trips through `async_exec_params` /
+# `async_exec` / `wait_for_notify`.
 #
 # These tests talk directly to Postgres (no proxy subprocess), so they
 # verify the wrapper's async utility layer against a real server while
@@ -20,9 +19,13 @@
 require "minitest/autorun"
 require "json"
 require "securerandom"
+require_relative "_integration_gate"
 
 class TestAsyncNativeIntegration < Minitest::Test
-  DATABASE_URL = ENV["DATABASE_URL"] || "postgresql://localhost/postgres"
+  # Evaluating the gate at load time surfaces the half-configured CI case
+  # (GOLDLAPEL_INTEGRATION=1 set, GOLDLAPEL_TEST_UPSTREAM missing) as a loud
+  # raise during test collection — preventing false-green.
+  DATABASE_URL = GoldLapelTestGate.integration_upstream
 
   # Cache the probe across tests — each setup would otherwise pay the full
   # connect timeout to an unreachable host.
@@ -34,6 +37,9 @@ class TestAsyncNativeIntegration < Minitest::Test
   def self.run_probe
     return if @@probe_done
     @@probe_done = true
+    # When integration tests are off (DATABASE_URL is nil), skip the probe
+    # entirely — individual tests will skip via skip_unless_ready below.
+    return if DATABASE_URL.nil?
     begin
       require "async"
       require "pg"
@@ -82,9 +88,10 @@ class TestAsyncNativeIntegration < Minitest::Test
   end
 
   def skip_unless_ready
+    skip GoldLapelTestGate.skip_reason if DATABASE_URL.nil?
     skip "async gem not installed" unless @async_available
     skip "pg gem not installed" unless @pg_available
-    skip "DATABASE_URL not reachable (#{DATABASE_URL})" unless @db_reachable
+    skip "GOLDLAPEL_TEST_UPSTREAM not reachable (#{DATABASE_URL})" unless @db_reachable
   end
 
   # Run block inside an Async reactor with a fresh PG::Connection routed

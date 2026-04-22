@@ -3,21 +3,25 @@
 # End-to-end streams integration tests — proxy-owned DDL (Phase 3).
 # Mirrors goldlapel-python/tests/test_streams_integration.py.
 #
-# Skipped unless GOLDLAPEL_INTEGRATION=1. Requires:
-#   - a reachable Postgres at DATABASE_URL (default: local)
-#   - the goldlapel binary on PATH (or GOLDLAPEL_BINARY set)
+# Gated on GOLDLAPEL_INTEGRATION=1 + GOLDLAPEL_TEST_UPSTREAM — the
+# standardized integration-test convention shared across all Gold Lapel
+# wrappers. See test/_integration_gate.rb.
+#
+# Also requires the goldlapel binary on PATH (or GOLDLAPEL_BINARY set).
 
 require "minitest/autorun"
+require_relative "_integration_gate"
 
-SHOULD_RUN = ENV["GOLDLAPEL_INTEGRATION"] == "1"
+# Evaluating the gate at load time surfaces the half-configured CI case
+# (GOLDLAPEL_INTEGRATION=1 set, GOLDLAPEL_TEST_UPSTREAM missing) as a loud
+# raise during test collection — preventing false-green.
+PG_URL = GoldLapelTestGate.integration_upstream
 
-if SHOULD_RUN
+if PG_URL
   require "json"
   require "pg"
   require_relative "../lib/goldlapel"
   require_relative "../lib/goldlapel/ddl"
-
-  PG_URL = ENV["DATABASE_URL"] || "postgresql://sgibson@localhost:5432/postgres"
 
   def direct_conn
     PG.connect(PG_URL)
@@ -143,7 +147,7 @@ if SHOULD_RUN
 else
   class TestStreamsIntegrationSkipped < Minitest::Test
     def test_skipped
-      skip "set GOLDLAPEL_INTEGRATION=1 to run streams integration tests"
+      skip GoldLapelTestGate.skip_reason
     end
   end
 end
