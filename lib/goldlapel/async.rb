@@ -43,13 +43,38 @@ module GoldLapel
   module Async
     # Factory — start a proxy + internal connection inside an async reactor.
     # Must be called from within an `Async do ... end` block (or equivalent).
-    def self.start(upstream, port: nil, log_level: nil, config: {}, extra_args: [], silent: false)
+    def self.start(
+      upstream,
+      proxy_port: nil,
+      dashboard_port: nil,
+      invalidation_port: nil,
+      log_level: nil,
+      mode: nil,
+      license: nil,
+      client: nil,
+      config_file: nil,
+      config: {},
+      extra_args: [],
+      silent: false
+    )
       unless ::Async::Task.current?
         raise "GoldLapel::Async.start must be called inside an Async { ... } block"
       end
-      extra = extra_args.dup
-      extra.concat(GoldLapel.log_level_to_args(log_level))
-      Instance.new(upstream, port: port, config: config, extra_args: extra, eager_connect: true, silent: silent)
+      Instance.new(
+        upstream,
+        proxy_port: proxy_port,
+        dashboard_port: dashboard_port,
+        invalidation_port: invalidation_port,
+        log_level: log_level,
+        mode: mode,
+        license: license,
+        client: client,
+        config_file: config_file,
+        config: config,
+        extra_args: extra_args,
+        eager_connect: true,
+        silent: silent,
+      )
     end
 
     # Async sibling of `GoldLapel::Instance`. Same API, but every wrapper
@@ -63,9 +88,30 @@ module GoldLapel
     class Instance
       attr_reader :upstream
 
-      def initialize(upstream, port: nil, config: {}, extra_args: [], eager_connect: true, silent: false)
+      def initialize(
+        upstream,
+        proxy_port: nil,
+        dashboard_port: nil,
+        invalidation_port: nil,
+        log_level: nil,
+        mode: nil,
+        license: nil,
+        client: nil,
+        config_file: nil,
+        config: {},
+        extra_args: [],
+        eager_connect: true,
+        silent: false
+      )
         @upstream = upstream
-        @port = port
+        @proxy_port = proxy_port
+        @dashboard_port = dashboard_port
+        @invalidation_port = invalidation_port
+        @log_level = log_level
+        @mode = mode
+        @license = license
+        @client = client
+        @config_file = config_file
         @config = config || {}
         @extra_args = extra_args || []
         @silent = silent ? true : false
@@ -87,7 +133,20 @@ module GoldLapel
       def start!
         return self if @proxy&.running?
 
-        @proxy = Proxy.new(@upstream, port: @port, config: @config, extra_args: @extra_args, silent: @silent)
+        @proxy = Proxy.new(
+          @upstream,
+          proxy_port: @proxy_port,
+          dashboard_port: @dashboard_port,
+          invalidation_port: @invalidation_port,
+          log_level: @log_level,
+          mode: @mode,
+          license: @license,
+          client: @client,
+          config_file: @config_file,
+          config: @config,
+          extra_args: @extra_args,
+          silent: @silent,
+        )
         Proxy.register(@proxy)
         @proxy.start
 
@@ -102,8 +161,7 @@ module GoldLapel
           end
 
           raw = PG.connect(@proxy.url)
-          inv_port = Integer(@config[:invalidation_port] || @config["invalidation_port"] || (@proxy.port + 2))
-          @wrapped_conn = GoldLapel.wrap(raw, invalidation_port: inv_port)
+          @wrapped_conn = GoldLapel.wrap(raw, invalidation_port: @proxy.invalidation_port)
           @internal_conn = @wrapped_conn
           @proxy.wrapped_conn = @wrapped_conn
         rescue Exception # rubocop:disable Lint/RescueException

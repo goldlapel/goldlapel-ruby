@@ -14,11 +14,10 @@ module GoldLapel
     instances = Proxy.instances rescue {}
     if instances.any?
       inst = instances.values.first
-      port = inst.port || DEFAULT_PORT
-      config = inst.config || {}
-      Integer(config[:invalidation_port] || config["invalidation_port"] || (port + 2))
+      # invalidation_port is resolved at Proxy construction.
+      inst.invalidation_port
     else
-      DEFAULT_PORT + 2
+      DEFAULT_PROXY_PORT + 2
     end
   end
 

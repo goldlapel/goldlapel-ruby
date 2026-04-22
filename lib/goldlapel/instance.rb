@@ -17,9 +17,30 @@ module GoldLapel
   class Instance
     attr_reader :upstream
 
-    def initialize(upstream, port: nil, config: {}, extra_args: [], eager_connect: true, silent: false)
+    def initialize(
+      upstream,
+      proxy_port: nil,
+      dashboard_port: nil,
+      invalidation_port: nil,
+      log_level: nil,
+      mode: nil,
+      license: nil,
+      client: nil,
+      config_file: nil,
+      config: {},
+      extra_args: [],
+      eager_connect: true,
+      silent: false
+    )
       @upstream = upstream
-      @port = port
+      @proxy_port = proxy_port
+      @dashboard_port = dashboard_port
+      @invalidation_port = invalidation_port
+      @log_level = log_level
+      @mode = mode
+      @license = license
+      @client = client
+      @config_file = config_file
       @config = config || {}
       @extra_args = extra_args || []
       @silent = silent ? true : false
@@ -41,7 +62,20 @@ module GoldLapel
     def start!
       return self if @proxy&.running?
 
-      @proxy = Proxy.new(@upstream, port: @port, config: @config, extra_args: @extra_args, silent: @silent)
+      @proxy = Proxy.new(
+        @upstream,
+        proxy_port: @proxy_port,
+        dashboard_port: @dashboard_port,
+        invalidation_port: @invalidation_port,
+        log_level: @log_level,
+        mode: @mode,
+        license: @license,
+        client: @client,
+        config_file: @config_file,
+        config: @config,
+        extra_args: @extra_args,
+        silent: @silent,
+      )
 
       # Register the proxy in the module-level registry so GoldLapel.stop,
       # GoldLapel.proxy_url, etc. still see it — and so at_exit cleanup works.
@@ -60,8 +94,9 @@ module GoldLapel
         end
 
         raw = PG.connect(@proxy.url)
-        inv_port = Integer(@config[:invalidation_port] || @config["invalidation_port"] || (@proxy.port + 2))
-        @wrapped_conn = GoldLapel.wrap(raw, invalidation_port: inv_port)
+        # invalidation_port is resolved at Proxy construction: either the
+        # explicit kwarg or proxy_port + 2.
+        @wrapped_conn = GoldLapel.wrap(raw, invalidation_port: @proxy.invalidation_port)
         @internal_conn = @wrapped_conn
         @proxy.wrapped_conn = @wrapped_conn
       rescue Exception # rubocop:disable Lint/RescueException

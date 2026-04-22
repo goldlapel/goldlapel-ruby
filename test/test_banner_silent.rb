@@ -103,7 +103,7 @@ class TestBannerToStderr < Minitest::Test
   def test_banner_writes_to_stderr_not_stdout
     BannerTestSupport.with_stubbed_spawn do |_recorded|
       out, err = BannerTestSupport.capture_both do
-        BannerTestSupport.start_proxy(port: 17932)
+        BannerTestSupport.start_proxy(proxy_port: 17932)
       end
 
       assert_match(/goldlapel →/, err, "banner must be written to $stderr")
@@ -119,7 +119,7 @@ class TestBannerToStderr < Minitest::Test
     # URL but must still route through $stderr.
     BannerTestSupport.with_stubbed_spawn do |_recorded|
       out, err = BannerTestSupport.capture_both do
-        BannerTestSupport.start_proxy(port: 17932, config: { dashboard_port: 0 })
+        BannerTestSupport.start_proxy(proxy_port: 17932, dashboard_port: 0)
       end
 
       assert_match(/goldlapel → :17932 \(proxy\)/, err)
@@ -133,7 +133,7 @@ class TestSilentSuppressesBanner < Minitest::Test
   def test_silent_option_suppresses_banner_on_both_streams
     BannerTestSupport.with_stubbed_spawn do |_recorded|
       out, err = BannerTestSupport.capture_both do
-        BannerTestSupport.start_proxy(port: 17932, silent: true)
+        BannerTestSupport.start_proxy(proxy_port: 17932, silent: true)
       end
 
       refute_match(/goldlapel/, out, "silent=true must suppress banner on $stdout")
@@ -147,7 +147,7 @@ class TestSilentSuppressesBanner < Minitest::Test
     # Explicitly verifying the default: silent is false, banner appears on stderr.
     BannerTestSupport.with_stubbed_spawn do |_recorded|
       _out, err = BannerTestSupport.capture_both do
-        BannerTestSupport.start_proxy(port: 17932, silent: false)
+        BannerTestSupport.start_proxy(proxy_port: 17932, silent: false)
       end
       assert_match(/goldlapel →/, err)
     end
@@ -158,7 +158,7 @@ class TestSilentNotForwardedToBinary < Minitest::Test
   def test_silent_true_is_not_passed_as_cli_flag
     BannerTestSupport.with_stubbed_spawn do |recorded|
       BannerTestSupport.capture_both do
-        BannerTestSupport.start_proxy(port: 17932, silent: true)
+        BannerTestSupport.start_proxy(proxy_port: 17932, silent: true)
       end
 
       assert_equal 1, recorded[:spawn_calls], "spawn should have been invoked once"
@@ -178,7 +178,7 @@ class TestSilentNotForwardedToBinary < Minitest::Test
   def test_silent_false_also_not_passed_as_cli_flag
     BannerTestSupport.with_stubbed_spawn do |recorded|
       BannerTestSupport.capture_both do
-        BannerTestSupport.start_proxy(port: 17932, silent: false)
+        BannerTestSupport.start_proxy(proxy_port: 17932, silent: false)
       end
 
       cmd = recorded[:cmd]

@@ -5,30 +5,35 @@ require "timeout"
 require "rbconfig"
 
 module GoldLapel
-  DEFAULT_PORT = 7932
+  DEFAULT_PROXY_PORT = 7932
   DEFAULT_DASHBOARD_PORT = 7933
   STARTUP_TIMEOUT = 10.0
   STARTUP_POLL_INTERVAL = 0.05
 
   class Proxy
-    attr_reader :url, :upstream, :dashboard_url, :port, :config, :dashboard_port, :dashboard_token
+    attr_reader :url, :upstream, :dashboard_url, :proxy_port, :config, :dashboard_port,
+                :invalidation_port, :dashboard_token
     attr_accessor :wrapped_conn
 
+    # Keys that are valid inside the structured `config` hash. Top-level
+    # concepts (proxy_port, dashboard_port, invalidation_port, log_level,
+    # mode, license, client, config_file) are exposed as their own keyword
+    # arguments on GoldLapel.start / Proxy.new and are NOT valid keys here
+    # — passing them through `config` raises.
     VALID_CONFIG_KEYS = %w[
-      mode min_pattern_count refresh_interval_secs pattern_ttl_secs
+      min_pattern_count refresh_interval_secs pattern_ttl_secs
       max_tables_per_view max_columns_per_view deep_pagination_threshold
       report_interval_secs result_cache_size batch_cache_size
       batch_cache_ttl_secs pool_size pool_timeout_secs
       pool_mode mgmt_idle_timeout fallback read_after_write_secs
       n1_threshold n1_window_ms n1_cross_threshold
-      tls_cert tls_key tls_client_ca config dashboard_port
+      tls_cert tls_key tls_client_ca
       disable_matviews disable_consolidation disable_btree_indexes
       disable_trigram_indexes disable_expression_indexes
       disable_partial_indexes disable_rewrite disable_prepared_cache
       disable_result_cache disable_pool
       disable_n1 disable_n1_cross_connection disable_shadow_mode
       enable_coalescing replica exclude_tables
-      invalidation_port
     ].freeze
 
     BOOLEAN_KEYS = %w[
@@ -46,6 +51,26 @@ module GoldLapel
 
     def self.config_keys
       VALID_CONFIG_KEYS.dup
+    end
+
+    # Translate a log-level string into the proxy's count-based verbosity
+    # flag (`-v` / `-vv` / `-vvv`). Returns nil when no flag should be
+    # emitted (warn/error map to the binary's default level). Raises on
+    # invalid input.
+    def self.log_level_to_verbose_flag(level)
+      return nil if level.nil?
+      unless level.is_a?(String)
+        raise TypeError, "log_level expects a string, got #{level.class}"
+      end
+      case level.downcase
+      when "trace" then "-vvv"
+      when "debug" then "-vv"
+      when "info"  then "-v"
+      when "warn", "warning", "error" then nil
+      else
+        raise ArgumentError,
+              "log_level must be one of: trace, debug, info, warn, error"
+      end
     end
 
     def self.config_to_args(config)
@@ -81,9 +106,45 @@ module GoldLapel
     # $stdout — libraries shouldn't pollute app stdout or captured test output).
     # `silent` is deliberately NOT part of @config, so it is never forwarded to
     # the Rust binary as a CLI flag.
-    def initialize(upstream, port: nil, config: {}, extra_args: [], silent: false)
+    def initialize(
+      upstream,
+      proxy_port: nil,
+      dashboard_port: nil,
+      invalidation_port: nil,
+      log_level: nil,
+      mode: nil,
+      license: nil,
+      client: nil,
+      config_file: nil,
+      config: {},
+      extra_args: [],
+      silent: false
+    )
       @upstream = upstream
-      @port = port || DEFAULT_PORT
+      @proxy_port = proxy_port || DEFAULT_PROXY_PORT
+
+      # Dashboard / invalidation ports default to proxy_port + 1 / + 2 when
+      # unset. An explicit value (including 0 for "disable dashboard")
+      # overrides the derivation.
+      @dashboard_port_explicit = !dashboard_port.nil?
+      @dashboard_port = @dashboard_port_explicit ? dashboard_port.to_i : @proxy_port + 1
+      @invalidation_port_explicit = !invalidation_port.nil?
+      @invalidation_port = @invalidation_port_explicit ? invalidation_port.to_i : @proxy_port + 2
+
+      @log_level = log_level
+      @mode = mode
+      @license = license
+      @client = client
+      @config_file = config_file
+
+      # Validate structured-config keys eagerly so a test that constructs
+      # without spawning still catches bad keys.
+      config.each do |k, _|
+        key = k.to_s
+        unless VALID_CONFIG_KEYS.include?(key)
+          raise ArgumentError, "Unknown config key: #{key}"
+        end
+      end
       @config = config
       @extra_args = extra_args
       @silent = silent ? true : false
@@ -92,12 +153,11 @@ module GoldLapel
       @dashboard_url = nil
       @dashboard_token = nil
       @stderr_reader = nil
-      @dashboard_port = if config.key?(:dashboard_port) || config.key?("dashboard_port")
-        config.fetch(:dashboard_port, config.fetch("dashboard_port", DEFAULT_DASHBOARD_PORT)).to_i
-      else
-        @port + 1
-      end
     end
+
+    # Backwards-compat alias for the rest of the wrapper (ddl.rb etc.) that
+    # still speaks in terms of `.port`.
+    alias_method :port, :proxy_port
 
     def start
       return @url if running?
@@ -106,13 +166,31 @@ module GoldLapel
       cmd = [
         binary,
         "--upstream", @upstream,
-        "--proxy-port", @port.to_s,
-        *self.class.config_to_args(@config),
-        *@extra_args,
+        "--proxy-port", @proxy_port.to_s,
       ]
+      # Top-level options (promoted out of the config map by the canonical
+      # surface) emit their own CLI flags. Each is suppressed when the user
+      # hasn't set it, so the Rust binary applies its own defaults.
+      if @dashboard_port_explicit
+        cmd.push("--dashboard-port", @dashboard_port.to_s)
+      end
+      if @invalidation_port_explicit
+        cmd.push("--invalidation-port", @invalidation_port.to_s)
+      end
+      verbose_flag = self.class.log_level_to_verbose_flag(@log_level)
+      cmd.push(verbose_flag) if verbose_flag
+      cmd.push("--mode", @mode) if @mode
+      cmd.push("--license", @license) if @license
+      cmd.push("--client", @client) if @client
+      cmd.push("--config", @config_file) if @config_file
+      cmd.concat(self.class.config_to_args(@config))
+      cmd.concat(@extra_args)
 
       env = ENV.to_h
-      env["GOLDLAPEL_CLIENT"] ||= "ruby"
+      # GOLDLAPEL_CLIENT env var is only set when the user hasn't opted in
+      # via the top-level `client` kwarg (which emits --client and takes
+      # precedence over the env var).
+      env["GOLDLAPEL_CLIENT"] ||= "ruby" if @client.nil?
       # Provision a session-scoped dashboard token so ddl.rb can POST to
       # /api/ddl/* without relying on ~/.goldlapel/dashboard-token. Pre-set
       # env wins (user may already have their own token configured).
@@ -131,20 +209,20 @@ module GoldLapel
       stderr_write.close
       @stderr_reader = stderr_read
 
-      unless self.class.wait_for_port("127.0.0.1", @port, STARTUP_TIMEOUT)
+      unless self.class.wait_for_port("127.0.0.1", @proxy_port, STARTUP_TIMEOUT)
         Process.kill("KILL", @pid) rescue Errno::ESRCH
         Process.wait(@pid) rescue Errno::ECHILD
         stderr_output = stderr_read.read
         stderr_read.close
         @pid = nil
         @stderr_reader = nil
-        raise "Gold Lapel failed to start on port #{@port} " \
+        raise "Gold Lapel failed to start on port #{@proxy_port} " \
               "within #{STARTUP_TIMEOUT}s.\nstderr: #{stderr_output}"
       end
 
       @stderr_reader.close
       @stderr_reader = nil
-      @url = self.class.make_proxy_url(@upstream, @port)
+      @url = self.class.make_proxy_url(@upstream, @proxy_port)
       @dashboard_url = @dashboard_port > 0 ? "http://127.0.0.1:#{@dashboard_port}" : nil
 
       # Banner — $stderr (not $stdout), and only when not silenced. Library
@@ -153,9 +231,9 @@ module GoldLapel
       # suppresses the banner entirely.
       unless @silent
         if @dashboard_port > 0
-          $stderr.puts "goldlapel → :#{@port} (proxy) | http://127.0.0.1:#{@dashboard_port} (dashboard)"
+          $stderr.puts "goldlapel → :#{@proxy_port} (proxy) | http://127.0.0.1:#{@dashboard_port} (dashboard)"
         else
-          $stderr.puts "goldlapel → :#{@port} (proxy)"
+          $stderr.puts "goldlapel → :#{@proxy_port} (proxy)"
         end
       end
 
@@ -267,12 +345,38 @@ module GoldLapel
       # Low-level entry point — spawns a Proxy and returns the proxy URL
       # string. Does NOT open a PG connection or wrap it. Used by
       # `GoldLapel.start_proxy` and tests.
-      def start(upstream, port: nil, config: {}, extra_args: [], silent: false)
+      def start(
+        upstream,
+        proxy_port: nil,
+        dashboard_port: nil,
+        invalidation_port: nil,
+        log_level: nil,
+        mode: nil,
+        license: nil,
+        client: nil,
+        config_file: nil,
+        config: {},
+        extra_args: [],
+        silent: false
+      )
         @mutex.synchronize do
           existing = @instances[upstream]
           return existing.url if existing&.running?
 
-          proxy = Proxy.new(upstream, port: port, config: config, extra_args: extra_args, silent: silent)
+          proxy = Proxy.new(
+            upstream,
+            proxy_port: proxy_port,
+            dashboard_port: dashboard_port,
+            invalidation_port: invalidation_port,
+            log_level: log_level,
+            mode: mode,
+            license: license,
+            client: client,
+            config_file: config_file,
+            config: config,
+            extra_args: extra_args,
+            silent: silent,
+          )
           unless @cleanup_registered
             at_exit { cleanup }
             @cleanup_registered = true

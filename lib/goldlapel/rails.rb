@@ -30,9 +30,12 @@ module GoldLapel
 
       def connect
         unless @goldlapel_started
+          # database.yml `goldlapel:` block follows the canonical snake_case
+          # surface: proxy_port, dashboard_port, invalidation_port, log_level,
+          # mode, license, config_file, config, extra_args.
           gl_config = @config.is_a?(Hash) ? @config[:goldlapel] || {} : {}
           gl_config = gl_config.transform_keys(&:to_sym) if gl_config.is_a?(Hash)
-          port = gl_config[:port]
+          proxy_port_opt = gl_config[:proxy_port]
           config = gl_config[:config]
           extra_args = gl_config[:extra_args] || []
           @goldlapel_invalidation_port = gl_config[:invalidation_port]
@@ -40,11 +43,22 @@ module GoldLapel
           upstream = GoldLapel::Rails.build_upstream_url(@connection_parameters)
 
           begin
-            ENV["GOLDLAPEL_CLIENT"] = "rails"
             # Rails manages its own pg connections; only spawn the proxy here.
             # (`start_proxy` is the low-level, connection-less variant of
             # `GoldLapel.start` that returns the proxy URL, not an instance.)
-            GoldLapel.start_proxy(upstream, config: config, port: port, extra_args: extra_args)
+            GoldLapel.start_proxy(
+              upstream,
+              proxy_port: proxy_port_opt,
+              dashboard_port: gl_config[:dashboard_port],
+              invalidation_port: @goldlapel_invalidation_port,
+              log_level: gl_config[:log_level],
+              mode: gl_config[:mode],
+              license: gl_config[:license],
+              client: "rails",
+              config_file: gl_config[:config_file],
+              config: config,
+              extra_args: extra_args,
+            )
           rescue => e
             ::Rails.logger.warn("[Gold Lapel] Proxy failed to start: #{e.message} — falling back to direct connection")
             @goldlapel_started = true
@@ -52,7 +66,7 @@ module GoldLapel
             return super
           end
 
-          proxy_port = port || GoldLapel::DEFAULT_PORT
+          proxy_port = proxy_port_opt || GoldLapel::DEFAULT_PROXY_PORT
           @goldlapel_invalidation_port ||= proxy_port + 2
           @connection_parameters[:host] = "127.0.0.1"
           @connection_parameters[:port] = proxy_port

@@ -33,16 +33,21 @@ end
 # real binary.
 class FakeProxy
   attr_accessor :wrapped_conn
-  attr_reader :upstream, :port, :start_calls, :stop_calls
+  attr_reader :upstream, :proxy_port, :invalidation_port, :start_calls, :stop_calls
 
-  def initialize(upstream, port: nil, config: {}, extra_args: [], silent: false)
+  def initialize(upstream, proxy_port: nil, dashboard_port: nil, invalidation_port: nil,
+                 log_level: nil, mode: nil, license: nil, client: nil, config_file: nil,
+                 config: {}, extra_args: [], silent: false)
     @upstream = upstream
-    @port = port || GoldLapel::DEFAULT_PORT
+    @proxy_port = proxy_port || GoldLapel::DEFAULT_PROXY_PORT
+    @invalidation_port = invalidation_port || (@proxy_port + 2)
     @silent = silent
     @running = false
     @start_calls = 0
     @stop_calls = 0
   end
+
+  alias_method :port, :proxy_port
 
   def start
     @running = true
@@ -60,11 +65,11 @@ class FakeProxy
   end
 
   def url
-    "postgresql://user:pass@localhost:#{@port}/db"
+    "postgresql://user:pass@localhost:#{@proxy_port}/db"
   end
 
   def dashboard_url
-    "http://127.0.0.1:#{@port + 1}"
+    "http://127.0.0.1:#{@proxy_port + 1}"
   end
 end
 

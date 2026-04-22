@@ -30,7 +30,7 @@ if PG_URL
   class TestStreamDdlOwnership < Minitest::Test
     def setup
       port = 7700 + (Time.now.to_i % 100)
-      @gl = GoldLapel.start(PG_URL, port: port, silent: true)
+      @gl = GoldLapel.start(PG_URL, proxy_port: port, silent: true)
       @stream_name = "gl_int_stream_#{(Time.now.to_f * 1000).to_i}"
     end
 
@@ -105,7 +105,7 @@ if PG_URL
   class TestStreamRoundTrip < Minitest::Test
     def setup
       port = 7800 + (Time.now.to_i % 100)
-      @gl = GoldLapel.start(PG_URL, port: port, silent: true)
+      @gl = GoldLapel.start(PG_URL, proxy_port: port, silent: true)
       @name = "gl_int_rt_#{(Time.now.to_f * 1000).to_i}"
     end
 

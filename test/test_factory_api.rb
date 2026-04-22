@@ -184,12 +184,24 @@ class TestLogLevelTranslation < Minitest::Test
 
     begin
       GoldLapel.start("postgresql://localhost/test", log_level: "debug")
-      assert_includes captured[:kwargs][:extra_args], "-vv"
-      refute_includes captured[:kwargs][:extra_args], "--log-level"
-      refute_includes captured[:kwargs][:extra_args], "debug"
+      # log_level is a top-level kwarg on the canonical surface, passed
+      # through to Instance and then to Proxy. The -vv translation happens
+      # in Proxy#start at spawn time (see log_level_to_verbose_flag).
+      assert_equal "debug", captured[:kwargs][:log_level]
     ensure
       GoldLapel::Instance.singleton_class.send(:define_method, :new, original)
     end
+  end
+
+  def test_log_level_to_verbose_flag_helper
+    # Direct helper: validates the translation without the spawn pipeline.
+    assert_equal "-vvv", GoldLapel::Proxy.log_level_to_verbose_flag("trace")
+    assert_equal "-vv",  GoldLapel::Proxy.log_level_to_verbose_flag("debug")
+    assert_equal "-v",   GoldLapel::Proxy.log_level_to_verbose_flag("info")
+    assert_nil GoldLapel::Proxy.log_level_to_verbose_flag("warn")
+    assert_nil GoldLapel::Proxy.log_level_to_verbose_flag("error")
+    assert_nil GoldLapel::Proxy.log_level_to_verbose_flag(nil)
+    assert_equal "-vv", GoldLapel::Proxy.log_level_to_verbose_flag("DEBUG")
   end
 
   def test_start_omits_flag_when_log_level_nil
@@ -202,6 +214,7 @@ class TestLogLevelTranslation < Minitest::Test
 
     begin
       GoldLapel.start("postgresql://localhost/test")
+      assert_nil captured[:kwargs][:log_level]
       assert_equal [], captured[:kwargs][:extra_args]
     ensure
       GoldLapel::Instance.singleton_class.send(:define_method, :new, original)
@@ -209,8 +222,10 @@ class TestLogLevelTranslation < Minitest::Test
   end
 
   def test_start_raises_on_invalid_log_level
+    # Invalid log_level raises at spawn time (via log_level_to_verbose_flag)
+    # — exercised via the helper since start()/Instance.new don't spawn.
     assert_raises(ArgumentError) do
-      GoldLapel.start("postgresql://localhost/test", log_level: "invalid")
+      GoldLapel::Proxy.log_level_to_verbose_flag("invalid")
     end
   end
 
@@ -228,10 +243,9 @@ class TestLogLevelTranslation < Minitest::Test
         log_level: "info",
         extra_args: ["--custom-flag", "value"]
       )
-      extra = captured[:kwargs][:extra_args]
-      assert_includes extra, "--custom-flag"
-      assert_includes extra, "value"
-      assert_includes extra, "-v"
+      # log_level lives at the top level; extra_args is passed through verbatim.
+      assert_equal "info", captured[:kwargs][:log_level]
+      assert_equal ["--custom-flag", "value"], captured[:kwargs][:extra_args]
     ensure
       GoldLapel::Instance.singleton_class.send(:define_method, :new, original)
     end

@@ -49,29 +49,103 @@ module GoldLapel
   # connection (or the scoped `using` connection) is used.
   #
   # Example:
-  #   gl = GoldLapel.start("postgresql://localhost/mydb", port: 7932)
+  #   gl = GoldLapel.start("postgresql://localhost/mydb", proxy_port: 7932)
   #   hits = gl.search("articles", "body", "postgres tuning")
   #   PG.connect(gl.url) { |conn| conn.exec("SELECT ...") }
   #   gl.stop
-  def self.start(upstream, port: nil, log_level: nil, config: {}, extra_args: [], silent: false)
-    # Translate log_level → `-v` count flag on the spawned proxy CLI.
-    extra = extra_args.dup
-    extra.concat(log_level_to_args(log_level))
-    # `silent` is a wrapper-only option (suppresses the startup banner). It is
-    # deliberately passed as a separate kwarg and NOT merged into `config`, so
-    # it can never leak to the Rust binary as a `--silent` CLI flag.
-    Instance.new(upstream, port: port, config: config, extra_args: extra, eager_connect: true, silent: silent)
+  def self.start(
+    upstream,
+    proxy_port: nil,
+    dashboard_port: nil,
+    invalidation_port: nil,
+    log_level: nil,
+    mode: nil,
+    license: nil,
+    client: nil,
+    config_file: nil,
+    config: {},
+    extra_args: [],
+    silent: false
+  )
+    Instance.new(
+      upstream,
+      proxy_port: proxy_port,
+      dashboard_port: dashboard_port,
+      invalidation_port: invalidation_port,
+      log_level: log_level,
+      mode: mode,
+      license: license,
+      client: client,
+      config_file: config_file,
+      config: config,
+      extra_args: extra_args,
+      eager_connect: true,
+      silent: silent,
+    )
   end
 
-  def self.new(upstream, port: nil, config: {}, extra_args: [], silent: false)
+  def self.new(
+    upstream,
+    proxy_port: nil,
+    dashboard_port: nil,
+    invalidation_port: nil,
+    log_level: nil,
+    mode: nil,
+    license: nil,
+    client: nil,
+    config_file: nil,
+    config: {},
+    extra_args: [],
+    silent: false
+  )
     # Legacy/advanced: construct without eagerly spawning or connecting.
-    Instance.new(upstream, port: port, config: config, extra_args: extra_args, eager_connect: false, silent: silent)
+    Instance.new(
+      upstream,
+      proxy_port: proxy_port,
+      dashboard_port: dashboard_port,
+      invalidation_port: invalidation_port,
+      log_level: log_level,
+      mode: mode,
+      license: license,
+      client: client,
+      config_file: config_file,
+      config: config,
+      extra_args: extra_args,
+      eager_connect: false,
+      silent: silent,
+    )
   end
 
   # Lower-level helpers (still supported for plugin/adapter code)
 
-  def self.start_proxy(upstream, port: nil, config: {}, extra_args: [], silent: false)
-    Proxy.start(upstream, port: port, config: config, extra_args: extra_args, silent: silent)
+  def self.start_proxy(
+    upstream,
+    proxy_port: nil,
+    dashboard_port: nil,
+    invalidation_port: nil,
+    log_level: nil,
+    mode: nil,
+    license: nil,
+    client: nil,
+    config_file: nil,
+    config: {},
+    extra_args: [],
+    silent: false
+  )
+    Proxy.start(
+      upstream,
+      proxy_port: proxy_port,
+      dashboard_port: dashboard_port,
+      invalidation_port: invalidation_port,
+      log_level: log_level,
+      mode: mode,
+      license: license,
+      client: client,
+      config_file: config_file,
+      config: config,
+      extra_args: extra_args,
+      silent: silent,
+    )
   end
 
   def self.stop(upstream = nil)

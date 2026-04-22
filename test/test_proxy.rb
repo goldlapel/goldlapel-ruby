@@ -154,12 +154,12 @@ class TestProxyClass < Minitest::Test
   end
 
   def test_custom_port
-    proxy = GoldLapel::Proxy.new("postgresql://localhost:5432/mydb", port: 9000)
+    proxy = GoldLapel::Proxy.new("postgresql://localhost:5432/mydb", proxy_port: 9000)
     assert_equal 9000, proxy.port
   end
 
   def test_port_zero
-    proxy = GoldLapel::Proxy.new("postgresql://localhost:5432/mydb", port: 0)
+    proxy = GoldLapel::Proxy.new("postgresql://localhost:5432/mydb", proxy_port: 0)
     assert_equal 0, proxy.port
   end
 
@@ -196,13 +196,13 @@ end
 
 class TestConfigToArgs < Minitest::Test
   def test_string_key
-    result = GoldLapel::Proxy.config_to_args({ "mode" => "waiter" })
-    assert_equal ["--mode", "waiter"], result
+    result = GoldLapel::Proxy.config_to_args({ "pool_mode" => "transaction" })
+    assert_equal ["--pool-mode", "transaction"], result
   end
 
   def test_symbol_key
-    result = GoldLapel::Proxy.config_to_args({ mode: "waiter" })
-    assert_equal ["--mode", "waiter"], result
+    result = GoldLapel::Proxy.config_to_args({ pool_mode: "transaction" })
+    assert_equal ["--pool-mode", "transaction"], result
   end
 
   def test_numeric_value
@@ -234,15 +234,28 @@ class TestConfigToArgs < Minitest::Test
 
   def test_multiple_keys
     result = GoldLapel::Proxy.config_to_args({
-      mode: "waiter",
+      pool_mode: "transaction",
       pool_size: 10,
       disable_pool: true,
     })
-    assert_includes result, "--mode"
-    assert_includes result, "waiter"
+    assert_includes result, "--pool-mode"
+    assert_includes result, "transaction"
     assert_includes result, "--pool-size"
     assert_includes result, "10"
     assert_includes result, "--disable-pool"
+  end
+
+  def test_log_level_in_config_map_rejected
+    # Regression guard: log_level was promoted to a top-level kwarg.
+    assert_raises(ArgumentError, /Unknown config key/) do
+      GoldLapel::Proxy.config_to_args({ log_level: "info" })
+    end
+  end
+
+  def test_mode_in_config_map_rejected
+    assert_raises(ArgumentError, /Unknown config key/) do
+      GoldLapel::Proxy.config_to_args({ mode: "waiter" })
+    end
   end
 
   def test_empty_hash
@@ -263,9 +276,9 @@ class TestConfigToArgs < Minitest::Test
   def test_constructor_stores_config
     proxy = GoldLapel::Proxy.new(
       "postgresql://localhost:5432/mydb",
-      config: { mode: "waiter" }
+      config: { pool_mode: "transaction" }
     )
-    assert_equal({ mode: "waiter" }, proxy.config)
+    assert_equal({ pool_mode: "transaction" }, proxy.config)
   end
 end
 
@@ -277,11 +290,20 @@ class TestConfigKeys < Minitest::Test
   end
 
   def test_contains_known_keys
+    # Tuning knobs still live in the structured config map.
     keys = GoldLapel::Proxy.config_keys
-    assert_includes keys, "mode"
     assert_includes keys, "pool_size"
     assert_includes keys, "disable_matviews"
     assert_includes keys, "replica"
+  end
+
+  def test_does_not_contain_promoted_top_level_keys
+    # Top-level concepts (mode, log_level, dashboard_port, etc.) were
+    # promoted out of the structured config map.
+    keys = GoldLapel::Proxy.config_keys
+    %w[mode log_level dashboard_port invalidation_port config license client].each do |promoted|
+      refute_includes keys, promoted
+    end
   end
 
   def test_expected_count
@@ -313,44 +335,64 @@ class TestDashboardUrl < Minitest::Test
     # what the Rust proxy binary binds), not the default 7933.
     proxy = GoldLapel::Proxy.new(
       "postgresql://localhost:5432/mydb",
-      port: 17932
+      proxy_port: 17932
     )
     assert_equal 17933, proxy.instance_variable_get(:@dashboard_port)
   end
 
   def test_explicit_dashboard_port_overrides_derivation
-    # When dashboard_port is explicitly set in config, it wins over the
-    # proxy_port + 1 derivation.
+    # When dashboard_port is explicitly set as a top-level kwarg, it wins
+    # over the proxy_port + 1 derivation.
     proxy = GoldLapel::Proxy.new(
       "postgresql://localhost:5432/mydb",
-      port: 17932,
-      config: { dashboard_port: 25000 }
+      proxy_port: 17932,
+      dashboard_port: 25000
     )
     assert_equal 25000, proxy.instance_variable_get(:@dashboard_port)
   end
 
-  def test_custom_dashboard_port_from_config_symbol
+  def test_custom_dashboard_port_top_level_kwarg
     proxy = GoldLapel::Proxy.new(
       "postgresql://localhost:5432/mydb",
-      config: { dashboard_port: 9090 }
+      dashboard_port: 9090
     )
     assert_equal 9090, proxy.instance_variable_get(:@dashboard_port)
   end
 
-  def test_custom_dashboard_port_from_config_string
-    proxy = GoldLapel::Proxy.new(
-      "postgresql://localhost:5432/mydb",
-      config: { "dashboard_port" => 8080 }
-    )
-    assert_equal 8080, proxy.instance_variable_get(:@dashboard_port)
+  def test_dashboard_port_in_config_map_rejected
+    # Regression guard: dashboard_port was promoted to a top-level kwarg
+    # on the canonical surface. Passing it through `config` must raise.
+    assert_raises(ArgumentError, /Unknown config key/) do
+      GoldLapel::Proxy.new(
+        "postgresql://localhost:5432/mydb",
+        config: { dashboard_port: 8080 }
+      )
+    end
   end
 
   def test_disabled_dashboard_port_zero
     proxy = GoldLapel::Proxy.new(
       "postgresql://localhost:5432/mydb",
-      config: { dashboard_port: 0 }
+      dashboard_port: 0
     )
     assert_equal 0, proxy.instance_variable_get(:@dashboard_port)
+  end
+
+  def test_invalidation_port_derives_from_custom_proxy_port
+    proxy = GoldLapel::Proxy.new(
+      "postgresql://localhost:5432/mydb",
+      proxy_port: 17932
+    )
+    assert_equal 17934, proxy.invalidation_port
+  end
+
+  def test_explicit_invalidation_port_overrides_derivation
+    proxy = GoldLapel::Proxy.new(
+      "postgresql://localhost:5432/mydb",
+      proxy_port: 17932,
+      invalidation_port: 9999
+    )
+    assert_equal 9999, proxy.invalidation_port
   end
 
   def test_dashboard_url_nil_when_not_running

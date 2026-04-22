@@ -8,7 +8,7 @@ require "minitest/autorun"
 # in `setup` and restored in `teardown` — defining them at file-load time
 # leaks into every other test file loaded in the same process.
 module GoldLapel
-  DEFAULT_PORT = 7932 unless defined?(DEFAULT_PORT)
+  DEFAULT_PROXY_PORT = 7932 unless defined?(DEFAULT_PROXY_PORT)
 
   @start_calls = []
   @wrap_calls = []
@@ -50,8 +50,8 @@ module RailsTestGoldLapelStub
     @original_start_proxy = GoldLapel.method(:start_proxy) if GoldLapel.respond_to?(:start_proxy)
     @original_wrap = GoldLapel.method(:wrap) if GoldLapel.respond_to?(:wrap)
 
-    GoldLapel.define_singleton_method(:start_proxy) do |upstream, config: nil, port: nil, extra_args: []|
-      @start_calls << { upstream: upstream, config: config, port: port, extra_args: extra_args }
+    GoldLapel.define_singleton_method(:start_proxy) do |upstream, **kwargs|
+      @start_calls << { upstream: upstream, **kwargs }
     end
     GoldLapel.define_singleton_method(:wrap) do |conn, invalidation_port: nil|
       @wrap_calls << { conn: conn, invalidation_port: invalidation_port }
@@ -268,17 +268,17 @@ class TestConnect < Minitest::Test
     call = GoldLapel.start_calls.first
     assert_equal "postgresql://u:p@db.example.com:5432/mydb", call[:upstream]
     assert_nil call[:config]
-    assert_nil call[:port]
+    assert_nil call[:proxy_port]
     assert_equal [], call[:extra_args]
 
     assert_equal "127.0.0.1", adapter.connection_parameters[:host]
-    assert_equal GoldLapel::DEFAULT_PORT, adapter.connection_parameters[:port]
+    assert_equal GoldLapel::DEFAULT_PROXY_PORT, adapter.connection_parameters[:port]
     assert_equal 1, adapter.super_called
   end
 
   def test_custom_port_from_config
     adapter = FakeAdapter.new(
-      config: { goldlapel: { port: 9000 } },
+      config: { goldlapel: { proxy_port: 9000 } },
       connection_parameters: {
         host: "db.example.com", port: "5432",
         user: "u", password: "p", dbname: "mydb"
@@ -287,7 +287,7 @@ class TestConnect < Minitest::Test
 
     adapter.send(:connect)
 
-    assert_equal 9000, GoldLapel.start_calls.first[:port]
+    assert_equal 9000, GoldLapel.start_calls.first[:proxy_port]
     assert_equal 9000, adapter.connection_parameters[:port]
   end
 
@@ -307,7 +307,7 @@ class TestConnect < Minitest::Test
 
   def test_config_hash_from_config
     adapter = FakeAdapter.new(
-      config: { goldlapel: { config: { mode: "waiter", pool_size: 30 } } },
+      config: { goldlapel: { config: { pool_mode: "transaction", pool_size: 30 } } },
       connection_parameters: {
         host: "db.example.com", port: "5432",
         user: "u", password: "p", dbname: "mydb"
@@ -317,15 +317,16 @@ class TestConnect < Minitest::Test
     adapter.send(:connect)
 
     call = GoldLapel.start_calls.first
-    assert_equal({ mode: "waiter", pool_size: 30 }, call[:config])
+    assert_equal({ pool_mode: "transaction", pool_size: 30 }, call[:config])
   end
 
   def test_config_hash_with_port_and_extra_args
     adapter = FakeAdapter.new(
       config: {
         goldlapel: {
-          port: 9000,
-          config: { mode: "waiter", disable_n1: true },
+          proxy_port: 9000,
+          mode: "waiter",
+          config: { disable_n1: true },
           extra_args: ["--verbose"]
         }
       },
@@ -338,14 +339,15 @@ class TestConnect < Minitest::Test
     adapter.send(:connect)
 
     call = GoldLapel.start_calls.first
-    assert_equal 9000, call[:port]
-    assert_equal({ mode: "waiter", disable_n1: true }, call[:config])
+    assert_equal 9000, call[:proxy_port]
+    assert_equal "waiter", call[:mode]
+    assert_equal({ disable_n1: true }, call[:config])
     assert_equal ["--verbose"], call[:extra_args]
   end
 
   def test_nil_config_when_not_specified
     adapter = FakeAdapter.new(
-      config: { goldlapel: { port: 9000 } },
+      config: { goldlapel: { proxy_port: 9000 } },
       connection_parameters: {
         host: "db.example.com", port: "5432",
         user: "u", password: "p", dbname: "mydb"
@@ -370,7 +372,7 @@ class TestConnect < Minitest::Test
 
     call = GoldLapel.start_calls.first
     assert_nil call[:config]
-    assert_nil call[:port]
+    assert_nil call[:proxy_port]
     assert_equal [], call[:extra_args]
   end
 
@@ -392,14 +394,14 @@ class TestConnect < Minitest::Test
     assert_equal 2, adapter.super_called
     # Params still point at proxy
     assert_equal "127.0.0.1", adapter.connection_parameters[:host]
-    assert_equal GoldLapel::DEFAULT_PORT, adapter.connection_parameters[:port]
+    assert_equal GoldLapel::DEFAULT_PROXY_PORT, adapter.connection_parameters[:port]
   end
 
   def test_string_keys_from_yaml_config
     # Rails YAML parsing produces string keys for nested hashes — symbolize_keys
     # is shallow, so the goldlapel sub-hash arrives with string keys.
     adapter = FakeAdapter.new(
-      config: { goldlapel: { "port" => 9000, "extra_args" => ["--verbose"] } },
+      config: { goldlapel: { "proxy_port" => 9000, "extra_args" => ["--verbose"] } },
       connection_parameters: {
         host: "db.example.com", port: "5432",
         user: "u", password: "p", dbname: "mydb"
@@ -409,13 +411,13 @@ class TestConnect < Minitest::Test
     adapter.send(:connect)
 
     call = GoldLapel.start_calls.first
-    assert_equal 9000, call[:port]
+    assert_equal 9000, call[:proxy_port]
     assert_equal ["--verbose"], call[:extra_args]
     assert_equal 9000, adapter.connection_parameters[:port]
   end
 
   def test_graceful_fallback_on_start_failure
-    RailsTestGoldLapelStub.override_start_proxy do |upstream, config: nil, port: nil, extra_args: []|
+    RailsTestGoldLapelStub.override_start_proxy do |upstream, **kwargs|
       raise RuntimeError, "binary not found"
     end
 
@@ -497,7 +499,7 @@ class TestL1CacheWrapping < Minitest::Test
     adapter.send(:connect)
 
     call = GoldLapel.wrap_calls.first
-    assert_equal GoldLapel::DEFAULT_PORT + 2, call[:invalidation_port]
+    assert_equal GoldLapel::DEFAULT_PROXY_PORT + 2, call[:invalidation_port]
   end
 
   def test_custom_invalidation_port_from_config
@@ -517,7 +519,7 @@ class TestL1CacheWrapping < Minitest::Test
 
   def test_invalidation_port_derives_from_custom_proxy_port
     adapter = FakeAdapter.new(
-      config: { goldlapel: { port: 9000 } },
+      config: { goldlapel: { proxy_port: 9000 } },
       connection_parameters: {
         host: "db.example.com", port: "5432",
         user: "u", password: "p", dbname: "mydb"
@@ -563,7 +565,7 @@ class TestL1CacheWrapping < Minitest::Test
   end
 
   def test_no_wrap_on_fallback
-    RailsTestGoldLapelStub.override_start_proxy do |upstream, config: nil, port: nil, extra_args: []|
+    RailsTestGoldLapelStub.override_start_proxy do |upstream, **kwargs|
       raise RuntimeError, "binary not found"
     end
 
