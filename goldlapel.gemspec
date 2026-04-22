@@ -16,6 +16,8 @@ Gem::Specification.new do |spec|
 
   spec.metadata["homepage_uri"] = spec.homepage
   spec.metadata["source_code_uri"] = "https://github.com/goldlapel/goldlapel-ruby"
+  spec.metadata["bug_tracker_uri"] = "https://github.com/goldlapel/goldlapel-ruby/issues"
+  spec.metadata["documentation_uri"] = "https://goldlapel.com/docs/ruby"
   spec.bindir = "exe"
   spec.executables = ["goldlapel"]
   spec.files = Dir["lib/**/*.rb", "bin/*", "exe/*", "README.md", "LICENSE", "THIRD-PARTY-NOTICES.md"]
