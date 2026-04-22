@@ -345,21 +345,32 @@ module GoldLapel
     _validate_identifier(stream)
     qp = _require_patterns(patterns, "stream_read")
     raw = _raw_conn(conn)
-    cursor_res = raw.async_exec_params(qp["group_get_cursor"], [group])
-    return [] if cursor_res.ntuples == 0
-
-    last_id = cursor_res[0]["last_delivered_id"].to_i
-    rows = raw.async_exec_params(qp["read_since"], [last_id, count])
-    messages = rows.map do |row|
-      payload_raw = row["payload"]
-      payload = payload_raw.is_a?(String) ? JSON.parse(payload_raw) : payload_raw
-      { "id" => row["id"].to_i, "payload" => payload, "created_at" => row["created_at"] }
-    end
-    unless messages.empty?
-      new_last = messages.last["id"]
-      raw.async_exec_params(qp["group_advance_cursor"], [new_last, group])
-      messages.each do |msg|
-        raw.async_exec_params(qp["pending_insert"], [msg["id"], group, consumer])
+    # Wrap in an explicit transaction so the FOR UPDATE lock from
+    # group_get_cursor is held until we've advanced the cursor and inserted
+    # pending rows. Under autocommit the row lock is released immediately,
+    # allowing concurrent consumers to read the same cursor and claim the
+    # same messages. See sync stream_read in lib/goldlapel/utils.rb for the
+    # full explanation.
+    messages = nil
+    raw.transaction do
+      cursor_res = raw.async_exec_params(qp["group_get_cursor"], [group])
+      if cursor_res.ntuples.zero?
+        messages = []
+      else
+        last_id = cursor_res[0]["last_delivered_id"].to_i
+        rows = raw.async_exec_params(qp["read_since"], [last_id, count])
+        messages = rows.map do |row|
+          payload_raw = row["payload"]
+          payload = payload_raw.is_a?(String) ? JSON.parse(payload_raw) : payload_raw
+          { "id" => row["id"].to_i, "payload" => payload, "created_at" => row["created_at"] }
+        end
+        unless messages.empty?
+          new_last = messages.last["id"]
+          raw.async_exec_params(qp["group_advance_cursor"], [new_last, group])
+          messages.each do |msg|
+            raw.async_exec_params(qp["pending_insert"], [msg["id"], group, consumer])
+          end
+        end
       end
     end
     messages

@@ -51,23 +51,56 @@ class StreamMockResult
 end
 
 class StreamMockConnection
-  attr_reader :calls
+  attr_reader :calls, :commits, :rollbacks, :begins
+  attr_accessor :raise_on_nth_exec
 
   def initialize(results = {})
     @calls = []
     @results = results
     @default = StreamMockResult.new([], [])
+    @in_tx = false
+    @commits = 0
+    @rollbacks = 0
+    @begins = 0
+    @raise_on_nth_exec = nil
+  end
+
+  def in_transaction?
+    @in_tx
+  end
+
+  # Mimics PG::Connection#transaction: yields; COMMITs on normal exit;
+  # ROLLBACKs on exception. Tracked via @in_tx so tests can assert every
+  # statement executes inside the open transaction.
+  def transaction
+    @begins += 1
+    @in_tx = true
+    @calls << { method: :begin, sql: "BEGIN" }
+    begin
+      yield self
+    rescue StandardError, Exception
+      @rollbacks += 1
+      @in_tx = false
+      @calls << { method: :rollback, sql: "ROLLBACK" }
+      raise
+    end
+    @commits += 1
+    @in_tx = false
+    @calls << { method: :commit, sql: "COMMIT" }
   end
 
   def exec(sql, &block)
-    @calls << { method: :exec, sql: sql }
+    @calls << { method: :exec, sql: sql, in_tx: @in_tx }
     r = @default
     block&.call(r)
     r
   end
 
   def exec_params(sql, params = [], result_format = 0, &block)
-    @calls << { method: :exec_params, sql: sql, params: params }
+    @calls << { method: :exec_params, sql: sql, params: params, in_tx: @in_tx }
+    if @raise_on_nth_exec && @calls.count { |c| c[:method] == :exec_params } == @raise_on_nth_exec
+      raise RuntimeError, "injected exec_params failure"
+    end
     key = @results.keys.find { |k| sql.include?(k) }
     r = key ? @results[key] : @default
     block&.call(r)
@@ -149,6 +182,172 @@ class TestStreamRead < Minitest::Test
     mock = StreamMockConnection.new # cursor lookup returns empty default
     messages = GoldLapel.stream_read(mock, "events", "workers", "c1", patterns: STREAM_PATTERNS)
     assert_empty messages
+  end
+
+  # --- transaction wrapping regression ---
+  #
+  # Under autocommit, SELECT ... FOR UPDATE releases the row lock as soon as
+  # the statement returns, allowing concurrent consumers to claim the same
+  # pending messages. Stream_read must wrap cursor-read → advance → pending
+  # insert in a transaction.
+
+  def test_wraps_in_transaction_and_commits
+    cursor_result = StreamMockResult.new([{ "last_delivered_id" => "0" }], ["last_delivered_id"])
+    read_result = StreamMockResult.new(
+      [{ "id" => "5", "payload" => '{"x":1}', "created_at" => "t" }],
+      ["id", "payload", "created_at"],
+    )
+    mock = StreamMockConnection.new(
+      "SELECT last_delivered_id" => cursor_result,
+      "SELECT id, payload, created_at" => read_result,
+    )
+    GoldLapel.stream_read(mock, "events", "workers", "c1", count: 1, patterns: STREAM_PATTERNS)
+
+    assert_equal 1, mock.begins, "should open exactly one transaction"
+    assert_equal 1, mock.commits, "should commit the transaction"
+    assert_equal 0, mock.rollbacks, "happy path should not rollback"
+    sql_calls = mock.calls.select { |c| c[:method] == :exec_params }
+    refute_empty sql_calls
+    sql_calls.each do |c|
+      assert c[:in_tx], "statement ran outside tx: #{c[:sql].inspect}"
+    end
+  end
+
+  def test_commits_on_empty_cursor_path
+    mock = StreamMockConnection.new # cursor lookup returns empty default
+    result = GoldLapel.stream_read(mock, "events", "workers", "c1", patterns: STREAM_PATTERNS)
+    assert_empty result
+    assert_equal 1, mock.begins
+    assert_equal 1, mock.commits
+    assert_equal 0, mock.rollbacks
+  end
+
+  def test_rollback_on_exception
+    cursor_result = StreamMockResult.new([{ "last_delivered_id" => "0" }], ["last_delivered_id"])
+    mock = StreamMockConnection.new(
+      "SELECT last_delivered_id" => cursor_result,
+    )
+    mock.raise_on_nth_exec = 2 # fail on the read_since query
+    assert_raises(RuntimeError) do
+      GoldLapel.stream_read(mock, "events", "workers", "c1", patterns: STREAM_PATTERNS)
+    end
+    assert_equal 1, mock.begins
+    assert_equal 0, mock.commits
+    assert_equal 1, mock.rollbacks
+  end
+
+  # Concurrency regression — models the real bug with a fake engine where
+  # FOR UPDATE only holds the lock when inside an explicit tx.
+  def test_concurrent_consumers_do_not_double_claim
+    messages_source = [1, 2, 3, 4]
+    # Shared cursor + lock across both threads.
+    state = { cursor: 0, locked_by: nil, mu: Mutex.new, cv: ConditionVariable.new }
+
+    make_conn = lambda do
+      FakeEngineConnection.new(state, messages_source)
+    end
+
+    results = { a: nil, b: nil }
+    threads = [
+      Thread.new do
+        conn = make_conn.call
+        all = []
+        loop do
+          batch = GoldLapel.stream_read(conn, "events", "workers", "ca", count: 4, patterns: STREAM_PATTERNS)
+          break if batch.empty?
+          all.concat(batch.map { |m| m["id"] })
+        end
+        results[:a] = all
+      end,
+      Thread.new do
+        conn = make_conn.call
+        all = []
+        loop do
+          batch = GoldLapel.stream_read(conn, "events", "workers", "cb", count: 4, patterns: STREAM_PATTERNS)
+          break if batch.empty?
+          all.concat(batch.map { |m| m["id"] })
+        end
+        results[:b] = all
+      end,
+    ]
+    threads.each(&:join)
+
+    union = (results[:a] + results[:b]).sort
+    assert_equal [1, 2, 3, 4], union, "all messages delivered exactly once (a=#{results[:a]} b=#{results[:b]})"
+    overlap = results[:a] & results[:b]
+    assert_empty overlap, "no message delivered to both consumers"
+  end
+end
+
+# Fake Postgres-like engine: FOR UPDATE only holds the cursor row across
+# subsequent statements when it's inside an open transaction.
+class FakeEngineConnection
+  def initialize(state, message_ids)
+    @state = state
+    @message_ids = message_ids
+    @in_tx = false
+    @holds_lock = false
+  end
+
+  def transaction
+    @in_tx = true
+    begin
+      yield self
+    rescue StandardError, Exception
+      release_lock
+      @in_tx = false
+      raise
+    end
+    release_lock
+    @in_tx = false
+  end
+
+  def exec_params(sql, params)
+    if sql.include?("FOR UPDATE")
+      if @in_tx
+        acquire_lock
+      else
+        # autocommit: release immediately — models the bug.
+        acquire_lock
+        release_lock
+      end
+      StreamMockResult.new([{ "last_delivered_id" => @state[:cursor].to_s }], ["last_delivered_id"])
+    elsif sql.include?("ORDER BY id LIMIT")
+      last_id = params[0].to_i
+      limit = params[1].to_i
+      rows = @message_ids.select { |id| id > last_id }.first(limit).map do |id|
+        { "id" => id.to_s, "payload" => '{"i":1}', "created_at" => "t" }
+      end
+      StreamMockResult.new(rows, ["id", "payload", "created_at"])
+    elsif sql.start_with?("UPDATE") && sql.include?("_groups")
+      @state[:mu].synchronize { @state[:cursor] = params[0].to_i }
+      StreamMockResult.new([{ "dummy" => "1" }], ["dummy"])
+    elsif sql.include?("_pending")
+      StreamMockResult.new([{ "dummy" => "1" }], ["dummy"])
+    else
+      StreamMockResult.new([], [])
+    end
+  end
+
+  private
+
+  def acquire_lock
+    @state[:mu].synchronize do
+      while @state[:locked_by] && @state[:locked_by] != self
+        @state[:cv].wait(@state[:mu])
+      end
+      @state[:locked_by] = self
+    end
+    @holds_lock = true
+  end
+
+  def release_lock
+    return unless @holds_lock
+    @state[:mu].synchronize do
+      @state[:locked_by] = nil
+      @state[:cv].broadcast
+    end
+    @holds_lock = false
   end
 end
 
