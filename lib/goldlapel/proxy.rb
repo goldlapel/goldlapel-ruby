@@ -114,7 +114,7 @@ module GoldLapel
       env = ENV.to_h
       env["GOLDLAPEL_CLIENT"] ||= "ruby"
       # Provision a session-scoped dashboard token so ddl.rb can POST to
-      # /api/ddl/* without relying on ~/.goldlapel/dashboard_token. Pre-set
+      # /api/ddl/* without relying on ~/.goldlapel/dashboard-token. Pre-set
       # env wins (user may already have their own token configured).
       if env["GOLDLAPEL_DASHBOARD_TOKEN"] && !env["GOLDLAPEL_DASHBOARD_TOKEN"].empty?
         @dashboard_token = env["GOLDLAPEL_DASHBOARD_TOKEN"]

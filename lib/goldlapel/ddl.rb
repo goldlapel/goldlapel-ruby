@@ -26,12 +26,12 @@ module GoldLapel
         SUPPORTED_VERSIONS.fetch(family)
       end
 
-      # Priority: GOLDLAPEL_DASHBOARD_TOKEN env > ~/.goldlapel/dashboard_token file.
+      # Priority: GOLDLAPEL_DASHBOARD_TOKEN env > ~/.goldlapel/dashboard-token file.
       def token_from_env_or_file
         env = ENV["GOLDLAPEL_DASHBOARD_TOKEN"]
         return env.strip if env && !env.strip.empty?
 
-        path = File.join(Dir.home, ".goldlapel", "dashboard_token")
+        path = File.join(Dir.home, ".goldlapel", "dashboard-token")
         if File.exist?(path)
           begin
             text = File.read(path, encoding: "UTF-8").strip
@@ -75,7 +75,7 @@ module GoldLapel
             raise RuntimeError,
               "Gold Lapel dashboard rejected the DDL request (403). " \
               "The dashboard token is missing or incorrect — check " \
-              "GOLDLAPEL_DASHBOARD_TOKEN or ~/.goldlapel/dashboard_token."
+              "GOLDLAPEL_DASHBOARD_TOKEN or ~/.goldlapel/dashboard-token."
           end
           raise RuntimeError,
             "Gold Lapel DDL API #{family}/#{name} failed with #{status} #{error}: #{detail}"
