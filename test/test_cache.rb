@@ -325,6 +325,117 @@ class TestSignalProcessing < Minitest::Test
   end
 end
 
+class TestConcurrentCache < Minitest::Test
+  # Mirrors the concurrent put/get/invalidate coverage that Python, Go, and
+  # .NET ship for their native caches. MRI's GIL serializes pure Ruby, but
+  # JRuby/TruffleRuby have true parallelism and the wrapper ships Thread-based
+  # invalidation listeners — so this exercises `NativeCache`'s Mutex contract
+  # under concurrent put/get/invalidate pressure.
+  def setup
+    GoldLapel::NativeCache.reset!
+    ENV["GOLDLAPEL_NATIVE_CACHE_SIZE"] = "2048"
+    @cache = GoldLapel::NativeCache.new
+    @cache.instance_variable_set(:@invalidation_connected, true)
+  end
+
+  def teardown
+    ENV.delete("GOLDLAPEL_NATIVE_CACHE_SIZE")
+    GoldLapel::NativeCache.reset!
+  end
+
+  def test_concurrent_put_get_invalidate
+    writer_threads = 10
+    reader_threads = 10
+    ops_per_thread = 100
+    invalidator_signals = 10
+    join_timeout = 30 # seconds
+
+    errors = []
+    errors_mutex = Mutex.new
+    record_error = lambda do |e|
+      errors_mutex.synchronize { errors << e }
+    end
+
+    # Seed a couple of keys across the 10 tables so gets have something to
+    # hit (and so invalidations have something to evict). Keys collide across
+    # writer threads by design — tests both insert and update paths under the
+    # mutex.
+    threads = []
+
+    writer_threads.times do |tid|
+      threads << Thread.new do
+        ops_per_thread.times do |i|
+          sql = "SELECT * FROM t#{i % 10} WHERE id = #{tid}"
+          @cache.put(sql, [tid, i], [[i.to_s, "row#{tid}-#{i}"]], ["id", "name"])
+        end
+      rescue => e
+        record_error.call(e)
+      end
+    end
+
+    reader_threads.times do |tid|
+      threads << Thread.new do
+        ops_per_thread.times do |i|
+          sql = "SELECT * FROM t#{i % 10} WHERE id = #{tid}"
+          @cache.get(sql, [tid, i])
+        end
+      rescue => e
+        record_error.call(e)
+      end
+    end
+
+    # Fire invalidations concurrently with the above. Use separate threads
+    # (one per signal) so they race against puts/gets rather than serializing
+    # through a single invalidator loop.
+    invalidator_signals.times do |i|
+      threads << Thread.new do
+        @cache.process_signal("I:t#{i}")
+      rescue => e
+        record_error.call(e)
+      end
+    end
+
+    threads.each do |t|
+      joined = t.join(join_timeout)
+      flunk "thread did not finish within #{join_timeout}s — possible deadlock" if joined.nil?
+    end
+
+    assert_empty errors, "threads raised: #{errors.map(&:message).inspect}"
+
+    # Stats counters must stay internally consistent. Hits + misses must
+    # equal the total number of gets issued (1 per reader op). Any drift
+    # means a racy counter update.
+    total_gets = reader_threads * ops_per_thread
+    assert_equal total_gets, @cache.stats_hits + @cache.stats_misses,
+      "hit/miss counters drifted — expected #{total_gets} gets, got #{@cache.stats_hits} + #{@cache.stats_misses}"
+
+    # Invalidation counter must be non-negative and bounded by total puts
+    # (each put can be invalidated at most once). A negative or wildly large
+    # value signals a race.
+    total_puts = writer_threads * ops_per_thread
+    assert @cache.stats_invalidations >= 0, "negative invalidation count"
+    assert @cache.stats_invalidations <= total_puts,
+      "invalidation count #{@cache.stats_invalidations} exceeds total puts #{total_puts}"
+
+    # Cache must not exceed its configured max size at any steady state.
+    assert_operator @cache.size, :<=, 2048, "cache exceeded max_entries"
+
+    # The cache's internal indices must agree with each other — `@cache` and
+    # `@access_order` should have identical keysets. Mismatch = split-brain
+    # from a racy write.
+    cache_map = @cache.instance_variable_get(:@cache)
+    access_order = @cache.instance_variable_get(:@access_order)
+    assert_equal cache_map.keys.sort, access_order.keys.sort,
+      "@cache and @access_order keysets diverged — racy write detected"
+
+    # `@table_index` entries must only reference keys that still exist in
+    # `@cache`. Dangling entries = invalidation cleanup raced with a put.
+    table_index = @cache.instance_variable_get(:@table_index)
+    dangling = table_index.flat_map { |_table, keys| keys.to_a }.reject { |k| cache_map.key?(k) }
+    assert_empty dangling, "@table_index references #{dangling.size} keys missing from @cache"
+  end
+end
+
 class TestPushInvalidation < Minitest::Test
   def setup
     GoldLapel::NativeCache.reset!
