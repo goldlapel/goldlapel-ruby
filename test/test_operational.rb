@@ -125,11 +125,21 @@ class TestDocWatch < Minitest::Test
     assert_includes fn_calls[0][:sql], "pg_notify"
     assert_includes fn_calls[0][:sql], "_gl_watch_orders"
 
-    trg_calls = mock.calls.select { |c| c[:sql].include?("CREATE TRIGGER") }
+    # Atomic CREATE OR REPLACE TRIGGER (PG14+) — matches the Go wrapper.
+    # Avoids the race where a DROP + CREATE pair could have two concurrent
+    # doc_watch calls replace each other's triggers mid-flight.
+    trg_calls = mock.calls.select { |c| c[:sql].include?("CREATE OR REPLACE TRIGGER") }
     assert_equal 1, trg_calls.length
     assert_includes trg_calls[0][:sql], "_gl_notify_orders_trg"
     assert_includes trg_calls[0][:sql], "AFTER INSERT OR UPDATE OR DELETE"
     assert_includes trg_calls[0][:sql], "FOR EACH ROW"
+
+    # Guard against the racy DROP + CREATE pair regressing.
+    racy_drops = mock.calls.select do |c|
+      c[:sql].include?("DROP TRIGGER IF EXISTS _gl_notify_orders_trg")
+    end
+    assert_empty racy_drops,
+                 "doc_watch should not emit DROP TRIGGER IF EXISTS (racy); use CREATE OR REPLACE TRIGGER"
   end
 
   def test_watch_rejects_invalid_collection
@@ -177,23 +187,26 @@ class TestDocCreateTtlIndex < Minitest::Test
     assert_includes fn_calls[0][:sql], "expires_at"
     assert_includes fn_calls[0][:sql], "3600 seconds"
 
-    trg_calls = mock.calls.select { |c| c[:sql].include?("CREATE TRIGGER") }
+    # Atomic CREATE OR REPLACE TRIGGER (PG14+) — matches the Go wrapper.
+    trg_calls = mock.calls.select { |c| c[:sql].include?("CREATE OR REPLACE TRIGGER") }
     assert_equal 1, trg_calls.length
     assert_includes trg_calls[0][:sql], "_gl_ttl_sessions_trg"
     assert_includes trg_calls[0][:sql], "BEFORE INSERT"
     assert_includes trg_calls[0][:sql], "FOR EACH STATEMENT"
   end
 
-  def test_ttl_drops_existing_trigger_before_creating
+  def test_ttl_uses_atomic_create_or_replace
+    # Regression guard: doc_create_ttl_index must use atomic
+    # CREATE OR REPLACE TRIGGER (PG14+) rather than the racy
+    # DROP + CREATE pair. Matches the Go wrapper.
     mock = OpMockConnection.new
     GoldLapel.doc_create_ttl_index(mock, "sessions", "expires_at", expire_after_seconds: 7200)
 
     sqls = mock.calls.map { |c| c[:sql] }
-    drop_idx = sqls.index { |s| s.include?("DROP TRIGGER") }
-    create_idx = sqls.index { |s| s.include?("CREATE TRIGGER") }
-    refute_nil drop_idx
-    refute_nil create_idx
-    assert_operator drop_idx, :<, create_idx
+    assert sqls.any? { |s| s.include?("CREATE OR REPLACE TRIGGER") },
+           "expected CREATE OR REPLACE TRIGGER for TTL index"
+    refute sqls.any? { |s| s.include?("DROP TRIGGER IF EXISTS _gl_ttl_sessions_trg") },
+           "doc_create_ttl_index should not emit DROP TRIGGER IF EXISTS (racy); use CREATE OR REPLACE TRIGGER"
   end
 end
 
@@ -238,11 +251,19 @@ class TestDocCreateCapped < Minitest::Test
     assert_includes fn_calls[0][:sql], "_gl_cap_logs"
     assert_includes fn_calls[0][:sql], "OFFSET 1000"
 
-    trg_calls = mock.calls.select { |c| c[:sql].include?("CREATE TRIGGER") }
+    # Atomic CREATE OR REPLACE TRIGGER (PG14+) — matches the Go wrapper.
+    trg_calls = mock.calls.select { |c| c[:sql].include?("CREATE OR REPLACE TRIGGER") }
     assert_equal 1, trg_calls.length
     assert_includes trg_calls[0][:sql], "_gl_cap_logs_trg"
     assert_includes trg_calls[0][:sql], "AFTER INSERT"
     assert_includes trg_calls[0][:sql], "FOR EACH STATEMENT"
+
+    # Guard against the racy DROP + CREATE pair regressing.
+    racy_drops = mock.calls.select do |c|
+      c[:sql].include?("DROP TRIGGER IF EXISTS _gl_cap_logs_trg")
+    end
+    assert_empty racy_drops,
+                 "doc_create_capped should not emit DROP TRIGGER IF EXISTS (racy); use CREATE OR REPLACE TRIGGER"
   end
 
   def test_cap_function_deletes_oldest_beyond_max

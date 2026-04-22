@@ -1593,11 +1593,12 @@ module GoldLapel
       "END; $$ LANGUAGE plpgsql"
     )
 
+    # CREATE OR REPLACE TRIGGER (Postgres 14+) is atomic — avoids the race
+    # where a DROP + CREATE pair could have two concurrent doc_watch calls
+    # replace each other's triggers mid-flight and end up with a partially
+    # dropped one. GL targets PG14+ across the product, so this is safe.
     raw.async_exec(
-      "DROP TRIGGER IF EXISTS #{fn_name}_trg ON #{collection}"
-    )
-    raw.async_exec(
-      "CREATE TRIGGER #{fn_name}_trg " \
+      "CREATE OR REPLACE TRIGGER #{fn_name}_trg " \
       "AFTER INSERT OR UPDATE OR DELETE ON #{collection} " \
       "FOR EACH ROW EXECUTE FUNCTION #{fn_name}()"
     )
@@ -1641,9 +1642,10 @@ module GoldLapel
       "END; $$ LANGUAGE plpgsql"
     )
 
-    raw.async_exec("DROP TRIGGER IF EXISTS #{fn_name}_trg ON #{collection}")
+    # CREATE OR REPLACE TRIGGER (Postgres 14+): atomic, avoids the same
+    # race documented in doc_watch.
     raw.async_exec(
-      "CREATE TRIGGER #{fn_name}_trg " \
+      "CREATE OR REPLACE TRIGGER #{fn_name}_trg " \
       "BEFORE INSERT ON #{collection} " \
       "FOR EACH STATEMENT EXECUTE FUNCTION #{fn_name}()"
     )
@@ -1679,9 +1681,10 @@ module GoldLapel
       "END; $$ LANGUAGE plpgsql"
     )
 
-    raw.async_exec("DROP TRIGGER IF EXISTS #{fn_name}_trg ON #{collection}")
+    # CREATE OR REPLACE TRIGGER (Postgres 14+): atomic, avoids the same
+    # race documented in doc_watch.
     raw.async_exec(
-      "CREATE TRIGGER #{fn_name}_trg " \
+      "CREATE OR REPLACE TRIGGER #{fn_name}_trg " \
       "AFTER INSERT ON #{collection} " \
       "FOR EACH STATEMENT EXECUTE FUNCTION #{fn_name}()"
     )
