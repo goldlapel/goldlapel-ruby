@@ -1686,7 +1686,9 @@ module GoldLapel
   private_class_method :_ensure_collection
 
   def self._validate_identifier(name)
-    unless name.to_s.match?(/\A[a-zA-Z_][a-zA-Z0-9_]*\z/)
+    # Bound to 63 chars (Postgres NAMEDATALEN-1) so identifiers match the
+    # proxy's server-side regex exactly: `^[A-Za-z_][A-Za-z0-9_]{0,62}$`.
+    unless name.to_s.match?(/\A[a-zA-Z_][a-zA-Z0-9_]{0,62}\z/)
       raise ArgumentError, "Invalid identifier: #{name}"
     end
   end
