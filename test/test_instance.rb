@@ -5,6 +5,7 @@ require "json"
 require_relative "../lib/goldlapel/cache"
 require_relative "../lib/goldlapel/wrap"
 require_relative "../lib/goldlapel/utils"
+require_relative "../lib/goldlapel/proxy"
 require_relative "../lib/goldlapel/instance"
 
 class InstanceMockResult
@@ -97,6 +98,51 @@ class TestInstanceConn < Minitest::Test
 
     error = assert_raises(RuntimeError) { inst.doc_insert("col", { a: 1 }) }
     assert_match(/Connection not available/, error.message)
+  end
+
+  def test_stop_is_idempotent
+    # Double-stop is reachable via atexit hooks, signal handlers, try/ensure
+    # chains, and test teardown. Guard against regression (NPE on second
+    # close / double-unregister / double-kill).
+    mock_conn = InstanceMockConnection.new
+    stop_calls = 0
+    fake_proxy = Struct.new(:upstream, :url, :dashboard_url).new(
+      "postgresql://localhost/test", "postgresql://localhost:7932/test", nil
+    )
+    fake_proxy.define_singleton_method(:stop) { stop_calls += 1 }
+    fake_proxy.define_singleton_method(:running?) { false }
+
+    inst = GoldLapel::Instance.allocate
+    inst.instance_variable_set(:@upstream, "postgresql://localhost/test")
+    inst.instance_variable_set(:@internal_conn, mock_conn)
+    inst.instance_variable_set(:@wrapped_conn, mock_conn)
+    inst.instance_variable_set(:@proxy, fake_proxy)
+    inst.instance_variable_set(:@fiber_key, :"__goldlapel_conn_#{inst.object_id}")
+
+    # Register so Instance#stop's Proxy.unregister call finds it.
+    GoldLapel::Proxy.register(fake_proxy)
+    begin
+      inst.stop
+      inst.stop # must not raise
+    ensure
+      GoldLapel::Proxy.unregister(fake_proxy)
+    end
+
+    # Internal state fully torn down after first stop; second stop is no-op.
+    assert_nil inst.instance_variable_get(:@internal_conn)
+    assert_nil inst.instance_variable_get(:@wrapped_conn)
+    assert_nil inst.instance_variable_get(:@proxy)
+    assert_equal 1, stop_calls, "proxy.stop must be called exactly once across two Instance#stop calls"
+  end
+
+  def test_stop_is_idempotent_when_never_started
+    # An instance that never successfully started has @proxy=nil and
+    # @internal_conn=nil. stop() should be a safe no-op both times.
+    inst = make_stopped_instance
+    inst.stop
+    inst.stop # must not raise
+    assert_nil inst.instance_variable_get(:@internal_conn)
+    assert_nil inst.instance_variable_get(:@proxy)
   end
 
   def test_all_methods_raise_when_stopped

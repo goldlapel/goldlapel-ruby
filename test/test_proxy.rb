@@ -168,6 +168,30 @@ class TestProxyClass < Minitest::Test
     refute proxy.running?
     assert_nil proxy.url
   end
+
+  def test_stop_is_noop_when_never_started
+    proxy = GoldLapel::Proxy.new("postgresql://localhost:5432/mydb")
+    proxy.stop
+    refute proxy.running?
+    assert_nil proxy.url
+    assert_nil proxy.dashboard_url
+    assert_nil proxy.instance_variable_get(:@pid)
+  end
+
+  def test_stop_is_idempotent
+    # Double-stop is reachable in real code: atexit hooks, signal handlers,
+    # try/ensure chains, test teardown loops. A buggy second-stop (NPE,
+    # double-close of subprocess stream) would mask the root error or
+    # crash the interpreter. Guard against regressions here.
+    proxy = GoldLapel::Proxy.new("postgresql://localhost:5432/mydb")
+    proxy.stop
+    proxy.stop # must not raise
+    refute proxy.running?
+    assert_nil proxy.url
+    assert_nil proxy.dashboard_url
+    assert_nil proxy.instance_variable_get(:@pid)
+    assert_nil proxy.instance_variable_get(:@stderr_reader)
+  end
 end
 
 class TestConfigToArgs < Minitest::Test
