@@ -441,7 +441,7 @@ module GoldLapel
         require "goldlapel/ddl"
         token = (@proxy&.dashboard_token) || GoldLapel::DDL.token_from_env_or_file
         port = @proxy&.dashboard_port
-        GoldLapel::DDL.fetch(self, "stream", stream, port, token)
+        GoldLapel::DDL.fetch_patterns(self, "stream", stream, port, token)
       end
 
       # --- Percolate methods ---

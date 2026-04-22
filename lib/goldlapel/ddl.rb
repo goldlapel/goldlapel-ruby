@@ -43,7 +43,7 @@ module GoldLapel
         nil
       end
 
-      def fetch(owner, family, name, dashboard_port, dashboard_token)
+      def fetch_patterns(owner, family, name, dashboard_port, dashboard_token)
         cache = _cache_for(owner)
         key = [family, name]
         return cache[key] if cache.key?(key)

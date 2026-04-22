@@ -103,7 +103,7 @@ class TestFetchHappyPath < Minitest::Test
       "query_patterns" => { "insert" => "INSERT ..." },
     }]
     owner = FakeOwner.new
-    entry = GoldLapel::DDL.fetch(owner, "stream", "events", @srv.port, "tok")
+    entry = GoldLapel::DDL.fetch_patterns(owner, "stream", "events", @srv.port, "tok")
     assert_equal "_goldlapel.stream_events", entry[:tables]["main"]
     assert_equal "INSERT ...", entry[:query_patterns]["insert"]
 
@@ -120,8 +120,8 @@ class TestFetchHappyPath < Minitest::Test
       "query_patterns" => { "insert" => "X" },
     }]
     owner = FakeOwner.new
-    r1 = GoldLapel::DDL.fetch(owner, "stream", "events", @srv.port, "tok")
-    r2 = GoldLapel::DDL.fetch(owner, "stream", "events", @srv.port, "tok")
+    r1 = GoldLapel::DDL.fetch_patterns(owner, "stream", "events", @srv.port, "tok")
+    r2 = GoldLapel::DDL.fetch_patterns(owner, "stream", "events", @srv.port, "tok")
     assert_same r1, r2
     assert_equal 1, @srv.captured.length
   end
@@ -133,8 +133,8 @@ class TestFetchHappyPath < Minitest::Test
         "query_patterns" => { "insert" => "X" },
       }]
     end
-    GoldLapel::DDL.fetch(FakeOwner.new, "stream", "events", @srv.port, "tok")
-    GoldLapel::DDL.fetch(FakeOwner.new, "stream", "events", @srv.port, "tok")
+    GoldLapel::DDL.fetch_patterns(FakeOwner.new, "stream", "events", @srv.port, "tok")
+    GoldLapel::DDL.fetch_patterns(FakeOwner.new, "stream", "events", @srv.port, "tok")
     assert_equal 2, @srv.captured.length
   end
 
@@ -146,8 +146,8 @@ class TestFetchHappyPath < Minitest::Test
       }]
     end
     owner = FakeOwner.new
-    GoldLapel::DDL.fetch(owner, "stream", "events", @srv.port, "tok")
-    GoldLapel::DDL.fetch(owner, "stream", "orders", @srv.port, "tok")
+    GoldLapel::DDL.fetch_patterns(owner, "stream", "events", @srv.port, "tok")
+    GoldLapel::DDL.fetch_patterns(owner, "stream", "orders", @srv.port, "tok")
     assert_equal 2, @srv.captured.length, "different names must each trigger a fetch"
   end
 end
@@ -167,7 +167,7 @@ class TestFetchErrors < Minitest::Test
       "detail" => "wrapper requested v1; proxy speaks v2 — upgrade proxy",
     }]
     err = assert_raises(RuntimeError) do
-      GoldLapel::DDL.fetch(FakeOwner.new, "stream", "events", @srv.port, "tok")
+      GoldLapel::DDL.fetch_patterns(FakeOwner.new, "stream", "events", @srv.port, "tok")
     end
     assert_match(/schema version mismatch/, err.message)
   end
@@ -175,28 +175,28 @@ class TestFetchErrors < Minitest::Test
   def test_403_forbidden
     @srv.responses << [403, { "error" => "forbidden" }]
     err = assert_raises(RuntimeError) do
-      GoldLapel::DDL.fetch(FakeOwner.new, "stream", "events", @srv.port, "tok")
+      GoldLapel::DDL.fetch_patterns(FakeOwner.new, "stream", "events", @srv.port, "tok")
     end
     assert_match(/dashboard token/, err.message)
   end
 
   def test_missing_token_raises
     err = assert_raises(RuntimeError) do
-      GoldLapel::DDL.fetch(FakeOwner.new, "stream", "events", 9999, nil)
+      GoldLapel::DDL.fetch_patterns(FakeOwner.new, "stream", "events", 9999, nil)
     end
     assert_match(/No dashboard token/, err.message)
   end
 
   def test_missing_port_raises
     err = assert_raises(RuntimeError) do
-      GoldLapel::DDL.fetch(FakeOwner.new, "stream", "events", nil, "tok")
+      GoldLapel::DDL.fetch_patterns(FakeOwner.new, "stream", "events", nil, "tok")
     end
     assert_match(/No dashboard port/, err.message)
   end
 
   def test_unreachable_raises_actionable_error
     err = assert_raises(RuntimeError) do
-      GoldLapel::DDL.fetch(FakeOwner.new, "stream", "events", 1, "tok")
+      GoldLapel::DDL.fetch_patterns(FakeOwner.new, "stream", "events", 1, "tok")
     end
     assert_match(/dashboard not reachable/, err.message)
   end
@@ -219,9 +219,9 @@ class TestInvalidate < Minitest::Test
       }]
     end
     owner = FakeOwner.new
-    GoldLapel::DDL.fetch(owner, "stream", "events", @srv.port, "tok")
+    GoldLapel::DDL.fetch_patterns(owner, "stream", "events", @srv.port, "tok")
     GoldLapel::DDL.invalidate(owner)
-    GoldLapel::DDL.fetch(owner, "stream", "events", @srv.port, "tok")
+    GoldLapel::DDL.fetch_patterns(owner, "stream", "events", @srv.port, "tok")
     assert_equal 2, @srv.captured.length
   end
 end
