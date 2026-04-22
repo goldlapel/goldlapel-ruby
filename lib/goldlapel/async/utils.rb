@@ -42,11 +42,13 @@ module GoldLapel
   #   GoldLapel.incr(conn, "page_views", "home")
 
   def self.publish(conn, channel, message)
+    _validate_identifier(channel)
     raw = _raw_conn(conn)
     raw.async_exec_params("SELECT pg_notify($1, $2)", [channel, message.to_s])
   end
 
   def self.subscribe(conn, channel, &block)
+    _validate_identifier(channel)
     raw = _raw_conn(conn)
     listen_conn = PG.connect(_listener_conninfo(raw))
     listen_conn.async_exec("LISTEN #{channel}")
@@ -58,6 +60,7 @@ module GoldLapel
   end
 
   def self.enqueue(conn, queue_table, payload)
+    _validate_identifier(queue_table)
     raw = _raw_conn(conn)
     raw.async_exec("CREATE TABLE IF NOT EXISTS #{queue_table} (" \
              "id BIGSERIAL PRIMARY KEY, " \
@@ -70,6 +73,7 @@ module GoldLapel
   end
 
   def self.dequeue(conn, queue_table)
+    _validate_identifier(queue_table)
     raw = _raw_conn(conn)
     result = raw.async_exec("DELETE FROM #{queue_table} " \
                       "WHERE id = (" \
@@ -83,6 +87,7 @@ module GoldLapel
   end
 
   def self.incr(conn, table, key, amount: 1)
+    _validate_identifier(table)
     raw = _raw_conn(conn)
     raw.async_exec("CREATE TABLE IF NOT EXISTS #{table} (" \
              "key TEXT PRIMARY KEY, " \
@@ -97,6 +102,7 @@ module GoldLapel
   end
 
   def self.get_counter(conn, table, key)
+    _validate_identifier(table)
     raw = _raw_conn(conn)
     result = raw.async_exec_params("SELECT value FROM #{table} WHERE key = $1", [key])
     return 0 if result.ntuples.zero?
@@ -104,12 +110,15 @@ module GoldLapel
   end
 
   def self.count_distinct(conn, table, column)
+    _validate_identifier(table)
+    _validate_identifier(column)
     raw = _raw_conn(conn)
     result = raw.async_exec("SELECT COUNT(DISTINCT #{column}) FROM #{table}")
     result[0]["count"].to_i
   end
 
   def self.zadd(conn, table, member, score)
+    _validate_identifier(table)
     raw = _raw_conn(conn)
     raw.async_exec("CREATE TABLE IF NOT EXISTS #{table} (" \
              "member TEXT PRIMARY KEY, " \
@@ -122,6 +131,7 @@ module GoldLapel
   end
 
   def self.zincrby(conn, table, member, amount: 1)
+    _validate_identifier(table)
     raw = _raw_conn(conn)
     raw.async_exec("CREATE TABLE IF NOT EXISTS #{table} (" \
              "member TEXT PRIMARY KEY, " \
@@ -136,6 +146,7 @@ module GoldLapel
   end
 
   def self.zrange(conn, table, start: 0, stop: 10, desc: true)
+    _validate_identifier(table)
     raw = _raw_conn(conn)
     order = desc ? "DESC" : "ASC"
     limit = stop - start
@@ -149,6 +160,7 @@ module GoldLapel
   end
 
   def self.zrank(conn, table, member, desc: true)
+    _validate_identifier(table)
     raw = _raw_conn(conn)
     order = desc ? "DESC" : "ASC"
     result = raw.async_exec_params(
@@ -163,6 +175,7 @@ module GoldLapel
   end
 
   def self.zscore(conn, table, member)
+    _validate_identifier(table)
     raw = _raw_conn(conn)
     result = raw.async_exec_params("SELECT score FROM #{table} WHERE member = $1", [member.to_s])
     return nil if result.ntuples.zero?
@@ -170,12 +183,16 @@ module GoldLapel
   end
 
   def self.zrem(conn, table, member)
+    _validate_identifier(table)
     raw = _raw_conn(conn)
     result = raw.async_exec_params("DELETE FROM #{table} WHERE member = $1", [member.to_s])
     result.cmd_tuples > 0
   end
 
   def self.geoadd(conn, table, name_column, geom_column, name, lon, lat)
+    _validate_identifier(table)
+    _validate_identifier(name_column)
+    _validate_identifier(geom_column)
     raw = _raw_conn(conn)
     raw.async_exec("CREATE EXTENSION IF NOT EXISTS postgis")
     raw.async_exec("CREATE TABLE IF NOT EXISTS #{table} (" \
@@ -190,6 +207,8 @@ module GoldLapel
   end
 
   def self.georadius(conn, table, geom_column, lon, lat, radius_meters, limit: 50)
+    _validate_identifier(table)
+    _validate_identifier(geom_column)
     raw = _raw_conn(conn)
     result = raw.async_exec_params(
       "SELECT *, ST_Distance(" \
@@ -208,6 +227,9 @@ module GoldLapel
   end
 
   def self.geodist(conn, table, geom_column, name_column, name_a, name_b)
+    _validate_identifier(table)
+    _validate_identifier(geom_column)
+    _validate_identifier(name_column)
     raw = _raw_conn(conn)
     result = raw.async_exec_params(
       "SELECT ST_Distance(a.#{geom_column}::geography, b.#{geom_column}::geography) " \
@@ -220,6 +242,7 @@ module GoldLapel
   end
 
   def self.hset(conn, table, key, field, value)
+    _validate_identifier(table)
     raw = _raw_conn(conn)
     raw.async_exec("CREATE TABLE IF NOT EXISTS #{table} (" \
              "key TEXT PRIMARY KEY, " \
@@ -232,6 +255,7 @@ module GoldLapel
   end
 
   def self.hget(conn, table, key, field)
+    _validate_identifier(table)
     raw = _raw_conn(conn)
     result = raw.async_exec_params(
       "SELECT data->>$1 FROM #{table} WHERE key = $2",
@@ -248,6 +272,7 @@ module GoldLapel
   end
 
   def self.hgetall(conn, table, key)
+    _validate_identifier(table)
     raw = _raw_conn(conn)
     result = raw.async_exec_params("SELECT data FROM #{table} WHERE key = $1", [key])
     return {} if result.ntuples.zero?
@@ -257,6 +282,7 @@ module GoldLapel
   end
 
   def self.hdel(conn, table, key, field)
+    _validate_identifier(table)
     raw = _raw_conn(conn)
     result = raw.async_exec_params(
       "SELECT data ? $1 AS existed FROM #{table} WHERE key = $2",
@@ -290,6 +316,7 @@ module GoldLapel
   end
 
   def self.stream_add(conn, stream, payload)
+    _validate_identifier(stream)
     raw = _raw_conn(conn)
     raw.async_exec("CREATE TABLE IF NOT EXISTS #{stream} (" \
              "id BIGSERIAL PRIMARY KEY, " \
@@ -304,6 +331,7 @@ module GoldLapel
   end
 
   def self.stream_create_group(conn, stream, group)
+    _validate_identifier(stream)
     raw = _raw_conn(conn)
     raw.async_exec("CREATE TABLE IF NOT EXISTS #{stream}_groups (" \
              "group_name TEXT PRIMARY KEY, " \
@@ -323,6 +351,7 @@ module GoldLapel
   end
 
   def self.stream_read(conn, stream, group, consumer, count: 1)
+    _validate_identifier(stream)
     raw = _raw_conn(conn)
     result = raw.async_exec_params(
       "WITH next AS (" \
@@ -348,6 +377,7 @@ module GoldLapel
   end
 
   def self.stream_ack(conn, stream, group, message_id)
+    _validate_identifier(stream)
     raw = _raw_conn(conn)
     result = raw.async_exec_params(
       "DELETE FROM #{stream}_pending WHERE group_name = $1 AND message_id = $2",
@@ -357,6 +387,7 @@ module GoldLapel
   end
 
   def self.stream_claim(conn, stream, group, consumer, min_idle_ms: 60000)
+    _validate_identifier(stream)
     raw = _raw_conn(conn)
     result = raw.async_exec_params(
       "UPDATE #{stream}_pending SET consumer = $1, claimed_at = NOW() " \
