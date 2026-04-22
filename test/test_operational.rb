@@ -208,6 +208,28 @@ class TestDocCreateTtlIndex < Minitest::Test
     refute sqls.any? { |s| s.include?("DROP TRIGGER IF EXISTS _gl_ttl_sessions_trg") },
            "doc_create_ttl_index should not emit DROP TRIGGER IF EXISTS (racy); use CREATE OR REPLACE TRIGGER"
   end
+
+  def test_ttl_accepts_long_jsonb_field_key
+    # Regression guard: `field` is a JSONB key, not a Postgres identifier,
+    # so the wrapper must NOT apply the 63-char NAMEDATALEN cap to it.
+    # (Before the fix, _validate_identifier rejected 64+ char JSON keys.)
+    mock = OpMockConnection.new
+    long_field = "a" * 100
+    GoldLapel.doc_create_ttl_index(mock, "sessions", long_field, expire_after_seconds: 60)
+
+    fn_calls = mock.calls.select { |c| c[:sql].include?("CREATE OR REPLACE FUNCTION") }
+    assert_equal 1, fn_calls.length
+    assert_includes fn_calls[0][:sql], "data->>'#{long_field}'"
+  end
+
+  def test_ttl_rejects_sql_injection_in_field_key
+    # Field-key validator must still reject non-alphanumeric characters
+    # (no 63-cap, but still anchored alphanumeric+underscore).
+    mock = OpMockConnection.new
+    assert_raises(ArgumentError) do
+      GoldLapel.doc_create_ttl_index(mock, "sessions", "bad'; DROP", expire_after_seconds: 60)
+    end
+  end
 end
 
 # --- doc_remove_ttl_index ---

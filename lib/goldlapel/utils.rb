@@ -1612,7 +1612,11 @@ module GoldLapel
 
   def self.doc_create_ttl_index(conn, collection, field, expire_after_seconds:)
     _validate_identifier(collection)
-    _validate_identifier(field)
+    # `field` is a JSONB key (interpolated below as data->>'#{field}'), not
+    # a Postgres identifier — no 63-char NAMEDATALEN cap applies.
+    unless field.to_s.match?(FIELD_PART_PATTERN)
+      raise ArgumentError, "Invalid field key: #{field}"
+    end
     raw = _raw_conn(conn)
     fn_name = "_gl_ttl_#{collection}"
 
