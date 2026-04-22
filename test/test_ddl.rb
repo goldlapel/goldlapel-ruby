@@ -137,6 +137,19 @@ class TestFetchHappyPath < Minitest::Test
     GoldLapel::DDL.fetch(FakeOwner.new, "stream", "events", @srv.port, "tok")
     assert_equal 2, @srv.captured.length
   end
+
+  def test_different_names_miss_cache
+    %w[events orders].each do |name|
+      @srv.responses << [200, {
+        "tables" => { "main" => "_goldlapel.stream_#{name}" },
+        "query_patterns" => { "insert" => "INSERT #{name}" },
+      }]
+    end
+    owner = FakeOwner.new
+    GoldLapel::DDL.fetch(owner, "stream", "events", @srv.port, "tok")
+    GoldLapel::DDL.fetch(owner, "stream", "orders", @srv.port, "tok")
+    assert_equal 2, @srv.captured.length, "different names must each trigger a fetch"
+  end
 end
 
 class TestFetchErrors < Minitest::Test
