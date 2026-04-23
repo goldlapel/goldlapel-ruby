@@ -496,6 +496,7 @@ module GoldLapel
 
       # See GoldLapel::Instance#_stream_patterns — same semantics, cached on self.
       def _stream_patterns(stream)
+        GoldLapel._validate_identifier(stream)
         require "goldlapel/ddl"
         token = (@proxy&.dashboard_token) || GoldLapel::DDL.token_from_env_or_file
         port = @proxy&.dashboard_port

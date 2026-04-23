@@ -455,6 +455,7 @@ module GoldLapel
     # The DDL itself runs on the proxy side — this returns only the patterns
     # the wrapper should execute.
     def _stream_patterns(stream)
+      GoldLapel._validate_identifier(stream)
       require "goldlapel/ddl"
       token = (@proxy&.dashboard_token) || GoldLapel::DDL.token_from_env_or_file
       port = @proxy&.dashboard_port

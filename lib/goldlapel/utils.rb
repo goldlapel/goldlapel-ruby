@@ -1708,7 +1708,6 @@ module GoldLapel
       raise ArgumentError, "Invalid identifier: #{name}"
     end
   end
-  private_class_method :_validate_identifier
 
   def self._raw_conn(conn)
     conn.is_a?(CachedConnection) ? conn.send(:instance_variable_get, :@real) : conn
