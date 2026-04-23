@@ -55,7 +55,9 @@ module GoldLapel
       config_file: nil,
       config: {},
       extra_args: [],
-      silent: false
+      silent: false,
+      mesh: false,
+      mesh_tag: nil
     )
       unless ::Async::Task.current?
         raise "GoldLapel::Async.start must be called inside an Async { ... } block"
@@ -74,6 +76,8 @@ module GoldLapel
         extra_args: extra_args,
         eager_connect: true,
         silent: silent,
+        mesh: mesh,
+        mesh_tag: mesh_tag,
       )
     end
 
@@ -101,7 +105,9 @@ module GoldLapel
         config: {},
         extra_args: [],
         eager_connect: true,
-        silent: false
+        silent: false,
+        mesh: false,
+        mesh_tag: nil
       )
         @upstream = upstream
         @proxy_port = proxy_port
@@ -115,6 +121,9 @@ module GoldLapel
         @config = config || {}
         @extra_args = extra_args || []
         @silent = silent ? true : false
+        @mesh = mesh ? true : false
+        tag = mesh_tag.to_s
+        @mesh_tag = tag.empty? ? nil : tag
         @proxy = nil
         @internal_conn = nil
         @wrapped_conn = nil
@@ -146,6 +155,8 @@ module GoldLapel
           config: @config,
           extra_args: @extra_args,
           silent: @silent,
+          mesh: @mesh,
+          mesh_tag: @mesh_tag,
         )
         Proxy.register(@proxy)
         @proxy.start

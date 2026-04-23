@@ -37,11 +37,13 @@ class FakeProxy
 
   def initialize(upstream, proxy_port: nil, dashboard_port: nil, invalidation_port: nil,
                  log_level: nil, mode: nil, license: nil, client: nil, config_file: nil,
-                 config: {}, extra_args: [], silent: false)
+                 config: {}, extra_args: [], silent: false, mesh: false, mesh_tag: nil)
     @upstream = upstream
     @proxy_port = proxy_port || GoldLapel::DEFAULT_PROXY_PORT
     @invalidation_port = invalidation_port || (@proxy_port + 2)
     @silent = silent
+    @mesh = mesh
+    @mesh_tag = mesh_tag
     @running = false
     @start_calls = 0
     @stop_calls = 0

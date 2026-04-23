@@ -232,3 +232,67 @@ class TestSilentPlumbsThroughPublicAPI < Minitest::Test
     end
   end
 end
+
+class TestMeshKwargs < Minitest::Test
+  # Mesh startup kwargs — top-level canonical-surface options.
+  # mesh (bool) + mesh_tag (string) translate to --mesh / --mesh-tag CLI flags.
+
+  def test_mesh_defaults
+    proxy = GoldLapel::Proxy.new("postgresql://user@host/db")
+    assert_equal false, proxy.mesh
+    assert_nil proxy.mesh_tag
+  end
+
+  def test_mesh_stored
+    proxy = GoldLapel::Proxy.new("postgresql://user@host/db", mesh: true, mesh_tag: "prod-east")
+    assert_equal true, proxy.mesh
+    assert_equal "prod-east", proxy.mesh_tag
+  end
+
+  def test_mesh_tag_empty_string_normalized_to_nil
+    proxy = GoldLapel::Proxy.new("postgresql://user@host/db", mesh: true, mesh_tag: "")
+    assert_nil proxy.mesh_tag
+  end
+
+  def test_mesh_flags_forwarded_to_binary
+    BannerTestSupport.with_stubbed_spawn do |recorded|
+      BannerTestSupport.start_proxy(
+        proxy_port: 17934, mesh: true, mesh_tag: "prod-east", silent: true,
+      )
+      assert_includes recorded[:cmd], "--mesh"
+      idx = recorded[:cmd].index("--mesh-tag")
+      refute_nil idx
+      assert_equal "prod-east", recorded[:cmd][idx + 1]
+    end
+  end
+
+  def test_mesh_absent_when_not_set
+    BannerTestSupport.with_stubbed_spawn do |recorded|
+      BannerTestSupport.start_proxy(proxy_port: 17935, silent: true)
+      refute_includes recorded[:cmd], "--mesh"
+      refute_includes recorded[:cmd], "--mesh-tag"
+    end
+  end
+
+  def test_mesh_without_tag_only_emits_bool_flag
+    BannerTestSupport.with_stubbed_spawn do |recorded|
+      BannerTestSupport.start_proxy(proxy_port: 17936, mesh: true, silent: true)
+      assert_includes recorded[:cmd], "--mesh"
+      refute_includes recorded[:cmd], "--mesh-tag"
+    end
+  end
+
+  def test_mesh_not_in_valid_config_keys
+    refute_includes GoldLapel::Proxy::VALID_CONFIG_KEYS, "mesh"
+    refute_includes GoldLapel::Proxy::VALID_CONFIG_KEYS, "mesh_tag"
+  end
+
+  def test_mesh_in_config_map_rejected
+    assert_raises(ArgumentError) do
+      GoldLapel::Proxy.config_to_args({ mesh: true })
+    end
+    assert_raises(ArgumentError) do
+      GoldLapel::Proxy.config_to_args({ mesh_tag: "prod" })
+    end
+  end
+end

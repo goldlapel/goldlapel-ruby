@@ -65,7 +65,9 @@ module GoldLapel
     config_file: nil,
     config: {},
     extra_args: [],
-    silent: false
+    silent: false,
+    mesh: false,
+    mesh_tag: nil
   )
     Instance.new(
       upstream,
@@ -81,6 +83,8 @@ module GoldLapel
       extra_args: extra_args,
       eager_connect: true,
       silent: silent,
+      mesh: mesh,
+      mesh_tag: mesh_tag,
     )
   end
 
@@ -96,7 +100,9 @@ module GoldLapel
     config_file: nil,
     config: {},
     extra_args: [],
-    silent: false
+    silent: false,
+    mesh: false,
+    mesh_tag: nil
   )
     # Legacy/advanced: construct without eagerly spawning or connecting.
     Instance.new(
@@ -113,6 +119,8 @@ module GoldLapel
       extra_args: extra_args,
       eager_connect: false,
       silent: silent,
+      mesh: mesh,
+      mesh_tag: mesh_tag,
     )
   end
 
@@ -130,7 +138,9 @@ module GoldLapel
     config_file: nil,
     config: {},
     extra_args: [],
-    silent: false
+    silent: false,
+    mesh: false,
+    mesh_tag: nil
   )
     Proxy.start(
       upstream,
@@ -145,6 +155,8 @@ module GoldLapel
       config: config,
       extra_args: extra_args,
       silent: silent,
+      mesh: mesh,
+      mesh_tag: mesh_tag,
     )
   end
 

@@ -12,7 +12,7 @@ module GoldLapel
 
   class Proxy
     attr_reader :url, :upstream, :dashboard_url, :proxy_port, :config, :dashboard_port,
-                :invalidation_port, :dashboard_token
+                :invalidation_port, :dashboard_token, :mesh, :mesh_tag
     attr_accessor :wrapped_conn
 
     # Keys that are valid inside the structured `config` hash. Top-level
@@ -118,7 +118,9 @@ module GoldLapel
       config_file: nil,
       config: {},
       extra_args: [],
-      silent: false
+      silent: false,
+      mesh: false,
+      mesh_tag: nil
     )
       @upstream = upstream
       @proxy_port = proxy_port || DEFAULT_PROXY_PORT
@@ -148,6 +150,10 @@ module GoldLapel
       @config = config
       @extra_args = extra_args
       @silent = silent ? true : false
+      # Mesh membership (startup intent — HQ enforces license).
+      @mesh = mesh ? true : false
+      tag = mesh_tag.to_s
+      @mesh_tag = tag.empty? ? nil : tag
       @pid = nil
       @url = nil
       @dashboard_url = nil
@@ -183,6 +189,8 @@ module GoldLapel
       cmd.push("--license", @license) if @license
       cmd.push("--client", @client) if @client
       cmd.push("--config", @config_file) if @config_file
+      cmd.push("--mesh") if @mesh
+      cmd.push("--mesh-tag", @mesh_tag) if @mesh_tag
       cmd.concat(self.class.config_to_args(@config))
       cmd.concat(@extra_args)
 
@@ -357,7 +365,9 @@ module GoldLapel
         config_file: nil,
         config: {},
         extra_args: [],
-        silent: false
+        silent: false,
+        mesh: false,
+        mesh_tag: nil
       )
         @mutex.synchronize do
           existing = @instances[upstream]
@@ -376,6 +386,8 @@ module GoldLapel
             config: config,
             extra_args: extra_args,
             silent: silent,
+            mesh: mesh,
+            mesh_tag: mesh_tag,
           )
           unless @cleanup_registered
             at_exit { cleanup }
