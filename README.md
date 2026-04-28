@@ -50,6 +50,24 @@ puts gl.dashboard_url
 
 Full API reference, async usage, configuration, Rails integration, upgrading from v0.1, and production deployment: https://goldlapel.com/docs/ruby
 
+## Uninstalling
+
+Before removing the package, drop Gold Lapel's helper schema and cached matviews from your Postgres:
+
+```bash
+goldlapel clean
+```
+
+Then remove the package and any local state:
+
+```bash
+gem uninstall goldlapel
+rm -rf ~/.goldlapel
+rm -f goldlapel.toml     # only if you wrote one
+```
+
+Cancelling your subscription does not delete your data — only Gold Lapel's helper schema and cached matviews go away.
+
 ## License
 
 MIT. See `LICENSE`.
