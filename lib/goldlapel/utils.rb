@@ -40,56 +40,6 @@ module GoldLapel
     end
   end
 
-  def self.enqueue(conn, queue_table, payload)
-    _validate_identifier(queue_table)
-    raw = _raw_conn(conn)
-    raw.exec("CREATE TABLE IF NOT EXISTS #{queue_table} (" \
-             "id BIGSERIAL PRIMARY KEY, " \
-             "payload JSONB NOT NULL, " \
-             "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
-    raw.exec_params(
-      "INSERT INTO #{queue_table} (payload) VALUES ($1)",
-      [JSON.generate(payload)]
-    )
-  end
-
-  def self.dequeue(conn, queue_table)
-    _validate_identifier(queue_table)
-    raw = _raw_conn(conn)
-    result = raw.exec("DELETE FROM #{queue_table} " \
-                      "WHERE id = (" \
-                        "SELECT id FROM #{queue_table} " \
-                        "ORDER BY id " \
-                        "FOR UPDATE SKIP LOCKED " \
-                        "LIMIT 1" \
-                      ") RETURNING payload")
-    return nil if result.ntuples.zero?
-    JSON.parse(result[0]["payload"])
-  end
-
-  def self.incr(conn, table, key, amount: 1)
-    _validate_identifier(table)
-    raw = _raw_conn(conn)
-    raw.exec("CREATE TABLE IF NOT EXISTS #{table} (" \
-             "key TEXT PRIMARY KEY, " \
-             "value BIGINT NOT NULL DEFAULT 0)")
-    result = raw.exec_params(
-      "INSERT INTO #{table} (key, value) VALUES ($1, $2) " \
-      "ON CONFLICT (key) DO UPDATE SET value = #{table}.value + $3 " \
-      "RETURNING value",
-      [key, amount, amount]
-    )
-    result[0]["value"].to_i
-  end
-
-  def self.get_counter(conn, table, key)
-    _validate_identifier(table)
-    raw = _raw_conn(conn)
-    result = raw.exec_params("SELECT value FROM #{table} WHERE key = $1", [key])
-    return 0 if result.ntuples.zero?
-    result[0]["value"].to_i
-  end
-
   def self.count_distinct(conn, table, column)
     _validate_identifier(table)
     _validate_identifier(column)
@@ -98,183 +48,480 @@ module GoldLapel
     result[0]["count"].to_i
   end
 
-  def self.zadd(conn, table, member, score)
-    _validate_identifier(table)
+  # --
+  # Phase 5 Redis-compat families: counter, zset, hash, queue, geo.
+  #
+  # Each family's helpers consume `patterns` returned from the proxy's
+  # `/api/ddl/<family>/create` endpoint. Patterns use Postgres native `$N`
+  # placeholders, which `pg`'s `exec_params` binds positionally — params are
+  # passed as an array indexed by `$N - 1`. The proxy owns DDL — these
+  # helpers never CREATE TABLE.
+  # --
+
+  def self._pattern_sql(patterns, key, family)
+    qp = _require_patterns(patterns, "#{family}_*")
+    sql = qp[key]
+    if sql.nil? || sql.empty?
+      raise RuntimeError, "#{family} pattern '#{key}' missing from proxy DDL response"
+    end
+    sql
+  end
+  private_class_method :_pattern_sql
+
+  # ---------------------------------------------------------------------------
+  # Counter family
+  # ---------------------------------------------------------------------------
+
+  def self.counter_incr(conn, name, key, amount = 1, patterns: nil)
+    _validate_identifier(name)
     raw = _raw_conn(conn)
-    raw.exec("CREATE TABLE IF NOT EXISTS #{table} (" \
-             "member TEXT PRIMARY KEY, " \
-             "score DOUBLE PRECISION NOT NULL)")
-    raw.exec_params(
-      "INSERT INTO #{table} (member, score) VALUES ($1, $2) " \
-      "ON CONFLICT (member) DO UPDATE SET score = EXCLUDED.score",
-      [member.to_s, score.to_f]
-    )
+    result = raw.exec_params(_pattern_sql(patterns, "incr", "counter"), [key, amount.to_i])
+    result[0]["value"].to_i
   end
 
-  def self.zincrby(conn, table, member, amount: 1)
-    _validate_identifier(table)
+  def self.counter_decr(conn, name, key, amount = 1, patterns: nil)
+    counter_incr(conn, name, key, -amount.to_i, patterns: patterns)
+  end
+
+  def self.counter_set(conn, name, key, value, patterns: nil)
+    _validate_identifier(name)
     raw = _raw_conn(conn)
-    raw.exec("CREATE TABLE IF NOT EXISTS #{table} (" \
-             "member TEXT PRIMARY KEY, " \
-             "score DOUBLE PRECISION NOT NULL)")
+    result = raw.exec_params(_pattern_sql(patterns, "set", "counter"), [key, value.to_i])
+    result[0]["value"].to_i
+  end
+
+  def self.counter_get(conn, name, key, patterns: nil)
+    _validate_identifier(name)
+    raw = _raw_conn(conn)
+    result = raw.exec_params(_pattern_sql(patterns, "get", "counter"), [key])
+    return 0 if result.ntuples.zero?
+    result[0]["value"].to_i
+  end
+
+  def self.counter_delete(conn, name, key, patterns: nil)
+    _validate_identifier(name)
+    raw = _raw_conn(conn)
+    result = raw.exec_params(_pattern_sql(patterns, "delete", "counter"), [key])
+    result.cmd_tuples > 0
+  end
+
+  def self.counter_count_keys(conn, name, patterns: nil)
+    _validate_identifier(name)
+    raw = _raw_conn(conn)
+    result = raw.exec_params(_pattern_sql(patterns, "count_keys", "counter"), [])
+    return 0 if result.ntuples.zero?
+    result[0].values[0].to_i
+  end
+
+  # ---------------------------------------------------------------------------
+  # Sorted-set (zset) family
+  # ---------------------------------------------------------------------------
+
+  def self.zset_add(conn, name, zset_key, member, score, patterns: nil)
+    _validate_identifier(name)
+    raw = _raw_conn(conn)
     result = raw.exec_params(
-      "INSERT INTO #{table} (member, score) VALUES ($1, $2) " \
-      "ON CONFLICT (member) DO UPDATE SET score = #{table}.score + $3 " \
-      "RETURNING score",
-      [member.to_s, amount.to_f, amount.to_f]
+      _pattern_sql(patterns, "zadd", "zset"),
+      [zset_key.to_s, member.to_s, score.to_f]
     )
     result[0]["score"].to_f
   end
 
-  def self.zrange(conn, table, start: 0, stop: 10, desc: true)
-    _validate_identifier(table)
+  def self.zset_incr_by(conn, name, zset_key, member, delta = 1, patterns: nil)
+    _validate_identifier(name)
     raw = _raw_conn(conn)
-    order = desc ? "DESC" : "ASC"
-    limit = stop - start
     result = raw.exec_params(
-      "SELECT member, score FROM #{table} " \
-      "ORDER BY score #{order} " \
-      "LIMIT $1 OFFSET $2",
-      [limit, start]
+      _pattern_sql(patterns, "zincrby", "zset"),
+      [zset_key.to_s, member.to_s, delta.to_f]
+    )
+    result[0]["score"].to_f
+  end
+
+  def self.zset_score(conn, name, zset_key, member, patterns: nil)
+    _validate_identifier(name)
+    raw = _raw_conn(conn)
+    result = raw.exec_params(
+      _pattern_sql(patterns, "zscore", "zset"),
+      [zset_key.to_s, member.to_s]
+    )
+    return nil if result.ntuples.zero?
+    result[0]["score"].to_f
+  end
+
+  def self.zset_remove(conn, name, zset_key, member, patterns: nil)
+    _validate_identifier(name)
+    raw = _raw_conn(conn)
+    result = raw.exec_params(
+      _pattern_sql(patterns, "zrem", "zset"),
+      [zset_key.to_s, member.to_s]
+    )
+    result.cmd_tuples > 0
+  end
+
+  def self.zset_range(conn, name, zset_key, start = 0, stop = 10, desc = true, patterns: nil)
+    _validate_identifier(name)
+    raw = _raw_conn(conn)
+    key = desc ? "zrange_desc" : "zrange_asc"
+    limit = [stop.to_i - start.to_i + 1, 0].max
+    result = raw.exec_params(
+      _pattern_sql(patterns, key, "zset"),
+      [zset_key.to_s, limit, start.to_i]
     )
     result.map { |row| [row["member"], row["score"].to_f] }
   end
 
-  def self.zrank(conn, table, member, desc: true)
-    _validate_identifier(table)
+  def self.zset_range_by_score(conn, name, zset_key, min_score, max_score, limit: 100, offset: 0, patterns: nil)
+    _validate_identifier(name)
     raw = _raw_conn(conn)
-    order = desc ? "DESC" : "ASC"
     result = raw.exec_params(
-      "SELECT rank FROM (" \
-        "SELECT member, ROW_NUMBER() OVER (ORDER BY score #{order}) - 1 AS rank " \
-        "FROM #{table}" \
-      ") ranked WHERE member = $1",
-      [member.to_s]
+      _pattern_sql(patterns, "zrangebyscore", "zset"),
+      [zset_key.to_s, min_score.to_f, max_score.to_f, limit.to_i, offset.to_i]
+    )
+    result.map { |row| [row["member"], row["score"].to_f] }
+  end
+
+  def self.zset_rank(conn, name, zset_key, member, desc: true, patterns: nil)
+    _validate_identifier(name)
+    raw = _raw_conn(conn)
+    key = desc ? "zrank_desc" : "zrank_asc"
+    result = raw.exec_params(
+      _pattern_sql(patterns, key, "zset"),
+      [zset_key.to_s, member.to_s]
     )
     return nil if result.ntuples.zero?
     result[0]["rank"].to_i
   end
 
-  def self.zscore(conn, table, member)
-    _validate_identifier(table)
+  def self.zset_card(conn, name, zset_key, patterns: nil)
+    _validate_identifier(name)
     raw = _raw_conn(conn)
-    result = raw.exec_params("SELECT score FROM #{table} WHERE member = $1", [member.to_s])
-    return nil if result.ntuples.zero?
-    result[0]["score"].to_f
+    result = raw.exec_params(
+      _pattern_sql(patterns, "zcard", "zset"),
+      [zset_key.to_s]
+    )
+    return 0 if result.ntuples.zero?
+    result[0].values[0].to_i
   end
 
-  def self.zrem(conn, table, member)
-    _validate_identifier(table)
+  # ---------------------------------------------------------------------------
+  # Hash family
+  # ---------------------------------------------------------------------------
+
+  # Coerce a JSONB column value into the user's Ruby object.
+  #
+  # `pg` with the default JSONB decoder hands us already-parsed Hash/Array/scalars.
+  # Other configurations hand back the raw text. Decode only in that second
+  # case; if the text isn't valid JSON, return it as-is rather than raising —
+  # the underlying column may have been written by something other than this
+  # helper, and surfacing a JSON::ParserError on `hash_get` would be
+  # user-hostile.
+  def self._decode_jsonb(value)
+    return value unless value.is_a?(String)
+    begin
+      JSON.parse(value)
+    rescue JSON::ParserError
+      value
+    end
+  end
+  private_class_method :_decode_jsonb
+
+  def self.hash_set(conn, name, hash_key, field, value, patterns: nil)
+    _validate_identifier(name)
     raw = _raw_conn(conn)
-    result = raw.exec_params("DELETE FROM #{table} WHERE member = $1", [member.to_s])
+    result = raw.exec_params(
+      _pattern_sql(patterns, "hset", "hash"),
+      [hash_key.to_s, field.to_s, JSON.generate(value)]
+    )
+    return nil if result.ntuples.zero?
+    _decode_jsonb(result[0]["value"])
+  end
+
+  def self.hash_get(conn, name, hash_key, field, patterns: nil)
+    _validate_identifier(name)
+    raw = _raw_conn(conn)
+    result = raw.exec_params(
+      _pattern_sql(patterns, "hget", "hash"),
+      [hash_key.to_s, field.to_s]
+    )
+    return nil if result.ntuples.zero?
+    _decode_jsonb(result[0]["value"])
+  end
+
+  def self.hash_get_all(conn, name, hash_key, patterns: nil)
+    _validate_identifier(name)
+    raw = _raw_conn(conn)
+    result = raw.exec_params(
+      _pattern_sql(patterns, "hgetall", "hash"),
+      [hash_key.to_s]
+    )
+    out = {}
+    result.each do |row|
+      out[row["field"]] = _decode_jsonb(row["value"])
+    end
+    out
+  end
+
+  def self.hash_keys(conn, name, hash_key, patterns: nil)
+    _validate_identifier(name)
+    raw = _raw_conn(conn)
+    result = raw.exec_params(
+      _pattern_sql(patterns, "hkeys", "hash"),
+      [hash_key.to_s]
+    )
+    result.map { |row| row["field"] }
+  end
+
+  def self.hash_values(conn, name, hash_key, patterns: nil)
+    _validate_identifier(name)
+    raw = _raw_conn(conn)
+    result = raw.exec_params(
+      _pattern_sql(patterns, "hvals", "hash"),
+      [hash_key.to_s]
+    )
+    result.map { |row| _decode_jsonb(row["value"]) }
+  end
+
+  def self.hash_exists(conn, name, hash_key, field, patterns: nil)
+    _validate_identifier(name)
+    raw = _raw_conn(conn)
+    result = raw.exec_params(
+      _pattern_sql(patterns, "hexists", "hash"),
+      [hash_key.to_s, field.to_s]
+    )
+    return false if result.ntuples.zero?
+    val = result[0].values[0]
+    val == true || val == "t" || val == "true"
+  end
+
+  def self.hash_delete(conn, name, hash_key, field, patterns: nil)
+    _validate_identifier(name)
+    raw = _raw_conn(conn)
+    result = raw.exec_params(
+      _pattern_sql(patterns, "hdel", "hash"),
+      [hash_key.to_s, field.to_s]
+    )
     result.cmd_tuples > 0
   end
 
-  def self.geoadd(conn, table, name_column, geom_column, name, lon, lat)
-    _validate_identifier(table)
-    _validate_identifier(name_column)
-    _validate_identifier(geom_column)
-    raw = _raw_conn(conn)
-    raw.exec("CREATE EXTENSION IF NOT EXISTS postgis")
-    raw.exec("CREATE TABLE IF NOT EXISTS #{table} (" \
-             "id BIGSERIAL PRIMARY KEY, " \
-             "#{name_column} TEXT NOT NULL, " \
-             "#{geom_column} GEOMETRY(Point, 4326) NOT NULL)")
-    raw.exec_params(
-      "INSERT INTO #{table} (#{name_column}, #{geom_column}) " \
-      "VALUES ($1, ST_SetSRID(ST_MakePoint($2, $3), 4326))",
-      [name, lon.to_f, lat.to_f]
-    )
-  end
-
-  def self.georadius(conn, table, geom_column, lon, lat, radius_meters, limit: 50)
-    _validate_identifier(table)
-    _validate_identifier(geom_column)
+  def self.hash_len(conn, name, hash_key, patterns: nil)
+    _validate_identifier(name)
     raw = _raw_conn(conn)
     result = raw.exec_params(
-      "SELECT *, ST_Distance(" \
-        "#{geom_column}::geography, " \
-        "ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography" \
-      ") AS distance_m " \
-      "FROM #{table} " \
-      "WHERE ST_DWithin(" \
-        "#{geom_column}::geography, " \
-        "ST_SetSRID(ST_MakePoint($3, $4), 4326)::geography, " \
-        "$5" \
-      ") ORDER BY distance_m LIMIT $6",
-      [lon.to_f, lat.to_f, lon.to_f, lat.to_f, radius_meters.to_f, limit]
+      _pattern_sql(patterns, "hlen", "hash"),
+      [hash_key.to_s]
+    )
+    return 0 if result.ntuples.zero?
+    result[0].values[0].to_i
+  end
+
+  # ---------------------------------------------------------------------------
+  # Queue family (at-least-once with visibility timeout)
+  # ---------------------------------------------------------------------------
+
+  def self.queue_enqueue(conn, name, payload, patterns: nil)
+    _validate_identifier(name)
+    raw = _raw_conn(conn)
+    result = raw.exec_params(
+      _pattern_sql(patterns, "enqueue", "queue"),
+      [JSON.generate(payload)]
+    )
+    return nil if result.ntuples.zero?
+    result[0]["id"].to_i
+  end
+
+  # Lease the next ready message. Returns `[id, payload]` or `nil` if the
+  # queue is empty. Caller MUST `queue_ack` or `queue_abandon` the id or the
+  # message becomes visible again after `visibility_timeout_ms`.
+  def self.queue_claim(conn, name, visibility_timeout_ms: 30000, patterns: nil)
+    _validate_identifier(name)
+    raw = _raw_conn(conn)
+    result = raw.exec_params(
+      _pattern_sql(patterns, "claim", "queue"),
+      [visibility_timeout_ms.to_i]
+    )
+    return nil if result.ntuples.zero?
+    row = result[0]
+    [row["id"].to_i, _decode_jsonb(row["payload"])]
+  end
+
+  def self.queue_ack(conn, name, message_id, patterns: nil)
+    _validate_identifier(name)
+    raw = _raw_conn(conn)
+    result = raw.exec_params(
+      _pattern_sql(patterns, "ack", "queue"),
+      [message_id.to_i]
+    )
+    result.cmd_tuples > 0
+  end
+
+  # Release a claimed message back to ready immediately. Equivalent to a
+  # NACK in queue parlance — the message stays in the queue and is
+  # redelivered to the next claim.
+  def self.queue_abandon(conn, name, message_id, patterns: nil)
+    _validate_identifier(name)
+    raw = _raw_conn(conn)
+    result = raw.exec_params(
+      _pattern_sql(patterns, "nack", "queue"),
+      [message_id.to_i]
+    )
+    result.ntuples > 0
+  end
+
+  # Extend a claimed message's visibility deadline by `additional_ms`.
+  # Returns the new `visible_at`, or nil if the id wasn't a claimed message.
+  # Pattern: `$1 = id, $2 = ms`. With native $N binding, params order is
+  # by $N index — `[id, ms]` slots into `[$1, $2]`.
+  def self.queue_extend(conn, name, message_id, additional_ms, patterns: nil)
+    _validate_identifier(name)
+    raw = _raw_conn(conn)
+    result = raw.exec_params(
+      _pattern_sql(patterns, "extend", "queue"),
+      [message_id.to_i, additional_ms.to_i]
+    )
+    return nil if result.ntuples.zero?
+    result[0]["visible_at"]
+  end
+
+  def self.queue_peek(conn, name, patterns: nil)
+    _validate_identifier(name)
+    raw = _raw_conn(conn)
+    result = raw.exec_params(_pattern_sql(patterns, "peek", "queue"), [])
+    return nil if result.ntuples.zero?
+    row = result[0]
+    {
+      "id" => row["id"].to_i,
+      "payload" => _decode_jsonb(row["payload"]),
+      "visible_at" => row["visible_at"],
+      "status" => row["status"],
+      "created_at" => row["created_at"],
+    }
+  end
+
+  def self.queue_count_ready(conn, name, patterns: nil)
+    _validate_identifier(name)
+    raw = _raw_conn(conn)
+    result = raw.exec_params(_pattern_sql(patterns, "count_ready", "queue"), [])
+    return 0 if result.ntuples.zero?
+    result[0].values[0].to_i
+  end
+
+  def self.queue_count_claimed(conn, name, patterns: nil)
+    _validate_identifier(name)
+    raw = _raw_conn(conn)
+    result = raw.exec_params(_pattern_sql(patterns, "count_claimed", "queue"), [])
+    return 0 if result.ntuples.zero?
+    result[0].values[0].to_i
+  end
+
+  # ---------------------------------------------------------------------------
+  # Geo family (PostGIS GEOGRAPHY-native)
+  # ---------------------------------------------------------------------------
+
+  # Distance unit conversion helpers — proxy returns meters always (GEOGRAPHY
+  # default); wrappers translate at the edge so callers can ask in km/mi/ft.
+  GEO_UNITS = { "m" => 1.0, "km" => 1000.0, "mi" => 1609.344, "ft" => 0.3048 }.freeze
+
+  def self._to_meters(value, unit)
+    factor = GEO_UNITS[unit.to_s]
+    raise ArgumentError, "Unknown distance unit: #{unit.inspect} (choose m/km/mi/ft)" if factor.nil?
+    value.to_f * factor
+  end
+  private_class_method :_to_meters
+
+  def self._convert_distance_meters(meters, unit)
+    factor = GEO_UNITS[unit.to_s]
+    raise ArgumentError, "Unknown distance unit: #{unit.inspect} (choose m/km/mi/ft)" if factor.nil?
+    meters.to_f / factor
+  end
+  private_class_method :_convert_distance_meters
+
+  def self.geo_add(conn, name, member, lon, lat, patterns: nil)
+    _validate_identifier(name)
+    raw = _raw_conn(conn)
+    result = raw.exec_params(
+      _pattern_sql(patterns, "geoadd", "geo"),
+      [member.to_s, lon.to_f, lat.to_f]
+    )
+    return nil if result.ntuples.zero?
+    [result[0]["lon"].to_f, result[0]["lat"].to_f]
+  end
+
+  def self.geo_pos(conn, name, member, patterns: nil)
+    _validate_identifier(name)
+    raw = _raw_conn(conn)
+    result = raw.exec_params(
+      _pattern_sql(patterns, "geopos", "geo"),
+      [member.to_s]
+    )
+    return nil if result.ntuples.zero?
+    [result[0]["lon"].to_f, result[0]["lat"].to_f]
+  end
+
+  def self.geo_dist(conn, name, member_a, member_b, unit: "m", patterns: nil)
+    _validate_identifier(name)
+    raw = _raw_conn(conn)
+    result = raw.exec_params(
+      _pattern_sql(patterns, "geodist", "geo"),
+      [member_a.to_s, member_b.to_s]
+    )
+    return nil if result.ntuples.zero?
+    val = result[0]["distance_m"]
+    return nil if val.nil?
+    _convert_distance_meters(val.to_f, unit)
+  end
+
+  # Members within `radius` of (lon, lat). Returns a list of hashes with
+  # `member`, `lon`, `lat`, `distance_m`.
+  #
+  # Proxy contract: $1=lon, $2=lat, $3=radius_m, $4=limit. The proxy computes
+  # the anchor geography once via CTE so each $N appears exactly once in the
+  # rendered SQL — wrapper passes a 4-tuple `[lon, lat, radius_m, limit]`
+  # indexed by $N (no duplicates).
+  def self.geo_radius(conn, name, lon, lat, radius, unit: "m", limit: 50, patterns: nil)
+    _validate_identifier(name)
+    raw = _raw_conn(conn)
+    radius_m = _to_meters(radius, unit)
+    result = raw.exec_params(
+      _pattern_sql(patterns, "georadius_with_dist", "geo"),
+      [lon.to_f, lat.to_f, radius_m, limit.to_i]
     )
     result.map { |row| row.transform_keys(&:to_s) }
   end
 
-  def self.geodist(conn, table, geom_column, name_column, name_a, name_b)
-    _validate_identifier(table)
-    _validate_identifier(geom_column)
-    _validate_identifier(name_column)
+  # Members within `radius` of `member`'s location.
+  #
+  # Proxy contract: $1 and $2 are both the anchor member name (one for the
+  # join, one for the self-exclusion); $3=radius_m, $4=limit. With native
+  # $N binding (pg's exec_params), params are indexed by $N — wrapper passes
+  # `[member, member, radius_m, limit]` (4 elements; $1 and $2 both bind to
+  # the same value).
+  def self.geo_radius_by_member(conn, name, member, radius, unit: "m", limit: 50, patterns: nil)
+    _validate_identifier(name)
+    raw = _raw_conn(conn)
+    radius_m = _to_meters(radius, unit)
+    result = raw.exec_params(
+      _pattern_sql(patterns, "geosearch_member", "geo"),
+      [member.to_s, member.to_s, radius_m, limit.to_i]
+    )
+    result.map { |row| row.transform_keys(&:to_s) }
+  end
+
+  def self.geo_remove(conn, name, member, patterns: nil)
+    _validate_identifier(name)
     raw = _raw_conn(conn)
     result = raw.exec_params(
-      "SELECT ST_Distance(a.#{geom_column}::geography, b.#{geom_column}::geography) " \
-      "FROM #{table} a, #{table} b " \
-      "WHERE a.#{name_column} = $1 AND b.#{name_column} = $2",
-      [name_a, name_b]
+      _pattern_sql(patterns, "geo_remove", "geo"),
+      [member.to_s]
     )
-    return nil if result.ntuples.zero?
-    result[0]["st_distance"].to_f
+    result.cmd_tuples > 0
   end
 
-  def self.hset(conn, table, key, field, value)
-    _validate_identifier(table)
+  def self.geo_count(conn, name, patterns: nil)
+    _validate_identifier(name)
     raw = _raw_conn(conn)
-    raw.exec("CREATE TABLE IF NOT EXISTS #{table} (" \
-             "key TEXT PRIMARY KEY, " \
-             "data JSONB NOT NULL DEFAULT '{}'::jsonb)")
-    raw.exec_params(
-      "INSERT INTO #{table} (key, data) VALUES ($1, jsonb_build_object($2, $3::jsonb)) " \
-      "ON CONFLICT (key) DO UPDATE SET data = #{table}.data || jsonb_build_object($4, $5::jsonb)",
-      [key, field, JSON.generate(value), field, JSON.generate(value)]
-    )
-  end
-
-  def self.hget(conn, table, key, field)
-    _validate_identifier(table)
-    raw = _raw_conn(conn)
-    result = raw.exec_params(
-      "SELECT data->>$1 FROM #{table} WHERE key = $2",
-      [field, key]
-    )
-    return nil if result.ntuples.zero?
-    val = result[0].values[0]
-    return nil if val.nil?
-    begin
-      JSON.parse(val)
-    rescue JSON::ParserError
-      val
-    end
-  end
-
-  def self.hgetall(conn, table, key)
-    _validate_identifier(table)
-    raw = _raw_conn(conn)
-    result = raw.exec_params("SELECT data FROM #{table} WHERE key = $1", [key])
-    return {} if result.ntuples.zero?
-    val = result[0]["data"]
-    return {} if val.nil?
-    val.is_a?(Hash) ? val : JSON.parse(val)
-  end
-
-  def self.hdel(conn, table, key, field)
-    _validate_identifier(table)
-    raw = _raw_conn(conn)
-    result = raw.exec_params(
-      "SELECT data ? $1 AS existed FROM #{table} WHERE key = $2",
-      [field, key]
-    )
-    return false if result.ntuples.zero? || result[0]["existed"] != "t"
-    raw.exec_params(
-      "UPDATE #{table} SET data = data - $1 WHERE key = $2",
-      [field, key]
-    )
-    true
+    result = raw.exec_params(_pattern_sql(patterns, "geo_count", "geo"), [])
+    return 0 if result.ntuples.zero?
+    result[0].values[0].to_i
   end
 
   def self.script(conn, lua_code, *args)

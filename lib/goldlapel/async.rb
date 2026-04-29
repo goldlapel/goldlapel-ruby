@@ -90,7 +90,8 @@ module GoldLapel
     # anything between Popen and successful connect raises, Fiber-local
     # `using(conn)` scoped override, `conn:` per-call override.
     class Instance
-      attr_reader :upstream, :documents, :streams
+      attr_reader :upstream, :documents, :streams,
+                  :counters, :zsets, :hashes, :queues, :geos
 
       def initialize(
         upstream,
@@ -129,12 +130,23 @@ module GoldLapel
         @wrapped_conn = nil
         @fiber_key = :"__goldlapel_async_conn_#{object_id}"
 
-        # Nested namespaces — async siblings of GoldLapel::DocumentsAPI /
-        # StreamsAPI. See goldlapel/async/documents.rb and async/streams.rb.
+        # Nested namespaces — async siblings of the sync sub-API classes.
+        # As of Phase 5 the Redis-compat helper families (counter / zset /
+        # hash / queue / geo) are nested too, alongside streams and documents.
         require "goldlapel/async/documents"
         require "goldlapel/async/streams"
+        require "goldlapel/async/counters"
+        require "goldlapel/async/zsets"
+        require "goldlapel/async/hashes"
+        require "goldlapel/async/queues"
+        require "goldlapel/async/geos"
         @documents = DocumentsAPI.new(self)
         @streams = StreamsAPI.new(self)
+        @counters = CountersAPI.new(self)
+        @zsets = ZsetsAPI.new(self)
+        @hashes = HashesAPI.new(self)
+        @queues = QueuesAPI.new(self)
+        @geos = GeosAPI.new(self)
 
         start! if eager_connect
       end
@@ -310,83 +322,9 @@ module GoldLapel
         Utils.subscribe(_resolve_conn(conn), channel, &block)
       end
 
-      # --- Queue ---
-
-      def enqueue(queue_table, payload, conn: nil)
-        Utils.enqueue(_resolve_conn(conn), queue_table, payload)
-      end
-
-      def dequeue(queue_table, conn: nil)
-        Utils.dequeue(_resolve_conn(conn), queue_table)
-      end
-
-      # --- Counters ---
-
-      def incr(table, key, amount: 1, conn: nil)
-        Utils.incr(_resolve_conn(conn), table, key, amount: amount)
-      end
-
-      def get_counter(table, key, conn: nil)
-        Utils.get_counter(_resolve_conn(conn), table, key)
-      end
-
-      # --- Hash methods ---
-
-      def hset(table, key, field, value, conn: nil)
-        Utils.hset(_resolve_conn(conn), table, key, field, value)
-      end
-
-      def hget(table, key, field, conn: nil)
-        Utils.hget(_resolve_conn(conn), table, key, field)
-      end
-
-      def hgetall(table, key, conn: nil)
-        Utils.hgetall(_resolve_conn(conn), table, key)
-      end
-
-      def hdel(table, key, field, conn: nil)
-        Utils.hdel(_resolve_conn(conn), table, key, field)
-      end
-
-      # --- Sorted set methods ---
-
-      def zadd(table, member, score, conn: nil)
-        Utils.zadd(_resolve_conn(conn), table, member, score)
-      end
-
-      def zincrby(table, member, amount: 1, conn: nil)
-        Utils.zincrby(_resolve_conn(conn), table, member, amount: amount)
-      end
-
-      def zrange(table, start: 0, stop: 10, desc: true, conn: nil)
-        Utils.zrange(_resolve_conn(conn), table, start: start, stop: stop, desc: desc)
-      end
-
-      def zrank(table, member, desc: true, conn: nil)
-        Utils.zrank(_resolve_conn(conn), table, member, desc: desc)
-      end
-
-      def zscore(table, member, conn: nil)
-        Utils.zscore(_resolve_conn(conn), table, member)
-      end
-
-      def zrem(table, member, conn: nil)
-        Utils.zrem(_resolve_conn(conn), table, member)
-      end
-
-      # --- Geo methods ---
-
-      def georadius(table, geom_column, lon, lat, radius_meters, limit: 50, conn: nil)
-        Utils.georadius(_resolve_conn(conn), table, geom_column, lon, lat, radius_meters, limit: limit)
-      end
-
-      def geoadd(table, name_column, geom_column, name, lon, lat, conn: nil)
-        Utils.geoadd(_resolve_conn(conn), table, name_column, geom_column, name, lon, lat)
-      end
-
-      def geodist(table, geom_column, name_column, name_a, name_b, conn: nil)
-        Utils.geodist(_resolve_conn(conn), table, geom_column, name_column, name_a, name_b)
-      end
+      # --- Phase 5 Redis-compat families: gl.counters / gl.zsets / gl.hashes /
+      #     gl.queues / gl.geos. Async siblings of the sync namespaces — see
+      #     goldlapel/async/{counters,zsets,hashes,queues,geos}.rb.
 
       # --- Misc ---
 

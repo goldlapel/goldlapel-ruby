@@ -176,17 +176,14 @@ class TestInstanceConn < Minitest::Test
       { query_patterns: {}, tables: { "main" => "_goldlapel.stream_x" } }
     end
 
+    # Phase 5: Redis-compat families now nested as gl.counters / gl.zsets /
+    # gl.hashes / gl.queues / gl.geos. The legacy flat methods (incr, hset,
+    # zadd, enqueue, ...) are gone. The connection-not-available guard is
+    # exercised on the still-flat surface (search / publish / count_distinct
+    # / percolate / analyze) and on every nested namespace verb.
     flat_methods = {
       search: ["tbl", "col", "q"],
-      incr: ["tbl", "key"],
-      get_counter: ["tbl", "key"],
-      hset: ["tbl", "k", "f", "v"],
-      hget: ["tbl", "k", "f"],
-      zadd: ["tbl", "m", 1.0],
-      zrange: ["tbl"],
       publish: ["ch", "msg"],
-      enqueue: ["q", { a: 1 }],
-      dequeue: ["q"],
       count_distinct: ["tbl", "col"],
       percolate_add: ["n", "qid", "q"],
       analyze: ["text"],
@@ -313,87 +310,15 @@ class TestInstanceSearch < Minitest::Test
   end
 end
 
-# --- incr / get_counter delegation ---
-
-class TestInstanceCounters < Minitest::Test
-  def test_incr_delegates
-    incr_result = InstanceMockResult.new(
-      [{ "value" => "5" }],
-      ["value"]
-    )
-    mock = InstanceMockConnection.new("INSERT" => incr_result)
-    inst = make_test_instance(mock)
-
-    val = inst.incr("counters", "page_views")
-    assert_equal 5, val
-  end
-
-  def test_get_counter_delegates
-    counter_result = InstanceMockResult.new(
-      [{ "value" => "42" }],
-      ["value"]
-    )
-    mock = InstanceMockConnection.new("SELECT" => counter_result)
-    inst = make_test_instance(mock)
-
-    val = inst.get_counter("counters", "page_views")
-    assert_equal 42, val
-  end
-end
-
-# --- hash methods delegation ---
-
-class TestInstanceHash < Minitest::Test
-  def test_hset_delegates
-    mock = InstanceMockConnection.new
-    inst = make_test_instance(mock)
-
-    inst.hset("cache", "user:1", "name", "Alice")
-    insert_call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("INSERT") }
-    refute_nil insert_call
-    assert_includes insert_call[:sql], "jsonb_build_object"
-  end
-
-  def test_hget_delegates
-    hget_result = InstanceMockResult.new(
-      [{ "?column?" => '"Alice"' }],
-      ["?column?"]
-    )
-    mock = InstanceMockConnection.new("SELECT" => hget_result)
-    inst = make_test_instance(mock)
-
-    val = inst.hget("cache", "user:1", "name")
-    assert_equal "Alice", val
-  end
-end
-
-# --- sorted set delegation ---
-
-class TestInstanceSortedSet < Minitest::Test
-  def test_zadd_delegates
-    mock = InstanceMockConnection.new
-    inst = make_test_instance(mock)
-
-    inst.zadd("leaderboard", "player1", 100)
-    insert_call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("INSERT") }
-    refute_nil insert_call
-    assert_includes insert_call[:params], "player1"
-  end
-
-  def test_zrange_delegates
-    zrange_result = InstanceMockResult.new(
-      [{ "member" => "player1", "score" => "100.0" }],
-      ["member", "score"]
-    )
-    mock = InstanceMockConnection.new("SELECT" => zrange_result)
-    inst = make_test_instance(mock)
-
-    results = inst.zrange("leaderboard")
-    assert_equal 1, results.length
-    assert_equal "player1", results[0][0]
-    assert_equal 100.0, results[0][1]
-  end
-end
+# --- Phase 5: Redis-compat families now nested as `gl.counters.*`,
+#     `gl.zsets.*`, `gl.hashes.*`, `gl.queues.*`, `gl.geos.*`. The legacy
+#     flat methods (`incr`, `hset`, `zadd`, `enqueue`, ...) are gone. Per-
+#     family verb dispatch is covered by dedicated tests:
+#       test/test_counters_api.rb
+#       test/test_zsets_api.rb
+#       test/test_hashes_api.rb
+#       test/test_queues_api.rb
+#       test/test_geos_api.rb
 
 # --- streams.* delegation ---
 
@@ -424,27 +349,5 @@ class TestInstanceStreams < Minitest::Test
   end
 end
 
-# --- enqueue / dequeue delegation ---
-
-class TestInstanceQueue < Minitest::Test
-  def test_enqueue_delegates
-    mock = InstanceMockConnection.new
-    inst = make_test_instance(mock)
-
-    inst.enqueue("jobs", { task: "email" })
-    insert_call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("INSERT") }
-    refute_nil insert_call
-  end
-
-  def test_dequeue_delegates
-    dequeue_result = InstanceMockResult.new(
-      [{ "payload" => '{"task":"email"}' }],
-      ["payload"]
-    )
-    mock = InstanceMockConnection.new("DELETE" => dequeue_result)
-    inst = make_test_instance(mock)
-
-    result = inst.dequeue("jobs")
-    assert_equal({ "task" => "email" }, result)
-  end
-end
+# --- queues.* delegation: see test/test_queues_api.rb (Phase 5 nests queues
+#     into `gl.queues.<verb>`). Legacy `enqueue`/`dequeue` are gone.
