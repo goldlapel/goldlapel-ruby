@@ -35,6 +35,26 @@ gl.stop  # (also cleaned up automatically on process exit)
 
 Point `pg` at `gl.url`. Gold Lapel sits between your app and your DB, watching query patterns and creating materialized views + indexes automatically. Zero code changes beyond the connection string.
 
+### Namespaces
+
+Helper families live under nested sub-APIs:
+
+```ruby
+# Document store (Mongo-style API on top of JSONB)
+gl.documents.insert("orders", { status: "pending", total: 99 })
+gl.documents.find("orders", filter: { status: "pending" })
+gl.documents.update_one("orders", { _id: id }, { "$set" => { status: "paid" } })
+
+# Streams (Redis-style consumer groups on top of an append-only log)
+gl.streams.add("events", { type: "click", url: "/" })
+gl.streams.create_group("events", "workers")
+gl.streams.read("events", "workers", "consumer-1", count: 10)
+```
+
+Each call routes through the proxy's DDL API on first use — Gold Lapel materializes the canonical table (`_goldlapel.doc_orders`, `_goldlapel.stream_events`) and hands back the query patterns. One HTTP round-trip per `(family, name)` per session.
+
+Other namespaces (`gl.search`, `gl.publish` / `gl.subscribe`, `gl.incr`, `gl.zadd`, `gl.hset`, `gl.geoadd`, …) remain flat for now and will migrate to nested form in subsequent releases.
+
 Fiber-aware async via `GoldLapel::Async.start`, scoped connections via `gl.using(conn) { ... }`, and Rails auto-wiring are in the docs.
 
 ## Dashboard

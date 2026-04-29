@@ -11,6 +11,8 @@ require_relative "../lib/goldlapel/cache"
 require_relative "../lib/goldlapel/wrap"
 require_relative "../lib/goldlapel/utils"
 require_relative "../lib/goldlapel/instance"
+require_relative "../lib/goldlapel/documents"
+require_relative "../lib/goldlapel/streams"
 require_relative "../lib/goldlapel"
 
 class FactoryMockResult
@@ -73,7 +75,9 @@ class FactoryMockConn
   def finished?; false; end
 end
 
-# Helper: build a test Instance without spawning the binary
+# Helper: build a test Instance without spawning the binary. Wires up the
+# sub-APIs (`documents`, `streams`) and stubs DDL pattern fetches so tests
+# can assert wrapper-side behavior in isolation from the proxy.
 def fake_factory_instance(internal_conn)
   inst = GoldLapel::Instance.allocate
   inst.instance_variable_set(:@upstream, "postgresql://localhost/test")
@@ -81,6 +85,24 @@ def fake_factory_instance(internal_conn)
   inst.instance_variable_set(:@wrapped_conn, internal_conn)
   inst.instance_variable_set(:@proxy, nil)
   inst.instance_variable_set(:@fiber_key, :"__goldlapel_conn_#{inst.object_id}")
+  documents = GoldLapel::DocumentsAPI.new(inst)
+  documents.define_singleton_method(:_patterns) do |collection, **_opts|
+    {
+      tables: { "main" => collection.to_s },
+      query_patterns: {},
+    }
+  end
+  streams = GoldLapel::StreamsAPI.new(inst)
+  streams.define_singleton_method(:_patterns) do |stream|
+    {
+      tables: { "main" => "_goldlapel.stream_#{stream}" },
+      query_patterns: {
+        "insert" => "INSERT INTO _goldlapel.stream_#{stream} (payload) VALUES ($1) RETURNING id, created_at",
+      },
+    }
+  end
+  inst.instance_variable_set(:@documents, documents)
+  inst.instance_variable_set(:@streams, streams)
   inst
 end
 
@@ -260,7 +282,7 @@ class TestConnKwarg < Minitest::Test
     override = FactoryMockConn.new("override")
     inst = fake_factory_instance(internal)
 
-    inst.doc_insert("events", { a: 1 }, conn: override)
+    inst.documents.insert("events", { a: 1 }, conn: override)
 
     insert_call = override.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("INSERT") }
     refute_nil insert_call, "override conn should have received the INSERT"
@@ -292,7 +314,7 @@ class TestConnKwarg < Minitest::Test
     internal = FactoryMockConn.new("internal")
     inst = fake_factory_instance(internal)
 
-    inst.doc_insert("events", { a: 1 })
+    inst.documents.insert("events", { a: 1 })
     refute_empty internal.calls
   end
 end
@@ -306,7 +328,7 @@ class TestUsingBlock < Minitest::Test
     inst = fake_factory_instance(internal)
 
     inst.using(scoped) do |gl|
-      gl.doc_insert("events", { a: 1 })
+      gl.documents.insert("events", { a: 1 })
     end
 
     refute_empty scoped.calls
@@ -319,11 +341,11 @@ class TestUsingBlock < Minitest::Test
     inst = fake_factory_instance(internal)
 
     inst.using(scoped) do |gl|
-      gl.doc_insert("events", { a: 1 })
+      gl.documents.insert("events", { a: 1 })
     end
 
     # Post-block call should go to internal, not scoped
-    inst.doc_insert("events", { a: 2 })
+    inst.documents.insert("events", { a: 2 })
     scoped_inserts = scoped.calls.count { |c| c[:sql].include?("INSERT") }
     internal_inserts = internal.calls.count { |c| c[:sql].include?("INSERT") }
     assert_equal 1, scoped_inserts, "scoped should have 1 INSERT"
@@ -342,7 +364,7 @@ class TestUsingBlock < Minitest::Test
     end
 
     # After the raised block, internal should be the active conn again
-    inst.doc_insert("events", { a: 1 })
+    inst.documents.insert("events", { a: 1 })
     assert_empty scoped.calls
     refute_empty internal.calls
   end
@@ -371,11 +393,11 @@ class TestUsingBlock < Minitest::Test
     inst = fake_factory_instance(internal)
 
     inst.using(outer) do |gl|
-      gl.doc_insert("events", { layer: "outer" })
+      gl.documents.insert("events", { layer: "outer" })
       gl.using(inner) do |gl2|
-        gl2.doc_insert("events", { layer: "inner" })
+        gl2.documents.insert("events", { layer: "inner" })
       end
-      gl.doc_insert("events", { layer: "outer-again" })
+      gl.documents.insert("events", { layer: "outer-again" })
     end
 
     assert_equal 2, outer.calls.count { |c| c[:sql].include?("INSERT") }
@@ -390,7 +412,7 @@ class TestUsingBlock < Minitest::Test
     inst = fake_factory_instance(internal)
 
     inst.using(scoped) do |gl|
-      gl.doc_insert("events", { a: 1 }, conn: explicit)
+      gl.documents.insert("events", { a: 1 }, conn: explicit)
     end
 
     refute_empty explicit.calls
@@ -406,13 +428,13 @@ class TestUsingBlock < Minitest::Test
     # A sibling fiber started outside `using` should not see the scoped conn.
     sibling_log = []
     sibling = Fiber.new do
-      inst.doc_insert("events", { from: "sibling" })
+      inst.documents.insert("events", { from: "sibling" })
       sibling_log << :done
     end
 
     inst.using(scoped) do |gl|
       sibling.resume
-      gl.doc_insert("events", { from: "main" })
+      gl.documents.insert("events", { from: "main" })
     end
 
     assert_equal [:done], sibling_log

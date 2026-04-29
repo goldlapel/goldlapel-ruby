@@ -19,6 +19,7 @@ module GoldLapel
   module DDL
     SUPPORTED_VERSIONS = {
       "stream" => "v1",
+      "doc_store" => "v1",
     }.freeze
 
     class << self
@@ -43,7 +44,11 @@ module GoldLapel
         nil
       end
 
-      def fetch_patterns(owner, family, name, dashboard_port, dashboard_token)
+      # `options` is a per-family creation-options hash (e.g. doc_store accepts
+      # `{ "unlogged" => true }`). Only used on the create call — once the
+      # table exists, its shape is fixed and subsequent options are silently
+      # ignored on the proxy side (idempotent CREATE TABLE IF NOT EXISTS).
+      def fetch_patterns(owner, family, name, dashboard_port, dashboard_token, options: nil)
         cache = _cache_for(owner)
         key = [family, name]
         return cache[key] if cache.key?(key)
@@ -61,6 +66,7 @@ module GoldLapel
 
         url = URI.parse("http://127.0.0.1:#{dashboard_port.to_i}/api/ddl/#{family}/create")
         body_hash = { "name" => name, "schema_version" => supported_version(family) }
+        body_hash["options"] = options if options && !options.empty?
         status, body = _post(url, dashboard_token, body_hash)
 
         unless status == 200

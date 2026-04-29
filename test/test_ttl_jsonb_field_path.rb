@@ -6,6 +6,7 @@ require_relative "../lib/goldlapel/cache"
 require_relative "../lib/goldlapel/wrap"
 require_relative "../lib/goldlapel/utils"
 require_relative "../lib/goldlapel/async/utils"
+require_relative "_doc_patterns_helper"
 
 # Regression: doc_create_ttl_index takes `field` as a JSONB key (interpolated
 # into `data->>'#{field}'`), not as a Postgres identifier. The v0.2 security

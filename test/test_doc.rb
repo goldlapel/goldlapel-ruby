@@ -5,6 +5,7 @@ require "json"
 require_relative "../lib/goldlapel/cache"
 require_relative "../lib/goldlapel/wrap"
 require_relative "../lib/goldlapel/utils"
+require_relative "_doc_patterns_helper"
 
 class DocMockResult
   attr_reader :values, :fields
@@ -76,7 +77,12 @@ class TestDocInsert < Minitest::Test
     assert_equal "2026-04-07 00:00:00+00", result["created_at"]
   end
 
-  def test_table_ddl
+  # Phase 4 of schema-to-core: the proxy owns doc-store DDL. The wrapper must
+  # never CREATE TABLE itself — `gl.documents.<verb>(...)` calls
+  # /api/ddl/doc_store/create on the dashboard, the proxy materializes the
+  # canonical `_goldlapel.doc_<name>` table, and the wrapper executes only
+  # the returned query patterns.
+  def test_does_not_emit_create_table
     insert_result = DocMockResult.new(
       [{ "_id" => "550e8400-e29b-41d4-a716-446655440000", "data" => '{"name":"Alice"}', "created_at" => "2026-04-07 00:00:00+00" }],
       ["_id", "data", "created_at"]
@@ -84,12 +90,8 @@ class TestDocInsert < Minitest::Test
     mock = DocMockConnection.new("INSERT" => insert_result)
     GoldLapel.doc_insert(mock, "users", { name: "Alice" })
 
-    create_call = mock.calls.find { |c| c[:method] == :exec && c[:sql].include?("CREATE TABLE") }
-    refute_nil create_call
-    assert_includes create_call[:sql], "CREATE TABLE IF NOT EXISTS users"
-    assert_includes create_call[:sql], "_id UUID PRIMARY KEY DEFAULT gen_random_uuid()"
-    assert_includes create_call[:sql], "data JSONB NOT NULL"
-    assert_includes create_call[:sql], "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"
+    assert_nil mock.calls.find { |c| c[:sql].include?("CREATE TABLE") },
+               "wrapper-side doc_insert must not issue CREATE TABLE — proxy owns doc-store DDL"
   end
 
   def test_insert_sql_and_params
@@ -113,37 +115,31 @@ class TestDocInsert < Minitest::Test
   end
 end
 
-# --- doc_create_collection ---
+# --- doc_create_collection (Phase 4: proxy owns DDL) ---
+#
+# Under Phase 4 of schema-to-core the proxy materializes the canonical
+# doc-store table; the wrapper-side `doc_create_collection` is a no-op once
+# `patterns:` has been supplied (which DocumentsAPI does for free). Direct
+# calls without `patterns:` must raise so callers don't think they've
+# created a table when in fact nothing happened.
 
 class TestDocCreateCollection < Minitest::Test
-  def test_creates_table_with_default_options
+  def test_no_op_when_patterns_supplied
     mock = DocMockConnection.new
+    # Helper auto-injects patterns; the call should issue zero SQL because
+    # the proxy already created the table when DocumentsAPI fetched patterns.
     GoldLapel.doc_create_collection(mock, "users")
-
-    create_call = mock.calls.find { |c| c[:method] == :exec && c[:sql].include?("CREATE TABLE") }
-    refute_nil create_call
-    assert_includes create_call[:sql], "CREATE TABLE IF NOT EXISTS users"
-    refute_includes create_call[:sql], "UNLOGGED"
+    assert_empty mock.calls,
+                 "doc_create_collection must not issue CREATE TABLE — proxy owns doc-store DDL"
   end
 
-  def test_creates_unlogged_table
-    mock = DocMockConnection.new
-    GoldLapel.doc_create_collection(mock, "ephemeral", unlogged: true)
-
-    create_call = mock.calls.find { |c| c[:method] == :exec && c[:sql].include?("CREATE") }
-    refute_nil create_call
-    assert_includes create_call[:sql], "CREATE UNLOGGED TABLE IF NOT EXISTS ephemeral"
-  end
-
-  def test_schema_correctness
-    mock = DocMockConnection.new
-    GoldLapel.doc_create_collection(mock, "items")
-
-    create_call = mock.calls.find { |c| c[:method] == :exec && c[:sql].include?("CREATE TABLE") }
-    refute_nil create_call
-    assert_includes create_call[:sql], "_id UUID PRIMARY KEY DEFAULT gen_random_uuid()"
-    assert_includes create_call[:sql], "data JSONB NOT NULL"
-    assert_includes create_call[:sql], "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"
+  def test_raises_without_patterns
+    # Bypass the auto-inject helper to verify the bare util surface.
+    assert_raises(RuntimeError) do
+      DocPatternsAutoInject::ORIGINALS[:doc_create_collection].call(
+        DocMockConnection.new, "users"
+      )
+    end
   end
 
   def test_rejects_invalid_collection
@@ -1058,7 +1054,12 @@ class TestDocAggregate < Minitest::Test
 
     call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("SELECT") }
     refute_nil call
-    assert_includes call[:sql], "COALESCE((SELECT json_agg(users.data) FROM users WHERE users.data->>'uid' = data->>'user_id'), '[]'::json) AS user_docs"
+    # Phase 4: $lookup.from is resolved to the canonical proxy table and
+    # aliased back to the user-facing collection name. With patterns auto-
+    # injected by the helper, the canonical table mirrors the collection name
+    # so the alias is `users AS users` — semantically identical to the
+    # un-aliased form, and what shows up live is `_goldlapel.doc_users AS users`.
+    assert_includes call[:sql], "COALESCE((SELECT json_agg(users.data) FROM users AS users WHERE users.data->>'uid' = data->>'user_id'), '[]'::json) AS user_docs"
   end
 
   def test_lookup_rejects_invalid_identifiers
@@ -1090,7 +1091,7 @@ class TestDocAggregate < Minitest::Test
     call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("SELECT") }
     refute_nil call
     assert_includes call[:sql], "WHERE data @> $1::jsonb"
-    assert_includes call[:sql], "COALESCE((SELECT json_agg(products.data) FROM products WHERE products.data->>'pid' = data->>'product_id'), '[]'::json) AS product_info"
+    assert_includes call[:sql], "COALESCE((SELECT json_agg(products.data) FROM products AS products WHERE products.data->>'pid' = data->>'product_id'), '[]'::json) AS product_info"
     assert_equal [JSON.generate({ "status" => "active" })], call[:params]
   end
 
