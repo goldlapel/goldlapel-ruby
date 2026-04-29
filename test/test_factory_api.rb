@@ -300,15 +300,8 @@ class TestConnKwarg < Minitest::Test
     assert_empty internal.calls
   end
 
-  def test_conn_kwarg_on_hset
-    internal = FactoryMockConn.new("internal")
-    override = FactoryMockConn.new("override")
-    inst = fake_factory_instance(internal)
-
-    inst.hset("cache", "k1", "f1", "v1", conn: override)
-    refute_empty override.calls
-    assert_empty internal.calls
-  end
+  # Phase 5: legacy flat `hset` is gone — per-family conn-kwarg is exercised
+  # in test/test_hashes_api.rb (and siblings for counters/zsets/queues/geos).
 
   def test_no_conn_kwarg_uses_internal
     internal = FactoryMockConn.new("internal")

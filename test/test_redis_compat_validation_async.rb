@@ -6,8 +6,13 @@ require_relative "../lib/goldlapel/async/utils"
 
 # Regression: async Redis-compat helpers must reject injection-shaped identifier
 # args, matching the sync path. The sync fix (commit 0c6cd01) missed
-# lib/goldlapel/async/utils.rb; this test guards the fix across both paths.
-# See v0.2 security review finding C1.
+# lib/goldlapel/async/utils.rb originally; this test guards the fix across both
+# paths. See v0.2 security review finding C1.
+#
+# Phase 5 of schema-to-core moved the Redis-compat families behind namespace
+# APIs. Identifier validation now happens in the underlying
+# `GoldLapel::Async::Utils.<family>_*` helpers — these tests pin that
+# helper-level guard.
 
 class RedisCompatValidationAsyncMockResult
   def initialize(rows = [], fields = [])
@@ -26,8 +31,6 @@ end
 class RedisCompatValidationAsyncMockConn
   def async_exec(*); RedisCompatValidationAsyncMockResult.new; end
   def async_exec_params(*); RedisCompatValidationAsyncMockResult.new; end
-  # Some async helpers also call sync exec via _raw_conn in edge cases; keep
-  # a lenient mock so validation is exercised before any exec is attempted.
   def exec(*); RedisCompatValidationAsyncMockResult.new; end
   def exec_params(*); RedisCompatValidationAsyncMockResult.new; end
   def close; end
@@ -39,6 +42,7 @@ class TestRedisCompatIdentifierValidationAsync < Minitest::Test
 
   def setup
     @conn = RedisCompatValidationAsyncMockConn.new
+    @patterns = { tables: { "main" => "ignored" }, query_patterns: {} }
   end
 
   def test_publish_rejects_bad_channel
@@ -49,22 +53,6 @@ class TestRedisCompatIdentifierValidationAsync < Minitest::Test
     assert_raises(ArgumentError) { GoldLapel::Async::Utils.subscribe(@conn, BAD) { |_ch, _p| } }
   end
 
-  def test_enqueue_rejects_bad_table
-    assert_raises(ArgumentError) { GoldLapel::Async::Utils.enqueue(@conn, BAD, {}) }
-  end
-
-  def test_dequeue_rejects_bad_table
-    assert_raises(ArgumentError) { GoldLapel::Async::Utils.dequeue(@conn, BAD) }
-  end
-
-  def test_incr_rejects_bad_table
-    assert_raises(ArgumentError) { GoldLapel::Async::Utils.incr(@conn, BAD, "k") }
-  end
-
-  def test_get_counter_rejects_bad_table
-    assert_raises(ArgumentError) { GoldLapel::Async::Utils.get_counter(@conn, BAD, "k") }
-  end
-
   def test_count_distinct_rejects_bad_table
     assert_raises(ArgumentError) { GoldLapel::Async::Utils.count_distinct(@conn, BAD, "col") }
   end
@@ -73,69 +61,81 @@ class TestRedisCompatIdentifierValidationAsync < Minitest::Test
     assert_raises(ArgumentError) { GoldLapel::Async::Utils.count_distinct(@conn, "tbl", BAD) }
   end
 
-  def test_zadd_rejects_bad_table
-    assert_raises(ArgumentError) { GoldLapel::Async::Utils.zadd(@conn, BAD, "m", 1) }
+  # -- Counter family --
+
+  def test_counter_incr_rejects_bad_name
+    assert_raises(ArgumentError) { GoldLapel::Async::Utils.counter_incr(@conn, BAD, "k", 1, patterns: @patterns) }
   end
 
-  def test_zincrby_rejects_bad_table
-    assert_raises(ArgumentError) { GoldLapel::Async::Utils.zincrby(@conn, BAD, "m") }
+  def test_counter_set_rejects_bad_name
+    assert_raises(ArgumentError) { GoldLapel::Async::Utils.counter_set(@conn, BAD, "k", 1, patterns: @patterns) }
   end
 
-  def test_zrange_rejects_bad_table
-    assert_raises(ArgumentError) { GoldLapel::Async::Utils.zrange(@conn, BAD) }
+  def test_counter_get_rejects_bad_name
+    assert_raises(ArgumentError) { GoldLapel::Async::Utils.counter_get(@conn, BAD, "k", patterns: @patterns) }
   end
 
-  def test_zrank_rejects_bad_table
-    assert_raises(ArgumentError) { GoldLapel::Async::Utils.zrank(@conn, BAD, "m") }
+  def test_counter_count_keys_rejects_bad_name
+    assert_raises(ArgumentError) { GoldLapel::Async::Utils.counter_count_keys(@conn, BAD, patterns: @patterns) }
   end
 
-  def test_zscore_rejects_bad_table
-    assert_raises(ArgumentError) { GoldLapel::Async::Utils.zscore(@conn, BAD, "m") }
+  # -- Zset family --
+
+  def test_zset_add_rejects_bad_name
+    assert_raises(ArgumentError) { GoldLapel::Async::Utils.zset_add(@conn, BAD, "k", "m", 1, patterns: @patterns) }
   end
 
-  def test_zrem_rejects_bad_table
-    assert_raises(ArgumentError) { GoldLapel::Async::Utils.zrem(@conn, BAD, "m") }
+  def test_zset_score_rejects_bad_name
+    assert_raises(ArgumentError) { GoldLapel::Async::Utils.zset_score(@conn, BAD, "k", "m", patterns: @patterns) }
   end
 
-  def test_geoadd_rejects_bad_table
-    assert_raises(ArgumentError) { GoldLapel::Async::Utils.geoadd(@conn, BAD, "name", "geom", "x", 0, 0) }
+  def test_zset_range_rejects_bad_name
+    assert_raises(ArgumentError) { GoldLapel::Async::Utils.zset_range(@conn, BAD, "k", patterns: @patterns) }
   end
 
-  def test_geoadd_rejects_bad_name_column
-    assert_raises(ArgumentError) { GoldLapel::Async::Utils.geoadd(@conn, "tbl", BAD, "geom", "x", 0, 0) }
+  # -- Hash family --
+
+  def test_hash_set_rejects_bad_name
+    assert_raises(ArgumentError) { GoldLapel::Async::Utils.hash_set(@conn, BAD, "hk", "f", "v", patterns: @patterns) }
   end
 
-  def test_geoadd_rejects_bad_geom_column
-    assert_raises(ArgumentError) { GoldLapel::Async::Utils.geoadd(@conn, "tbl", "name", BAD, "x", 0, 0) }
+  def test_hash_get_rejects_bad_name
+    assert_raises(ArgumentError) { GoldLapel::Async::Utils.hash_get(@conn, BAD, "hk", "f", patterns: @patterns) }
   end
 
-  def test_georadius_rejects_bad_table
-    assert_raises(ArgumentError) { GoldLapel::Async::Utils.georadius(@conn, BAD, "geom", 0, 0, 100) }
+  def test_hash_get_all_rejects_bad_name
+    assert_raises(ArgumentError) { GoldLapel::Async::Utils.hash_get_all(@conn, BAD, "hk", patterns: @patterns) }
   end
 
-  def test_georadius_rejects_bad_geom_column
-    assert_raises(ArgumentError) { GoldLapel::Async::Utils.georadius(@conn, "tbl", BAD, 0, 0, 100) }
+  # -- Queue family --
+
+  def test_queue_enqueue_rejects_bad_name
+    assert_raises(ArgumentError) { GoldLapel::Async::Utils.queue_enqueue(@conn, BAD, {}, patterns: @patterns) }
   end
 
-  def test_geodist_rejects_bad_table
-    assert_raises(ArgumentError) { GoldLapel::Async::Utils.geodist(@conn, BAD, "geom", "name", "a", "b") }
+  def test_queue_claim_rejects_bad_name
+    assert_raises(ArgumentError) { GoldLapel::Async::Utils.queue_claim(@conn, BAD, patterns: @patterns) }
   end
 
-  def test_hset_rejects_bad_table
-    assert_raises(ArgumentError) { GoldLapel::Async::Utils.hset(@conn, BAD, "k", "f", "v") }
+  def test_queue_ack_rejects_bad_name
+    assert_raises(ArgumentError) { GoldLapel::Async::Utils.queue_ack(@conn, BAD, 1, patterns: @patterns) }
   end
 
-  def test_hget_rejects_bad_table
-    assert_raises(ArgumentError) { GoldLapel::Async::Utils.hget(@conn, BAD, "k", "f") }
+  # -- Geo family --
+
+  def test_geo_add_rejects_bad_name
+    assert_raises(ArgumentError) { GoldLapel::Async::Utils.geo_add(@conn, BAD, "alice", 0, 0, patterns: @patterns) }
   end
 
-  def test_hgetall_rejects_bad_table
-    assert_raises(ArgumentError) { GoldLapel::Async::Utils.hgetall(@conn, BAD, "k") }
+  def test_geo_dist_rejects_bad_name
+    assert_raises(ArgumentError) { GoldLapel::Async::Utils.geo_dist(@conn, BAD, "a", "b", patterns: @patterns) }
   end
 
-  def test_hdel_rejects_bad_table
-    assert_raises(ArgumentError) { GoldLapel::Async::Utils.hdel(@conn, BAD, "k", "f") }
+  def test_geo_radius_rejects_bad_name
+    assert_raises(ArgumentError) { GoldLapel::Async::Utils.geo_radius(@conn, BAD, 0, 0, 100, patterns: @patterns) }
   end
+
+  # -- Stream family --
 
   def test_stream_add_rejects_bad_stream
     assert_raises(ArgumentError) { GoldLapel::Async::Utils.stream_add(@conn, BAD, {}) }

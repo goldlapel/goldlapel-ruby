@@ -15,7 +15,8 @@ module GoldLapel
   # The `using(conn)` scoped override uses a Fiber-local key so it correctly
   # composes with Ruby's `async` gem (Fiber-based concurrency).
   class Instance
-    attr_reader :upstream, :documents, :streams
+    attr_reader :upstream, :documents, :streams,
+                :counters, :zsets, :hashes, :queues, :geos
 
     def initialize(
       upstream,
@@ -54,17 +55,28 @@ module GoldLapel
       @wrapped_conn = nil
       @fiber_key = :"__goldlapel_conn_#{object_id}"
 
-      # Nested namespaces — see goldlapel/documents.rb and goldlapel/streams.rb.
-      # These are the canonical schema-to-core sub-API instances. Each holds a
-      # back-reference to this client for shared state (license, dashboard
-      # token, http session, conn, DDL pattern cache). Other namespaces (cache,
-      # search, queues, counters, hashes, zsets, geo, auth, ...) stay flat for
-      # now; they migrate to nested form one-at-a-time as their own
-      # schema-to-core phase fires.
+      # Nested namespaces — canonical schema-to-core sub-API instances. Each
+      # holds a back-reference to this client for shared state (license,
+      # dashboard token, http session, conn, DDL pattern cache).
+      #
+      # As of Phase 5 the Redis-compat helper families (counter / zset /
+      # hash / queue / geo) are nested too, alongside streams (Phase 1+2)
+      # and documents (Phase 4). Search / cache / auth remain flat — they'll
+      # migrate when their own schema-to-core phase fires.
       require "goldlapel/documents"
       require "goldlapel/streams"
+      require "goldlapel/counters"
+      require "goldlapel/zsets"
+      require "goldlapel/hashes"
+      require "goldlapel/queues"
+      require "goldlapel/geos"
       @documents = DocumentsAPI.new(self)
       @streams = StreamsAPI.new(self)
+      @counters = CountersAPI.new(self)
+      @zsets = ZsetsAPI.new(self)
+      @hashes = HashesAPI.new(self)
+      @queues = QueuesAPI.new(self)
+      @geos = GeosAPI.new(self)
 
       start! if eager_connect
     end
@@ -268,83 +280,10 @@ module GoldLapel
       GoldLapel.subscribe(_resolve_conn(conn), channel, &block)
     end
 
-    # --- Queue ---
-
-    def enqueue(queue_table, payload, conn: nil)
-      GoldLapel.enqueue(_resolve_conn(conn), queue_table, payload)
-    end
-
-    def dequeue(queue_table, conn: nil)
-      GoldLapel.dequeue(_resolve_conn(conn), queue_table)
-    end
-
-    # --- Counters ---
-
-    def incr(table, key, amount: 1, conn: nil)
-      GoldLapel.incr(_resolve_conn(conn), table, key, amount: amount)
-    end
-
-    def get_counter(table, key, conn: nil)
-      GoldLapel.get_counter(_resolve_conn(conn), table, key)
-    end
-
-    # --- Hash methods ---
-
-    def hset(table, key, field, value, conn: nil)
-      GoldLapel.hset(_resolve_conn(conn), table, key, field, value)
-    end
-
-    def hget(table, key, field, conn: nil)
-      GoldLapel.hget(_resolve_conn(conn), table, key, field)
-    end
-
-    def hgetall(table, key, conn: nil)
-      GoldLapel.hgetall(_resolve_conn(conn), table, key)
-    end
-
-    def hdel(table, key, field, conn: nil)
-      GoldLapel.hdel(_resolve_conn(conn), table, key, field)
-    end
-
-    # --- Sorted set methods ---
-
-    def zadd(table, member, score, conn: nil)
-      GoldLapel.zadd(_resolve_conn(conn), table, member, score)
-    end
-
-    def zincrby(table, member, amount: 1, conn: nil)
-      GoldLapel.zincrby(_resolve_conn(conn), table, member, amount: amount)
-    end
-
-    def zrange(table, start: 0, stop: 10, desc: true, conn: nil)
-      GoldLapel.zrange(_resolve_conn(conn), table, start: start, stop: stop, desc: desc)
-    end
-
-    def zrank(table, member, desc: true, conn: nil)
-      GoldLapel.zrank(_resolve_conn(conn), table, member, desc: desc)
-    end
-
-    def zscore(table, member, conn: nil)
-      GoldLapel.zscore(_resolve_conn(conn), table, member)
-    end
-
-    def zrem(table, member, conn: nil)
-      GoldLapel.zrem(_resolve_conn(conn), table, member)
-    end
-
-    # --- Geo methods ---
-
-    def georadius(table, geom_column, lon, lat, radius_meters, limit: 50, conn: nil)
-      GoldLapel.georadius(_resolve_conn(conn), table, geom_column, lon, lat, radius_meters, limit: limit)
-    end
-
-    def geoadd(table, name_column, geom_column, name, lon, lat, conn: nil)
-      GoldLapel.geoadd(_resolve_conn(conn), table, name_column, geom_column, name, lon, lat)
-    end
-
-    def geodist(table, geom_column, name_column, name_a, name_b, conn: nil)
-      GoldLapel.geodist(_resolve_conn(conn), table, geom_column, name_column, name_a, name_b)
-    end
+    # --- Phase 5 Redis-compat families: gl.counters / gl.zsets / gl.hashes /
+    #     gl.queues / gl.geos. The legacy flat methods (incr, hset, zadd,
+    #     enqueue, geoadd, ...) are gone — see the per-family modules under
+    #     lib/goldlapel/{counters,zsets,hashes,queues,geos}.rb.
 
     # --- Misc ---
 
