@@ -990,12 +990,29 @@ module GoldLapel
   end
   private_class_method :_build_update
 
-  def self.doc_insert(conn, collection, document)
+  # Resolve the canonical doc-store table name from proxy-fetched patterns.
+  # Returns the FQ table (e.g. "_goldlapel.doc_users"). The wrapper API never
+  # builds CREATE TABLE itself anymore — `gl.documents.<verb>(...)` always
+  # supplies `patterns` from the proxy DDL API (see goldlapel/ddl.rb).
+  def self._doc_table(patterns)
+    if patterns.nil?
+      raise RuntimeError,
+        "doc_* utils now require DDL patterns from the proxy — call via " \
+        "`gl.documents.<verb>(...)` rather than the utils function directly."
+    end
+    tables = patterns[:tables] || patterns["tables"]
+    main = tables && (tables["main"] || tables[:main])
+    raise RuntimeError, "doc_* patterns missing tables.main" if main.nil?
+    main
+  end
+  private_class_method :_doc_table
+
+  def self.doc_insert(conn, collection, document, patterns: nil)
     _validate_identifier(collection)
+    table = _doc_table(patterns)
     raw = _raw_conn(conn)
-    _ensure_collection(raw, collection)
     result = raw.exec_params(
-      "INSERT INTO #{collection} (data) VALUES ($1::jsonb) " \
+      "INSERT INTO #{table} (data) VALUES ($1::jsonb) " \
       "RETURNING _id, data, created_at",
       [JSON.generate(document)]
     )
@@ -1003,15 +1020,15 @@ module GoldLapel
     { "_id" => row["_id"], "data" => JSON.parse(row["data"]), "created_at" => row["created_at"] }
   end
 
-  def self.doc_insert_many(conn, collection, documents)
+  def self.doc_insert_many(conn, collection, documents, patterns: nil)
     _validate_identifier(collection)
     raise ArgumentError, "documents must be a non-empty array" if !documents.is_a?(Array) || documents.empty?
+    table = _doc_table(patterns)
     raw = _raw_conn(conn)
-    _ensure_collection(raw, collection)
     placeholders = documents.each_with_index.map { |_, i| "($#{i + 1}::jsonb)" }.join(", ")
     params = documents.map { |doc| JSON.generate(doc) }
     result = raw.exec_params(
-      "INSERT INTO #{collection} (data) VALUES #{placeholders} " \
+      "INSERT INTO #{table} (data) VALUES #{placeholders} " \
       "RETURNING _id, data, created_at",
       params
     )
@@ -1020,10 +1037,11 @@ module GoldLapel
     end
   end
 
-  def self.doc_find(conn, collection, filter: nil, sort: nil, limit: nil, skip: nil)
+  def self.doc_find(conn, collection, filter: nil, sort: nil, limit: nil, skip: nil, patterns: nil)
     _validate_identifier(collection)
+    table = _doc_table(patterns)
     raw = _raw_conn(conn)
-    sql = "SELECT _id, data, created_at FROM #{collection}"
+    sql = "SELECT _id, data, created_at FROM #{table}"
     params = []
     idx = 1
     where_clause, filter_params, idx = _build_filter(filter, idx)
@@ -1056,10 +1074,11 @@ module GoldLapel
     end
   end
 
-  def self.doc_find_cursor(conn, collection, filter: nil, sort: nil, limit: nil, skip: nil, batch_size: 100)
+  def self.doc_find_cursor(conn, collection, filter: nil, sort: nil, limit: nil, skip: nil, batch_size: 100, patterns: nil)
     _validate_identifier(collection)
+    table = _doc_table(patterns)
     raw = _raw_conn(conn)
-    sql = "SELECT _id, data, created_at FROM #{collection}"
+    sql = "SELECT _id, data, created_at FROM #{table}"
     params = []
     idx = 1
     where_clause, filter_params, idx = _build_filter(filter, idx)
@@ -1103,10 +1122,11 @@ module GoldLapel
     end
   end
 
-  def self.doc_find_one(conn, collection, filter: nil)
+  def self.doc_find_one(conn, collection, filter: nil, patterns: nil)
     _validate_identifier(collection)
+    table = _doc_table(patterns)
     raw = _raw_conn(conn)
-    sql = "SELECT _id, data, created_at FROM #{collection}"
+    sql = "SELECT _id, data, created_at FROM #{table}"
     params = []
     where_clause, filter_params, _idx = _build_filter(filter, 1)
     unless where_clause.empty?
@@ -1120,12 +1140,13 @@ module GoldLapel
     { "_id" => row["_id"], "data" => JSON.parse(row["data"]), "created_at" => row["created_at"] }
   end
 
-  def self.doc_update(conn, collection, filter, update)
+  def self.doc_update(conn, collection, filter, update, patterns: nil)
     _validate_identifier(collection)
+    table = _doc_table(patterns)
     raw = _raw_conn(conn)
     where_clause, filter_params, idx = _build_filter(filter, 1)
     update_expr, update_params, _idx = _build_update(update, idx)
-    sql = "UPDATE #{collection} SET data = #{update_expr}"
+    sql = "UPDATE #{table} SET data = #{update_expr}"
     params = filter_params + update_params
     unless where_clause.empty?
       sql += " WHERE #{where_clause}"
@@ -1134,27 +1155,29 @@ module GoldLapel
     result.cmd_tuples
   end
 
-  def self.doc_update_one(conn, collection, filter, update)
+  def self.doc_update_one(conn, collection, filter, update, patterns: nil)
     _validate_identifier(collection)
+    table = _doc_table(patterns)
     raw = _raw_conn(conn)
     where_clause, filter_params, idx = _build_filter(filter, 1)
     update_expr, update_params, _idx = _build_update(update, idx)
     cte_where = where_clause.empty? ? "" : " WHERE #{where_clause}"
     sql = "WITH target AS (" \
-          "SELECT _id FROM #{collection}#{cte_where} " \
+          "SELECT _id FROM #{table}#{cte_where} " \
           "LIMIT 1" \
-          ") UPDATE #{collection} SET data = #{update_expr} " \
-          "FROM target WHERE #{collection}._id = target._id"
+          ") UPDATE #{table} SET data = #{update_expr} " \
+          "FROM target WHERE #{table}._id = target._id"
     params = filter_params + update_params
     result = raw.exec_params(sql, params)
     result.cmd_tuples
   end
 
-  def self.doc_delete(conn, collection, filter)
+  def self.doc_delete(conn, collection, filter, patterns: nil)
     _validate_identifier(collection)
+    table = _doc_table(patterns)
     raw = _raw_conn(conn)
     where_clause, filter_params, _idx = _build_filter(filter, 1)
-    sql = "DELETE FROM #{collection}"
+    sql = "DELETE FROM #{table}"
     unless where_clause.empty?
       sql += " WHERE #{where_clause}"
     end
@@ -1162,24 +1185,26 @@ module GoldLapel
     result.cmd_tuples
   end
 
-  def self.doc_delete_one(conn, collection, filter)
+  def self.doc_delete_one(conn, collection, filter, patterns: nil)
     _validate_identifier(collection)
+    table = _doc_table(patterns)
     raw = _raw_conn(conn)
     where_clause, filter_params, _idx = _build_filter(filter, 1)
     cte_where = where_clause.empty? ? "" : " WHERE #{where_clause}"
     sql = "WITH target AS (" \
-          "SELECT _id FROM #{collection}#{cte_where} " \
+          "SELECT _id FROM #{table}#{cte_where} " \
           "LIMIT 1" \
-          ") DELETE FROM #{collection} " \
-          "USING target WHERE #{collection}._id = target._id"
+          ") DELETE FROM #{table} " \
+          "USING target WHERE #{table}._id = target._id"
     result = raw.exec_params(sql, filter_params)
     result.cmd_tuples
   end
 
-  def self.doc_count(conn, collection, filter: nil)
+  def self.doc_count(conn, collection, filter: nil, patterns: nil)
     _validate_identifier(collection)
+    table = _doc_table(patterns)
     raw = _raw_conn(conn)
-    sql = "SELECT COUNT(*) FROM #{collection}"
+    sql = "SELECT COUNT(*) FROM #{table}"
     where_clause, filter_params, _idx = _build_filter(filter, 1)
     if where_clause.empty?
       result = raw.exec(sql)
@@ -1190,18 +1215,19 @@ module GoldLapel
     result[0]["count"].to_i
   end
 
-  def self.doc_find_one_and_update(conn, collection, filter, update)
+  def self.doc_find_one_and_update(conn, collection, filter, update, patterns: nil)
     _validate_identifier(collection)
+    table = _doc_table(patterns)
     raw = _raw_conn(conn)
     where_clause, filter_params, idx = _build_filter(filter, 1)
     update_expr, update_params, _idx = _build_update(update, idx)
     cte_where = where_clause.empty? ? "" : " WHERE #{where_clause}"
     sql = "WITH target AS (" \
-          "SELECT _id FROM #{collection}#{cte_where} " \
+          "SELECT _id FROM #{table}#{cte_where} " \
           "LIMIT 1" \
-          ") UPDATE #{collection} SET data = #{update_expr} " \
-          "FROM target WHERE #{collection}._id = target._id " \
-          "RETURNING #{collection}._id, #{collection}.data, #{collection}.created_at"
+          ") UPDATE #{table} SET data = #{update_expr} " \
+          "FROM target WHERE #{table}._id = target._id " \
+          "RETURNING #{table}._id, #{table}.data, #{table}.created_at"
     params = filter_params + update_params
     result = raw.exec_params(sql, params)
     return nil if result.ntuples.zero?
@@ -1209,28 +1235,30 @@ module GoldLapel
     { "_id" => row["_id"], "data" => JSON.parse(row["data"]), "created_at" => row["created_at"] }
   end
 
-  def self.doc_find_one_and_delete(conn, collection, filter)
+  def self.doc_find_one_and_delete(conn, collection, filter, patterns: nil)
     _validate_identifier(collection)
+    table = _doc_table(patterns)
     raw = _raw_conn(conn)
     where_clause, filter_params, _idx = _build_filter(filter, 1)
     cte_where = where_clause.empty? ? "" : " WHERE #{where_clause}"
     sql = "WITH target AS (" \
-          "SELECT _id FROM #{collection}#{cte_where} " \
+          "SELECT _id FROM #{table}#{cte_where} " \
           "LIMIT 1" \
-          ") DELETE FROM #{collection} " \
-          "USING target WHERE #{collection}._id = target._id " \
-          "RETURNING #{collection}._id, #{collection}.data, #{collection}.created_at"
+          ") DELETE FROM #{table} " \
+          "USING target WHERE #{table}._id = target._id " \
+          "RETURNING #{table}._id, #{table}.data, #{table}.created_at"
     result = raw.exec_params(sql, filter_params)
     return nil if result.ntuples.zero?
     row = result[0]
     { "_id" => row["_id"], "data" => JSON.parse(row["data"]), "created_at" => row["created_at"] }
   end
 
-  def self.doc_distinct(conn, collection, field, filter: nil)
+  def self.doc_distinct(conn, collection, field, filter: nil, patterns: nil)
     _validate_identifier(collection)
+    table = _doc_table(patterns)
     raw = _raw_conn(conn)
     field_expr = _field_path(field)
-    sql = "SELECT DISTINCT #{field_expr} AS val FROM #{collection}"
+    sql = "SELECT DISTINCT #{field_expr} AS val FROM #{table}"
     params = []
     idx = 1
     where_parts = ["#{field_expr} IS NOT NULL"]
@@ -1244,13 +1272,18 @@ module GoldLapel
     result.map { |row| row["val"] }
   end
 
-  def self.doc_create_index(conn, collection, keys: nil)
+  def self.doc_create_index(conn, collection, keys: nil, patterns: nil)
     _validate_identifier(collection)
+    table = _doc_table(patterns)
     raw = _raw_conn(conn)
+    # Index names are deterministic and key off the (possibly schema-qualified)
+    # canonical table — strip the `schema.` prefix so the identifier doesn't
+    # contain a dot, which Postgres rejects without quoting.
+    bare = table.split(".").last
     if keys.nil?
-      idx_name = "#{collection}_data_gin_idx"
+      idx_name = "#{bare}_data_gin_idx"
       raw.exec("CREATE INDEX IF NOT EXISTS #{idx_name} " \
-               "ON #{collection} USING GIN (data)")
+               "ON #{table} USING GIN (data)")
     else
       key_names = []
       exprs = []
@@ -1261,9 +1294,9 @@ module GoldLapel
         key_names << key.to_s
         exprs << "(data->>'#{key}')"
       end
-      idx_name = "#{collection}_#{key_names.join('_')}_idx"
+      idx_name = "#{bare}_#{key_names.join('_')}_idx"
       raw.exec("CREATE INDEX IF NOT EXISTS #{idx_name} " \
-               "ON #{collection} (#{exprs.join(', ')})")
+               "ON #{table} (#{exprs.join(', ')})")
     end
     nil
   end
@@ -1289,14 +1322,21 @@ module GoldLapel
   end
   private_class_method :_resolve_field_ref
 
-  def self.doc_aggregate(conn, collection, pipeline)
+  # `lookup_tables` maps each $lookup.from collection name → its canonical
+  # proxy table (e.g. {"orders" => "_goldlapel.doc_orders"}). DocumentsAPI
+  # builds this map by walking the pipeline and fetching DDL for each unique
+  # `from` reference (cached after first call). When omitted, raw `from`
+  # collection names are used — kept only as a fallback for direct callers.
+  def self.doc_aggregate(conn, collection, pipeline, patterns: nil, lookup_tables: nil)
     _validate_identifier(collection)
     raise ArgumentError, "pipeline must be an array" unless pipeline.is_a?(Array)
     return [] if pipeline.empty?
 
+    table = _doc_table(patterns)
     raw = _raw_conn(conn)
     params = []
     idx = 1
+    lookup_tables ||= {}
 
     group_stage = nil
     match_stage = nil
@@ -1356,7 +1396,11 @@ module GoldLapel
       unwind_map[unwind_field] = unwind_alias
     end
 
-    # Build $lookup subqueries
+    # Build $lookup subqueries. `from` is the user-facing collection name; the
+    # actual SQL references its canonical proxy table (resolved from
+    # lookup_tables, populated by DocumentsAPI#aggregate). The validated
+    # `from` is reused as a SQL alias so `from.data->>'…'` stays unambiguous
+    # across multiple lookups.
     lookup_sqls = []
     lookup_stages.each do |lk|
       from = (lk["from"] || lk[:from]).to_s
@@ -1369,11 +1413,13 @@ module GoldLapel
       raise ArgumentError, "Invalid field name: #{foreign_field}" unless foreign_field.match?(SORT_KEY_PATTERN)
       _validate_identifier(as_field)
 
+      from_table = lookup_tables[from] || lookup_tables[from.to_sym] || from
+
       local_expr = _field_path(local_field)
       foreign_expr = "#{from}.data->>'#{foreign_field}'"
 
       lookup_sqls << "COALESCE((SELECT json_agg(#{from}.data) " \
-                     "FROM #{from} " \
+                     "FROM #{from_table} AS #{from} " \
                      "WHERE #{foreign_expr} = #{local_expr}), '[]'::json) AS #{as_field}"
     end
 
@@ -1408,7 +1454,7 @@ module GoldLapel
       end
 
       all_parts = select_parts + lookup_sqls
-      sql = "SELECT #{all_parts.join(', ')} FROM #{collection}"
+      sql = "SELECT #{all_parts.join(', ')} FROM #{table}"
 
       if unwind_field
         sql += " CROSS JOIN jsonb_array_elements_text(data->'#{unwind_field}') AS #{unwind_alias}"
@@ -1484,7 +1530,7 @@ module GoldLapel
         end
       end
 
-      sql = "SELECT #{select_parts.join(', ')} FROM #{collection}"
+      sql = "SELECT #{select_parts.join(', ')} FROM #{table}"
 
       if unwind_field
         sql += " CROSS JOIN jsonb_array_elements_text(data->'#{unwind_field}') AS #{unwind_alias}"
@@ -1515,7 +1561,7 @@ module GoldLapel
     else
       base_cols = ["_id", "data", "created_at"]
       all_parts = base_cols + lookup_sqls
-      sql = "SELECT #{all_parts.join(', ')} FROM #{collection}"
+      sql = "SELECT #{all_parts.join(', ')} FROM #{table}"
 
       if unwind_field
         sql += " CROSS JOIN jsonb_array_elements_text(data->'#{unwind_field}') AS #{unwind_alias}"
@@ -1559,9 +1605,13 @@ module GoldLapel
 
   # --- Change streams (doc_watch / doc_unwatch) ---
 
-  def self.doc_watch(conn, collection, &block)
+  def self.doc_watch(conn, collection, patterns: nil, &block)
     _validate_identifier(collection)
+    table = _doc_table(patterns)
     raw = _raw_conn(conn)
+    # Trigger / function / channel names are keyed off the user's collection
+    # name (validated identifier — safe to interpolate). The trigger fires on
+    # the canonical proxy table.
     channel = "_gl_watch_#{collection}"
     fn_name = "_gl_notify_#{collection}"
 
@@ -1583,7 +1633,7 @@ module GoldLapel
     # dropped one. GL targets PG14+ across the product, so this is safe.
     raw.exec(
       "CREATE OR REPLACE TRIGGER #{fn_name}_trg " \
-      "AFTER INSERT OR UPDATE OR DELETE ON #{collection} " \
+      "AFTER INSERT OR UPDATE OR DELETE ON #{table} " \
       "FOR EACH ROW EXECUTE FUNCTION #{fn_name}()"
     )
 
@@ -1600,30 +1650,32 @@ module GoldLapel
     end
   end
 
-  def self.doc_unwatch(conn, collection)
+  def self.doc_unwatch(conn, collection, patterns: nil)
     _validate_identifier(collection)
+    table = _doc_table(patterns)
     raw = _raw_conn(conn)
     fn_name = "_gl_notify_#{collection}"
-    raw.exec("DROP TRIGGER IF EXISTS #{fn_name}_trg ON #{collection}")
+    raw.exec("DROP TRIGGER IF EXISTS #{fn_name}_trg ON #{table}")
     raw.exec("DROP FUNCTION IF EXISTS #{fn_name}()")
   end
 
   # --- TTL indexes (doc_create_ttl_index / doc_remove_ttl_index) ---
 
-  def self.doc_create_ttl_index(conn, collection, field, expire_after_seconds:)
+  def self.doc_create_ttl_index(conn, collection, field, expire_after_seconds:, patterns: nil)
     _validate_identifier(collection)
     # `field` is a JSONB key (interpolated below as data->>'#{field}'), not
     # a Postgres identifier — no 63-char NAMEDATALEN cap applies.
     unless field.to_s.match?(FIELD_PART_PATTERN)
       raise ArgumentError, "Invalid field key: #{field}"
     end
+    table = _doc_table(patterns)
     raw = _raw_conn(conn)
     fn_name = "_gl_ttl_#{collection}"
 
     raw.exec(
       "CREATE OR REPLACE FUNCTION #{fn_name}() RETURNS trigger AS $$ " \
       "BEGIN " \
-        "DELETE FROM #{collection} " \
+        "DELETE FROM #{table} " \
         "WHERE (data->>'#{field}')::timestamptz + " \
           "interval '#{expire_after_seconds.to_i} seconds' < NOW(); " \
         "RETURN NEW; " \
@@ -1634,34 +1686,34 @@ module GoldLapel
     # race documented in doc_watch.
     raw.exec(
       "CREATE OR REPLACE TRIGGER #{fn_name}_trg " \
-      "BEFORE INSERT ON #{collection} " \
+      "BEFORE INSERT ON #{table} " \
       "FOR EACH STATEMENT EXECUTE FUNCTION #{fn_name}()"
     )
   end
 
-  def self.doc_remove_ttl_index(conn, collection)
+  def self.doc_remove_ttl_index(conn, collection, patterns: nil)
     _validate_identifier(collection)
+    table = _doc_table(patterns)
     raw = _raw_conn(conn)
     fn_name = "_gl_ttl_#{collection}"
-    raw.exec("DROP TRIGGER IF EXISTS #{fn_name}_trg ON #{collection}")
+    raw.exec("DROP TRIGGER IF EXISTS #{fn_name}_trg ON #{table}")
     raw.exec("DROP FUNCTION IF EXISTS #{fn_name}()")
   end
 
   # --- Capped collections (doc_create_capped / doc_remove_cap) ---
 
-  def self.doc_create_capped(conn, collection, max:)
+  def self.doc_create_capped(conn, collection, max:, patterns: nil)
     _validate_identifier(collection)
+    table = _doc_table(patterns)
     raw = _raw_conn(conn)
-
-    _ensure_collection(raw, collection)
 
     fn_name = "_gl_cap_#{collection}"
 
     raw.exec(
       "CREATE OR REPLACE FUNCTION #{fn_name}() RETURNS trigger AS $$ " \
       "BEGIN " \
-        "DELETE FROM #{collection} WHERE _id IN (" \
-          "SELECT _id FROM #{collection} " \
+        "DELETE FROM #{table} WHERE _id IN (" \
+          "SELECT _id FROM #{table} " \
           "ORDER BY created_at DESC " \
           "OFFSET #{max.to_i}" \
         "); " \
@@ -1673,33 +1725,36 @@ module GoldLapel
     # race documented in doc_watch.
     raw.exec(
       "CREATE OR REPLACE TRIGGER #{fn_name}_trg " \
-      "AFTER INSERT ON #{collection} " \
+      "AFTER INSERT ON #{table} " \
       "FOR EACH STATEMENT EXECUTE FUNCTION #{fn_name}()"
     )
   end
 
-  def self.doc_remove_cap(conn, collection)
+  def self.doc_remove_cap(conn, collection, patterns: nil)
     _validate_identifier(collection)
+    table = _doc_table(patterns)
     raw = _raw_conn(conn)
     fn_name = "_gl_cap_#{collection}"
-    raw.exec("DROP TRIGGER IF EXISTS #{fn_name}_trg ON #{collection}")
+    raw.exec("DROP TRIGGER IF EXISTS #{fn_name}_trg ON #{table}")
     raw.exec("DROP FUNCTION IF EXISTS #{fn_name}()")
   end
 
-  def self.doc_create_collection(conn, collection, unlogged: false)
+  # No-op shim retained for callers that still hit the util surface directly.
+  # `gl.documents.create_collection(name, unlogged:)` invokes the proxy DDL
+  # via `DocumentsAPI#_patterns`; by the time this method is called, the
+  # canonical table has already been materialized on the proxy side. The
+  # `unlogged:` and other creation-time options are properties of `patterns`
+  # (and of the proxy DDL fetch that produced them) — passing them here is
+  # accepted for signature stability but ignored.
+  def self.doc_create_collection(conn, collection, unlogged: false, patterns: nil)
     _validate_identifier(collection)
-    raw = _raw_conn(conn)
-    _ensure_collection(raw, collection, unlogged: unlogged)
+    if patterns.nil?
+      raise RuntimeError,
+        "doc_create_collection requires DDL patterns from the proxy — call via " \
+        "`gl.documents.create_collection(...)` rather than the utils function directly."
+    end
+    nil
   end
-
-  def self._ensure_collection(raw, collection, unlogged: false)
-    prefix = unlogged ? "CREATE UNLOGGED TABLE" : "CREATE TABLE"
-    raw.exec("#{prefix} IF NOT EXISTS #{collection} (" \
-             "_id UUID PRIMARY KEY DEFAULT gen_random_uuid(), " \
-             "data JSONB NOT NULL, " \
-             "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
-  end
-  private_class_method :_ensure_collection
 
   def self._validate_identifier(name)
     # Bound to 63 chars (Postgres NAMEDATALEN-1) so identifiers match the

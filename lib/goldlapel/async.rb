@@ -90,7 +90,7 @@ module GoldLapel
     # anything between Popen and successful connect raises, Fiber-local
     # `using(conn)` scoped override, `conn:` per-call override.
     class Instance
-      attr_reader :upstream
+      attr_reader :upstream, :documents, :streams
 
       def initialize(
         upstream,
@@ -128,6 +128,14 @@ module GoldLapel
         @internal_conn = nil
         @wrapped_conn = nil
         @fiber_key = :"__goldlapel_async_conn_#{object_id}"
+
+        # Nested namespaces — async siblings of GoldLapel::DocumentsAPI /
+        # StreamsAPI. See goldlapel/async/documents.rb and async/streams.rb.
+        require "goldlapel/async/documents"
+        require "goldlapel/async/streams"
+        @documents = DocumentsAPI.new(self)
+        @streams = StreamsAPI.new(self)
+
         start! if eager_connect
       end
 
@@ -256,95 +264,7 @@ module GoldLapel
         end
       end
 
-      # --- Document methods ---
-
-      def doc_insert(collection, document, conn: nil)
-        Utils.doc_insert(_resolve_conn(conn), collection, document)
-      end
-
-      def doc_insert_many(collection, documents, conn: nil)
-        Utils.doc_insert_many(_resolve_conn(conn), collection, documents)
-      end
-
-      def doc_find(collection, filter: nil, sort: nil, limit: nil, skip: nil, conn: nil)
-        Utils.doc_find(_resolve_conn(conn), collection, filter: filter, sort: sort, limit: limit, skip: skip)
-      end
-
-      def doc_find_cursor(collection, filter: nil, sort: nil, limit: nil, skip: nil, batch_size: 100, conn: nil)
-        Utils.doc_find_cursor(_resolve_conn(conn), collection, filter: filter, sort: sort, limit: limit, skip: skip, batch_size: batch_size)
-      end
-
-      def doc_find_one(collection, filter: nil, conn: nil)
-        Utils.doc_find_one(_resolve_conn(conn), collection, filter: filter)
-      end
-
-      def doc_update(collection, filter, update, conn: nil)
-        Utils.doc_update(_resolve_conn(conn), collection, filter, update)
-      end
-
-      def doc_update_one(collection, filter, update, conn: nil)
-        Utils.doc_update_one(_resolve_conn(conn), collection, filter, update)
-      end
-
-      def doc_delete(collection, filter, conn: nil)
-        Utils.doc_delete(_resolve_conn(conn), collection, filter)
-      end
-
-      def doc_delete_one(collection, filter, conn: nil)
-        Utils.doc_delete_one(_resolve_conn(conn), collection, filter)
-      end
-
-      def doc_count(collection, filter: nil, conn: nil)
-        Utils.doc_count(_resolve_conn(conn), collection, filter: filter)
-      end
-
-      def doc_find_one_and_update(collection, filter, update, conn: nil)
-        Utils.doc_find_one_and_update(_resolve_conn(conn), collection, filter, update)
-      end
-
-      def doc_find_one_and_delete(collection, filter, conn: nil)
-        Utils.doc_find_one_and_delete(_resolve_conn(conn), collection, filter)
-      end
-
-      def doc_distinct(collection, field, filter: nil, conn: nil)
-        Utils.doc_distinct(_resolve_conn(conn), collection, field, filter: filter)
-      end
-
-      def doc_create_index(collection, keys: nil, conn: nil)
-        Utils.doc_create_index(_resolve_conn(conn), collection, keys: keys)
-      end
-
-      def doc_aggregate(collection, pipeline, conn: nil)
-        Utils.doc_aggregate(_resolve_conn(conn), collection, pipeline)
-      end
-
-      def doc_watch(collection, conn: nil, &block)
-        Utils.doc_watch(_resolve_conn(conn), collection, &block)
-      end
-
-      def doc_unwatch(collection, conn: nil)
-        Utils.doc_unwatch(_resolve_conn(conn), collection)
-      end
-
-      def doc_create_ttl_index(collection, field, expire_after_seconds:, conn: nil)
-        Utils.doc_create_ttl_index(_resolve_conn(conn), collection, field, expire_after_seconds: expire_after_seconds)
-      end
-
-      def doc_remove_ttl_index(collection, conn: nil)
-        Utils.doc_remove_ttl_index(_resolve_conn(conn), collection)
-      end
-
-      def doc_create_collection(collection, conn: nil, **opts)
-        Utils.doc_create_collection(_resolve_conn(conn), collection, **opts)
-      end
-
-      def doc_create_capped(collection, max:, conn: nil)
-        Utils.doc_create_capped(_resolve_conn(conn), collection, max: max)
-      end
-
-      def doc_remove_cap(collection, conn: nil)
-        Utils.doc_remove_cap(_resolve_conn(conn), collection)
-      end
+      # --- Document methods: gl.documents.<verb>(...). See goldlapel/async/documents.rb. ---
 
       # --- Search methods ---
 
@@ -478,41 +398,7 @@ module GoldLapel
         Utils.script(_resolve_conn(conn), lua_code, *args)
       end
 
-      # --- Stream methods ---
-
-      def stream_add(stream, payload, conn: nil)
-        patterns = _stream_patterns(stream)
-        Utils.stream_add(_resolve_conn(conn), stream, payload, patterns: patterns)
-      end
-
-      def stream_create_group(stream, group, conn: nil)
-        patterns = _stream_patterns(stream)
-        Utils.stream_create_group(_resolve_conn(conn), stream, group, patterns: patterns)
-      end
-
-      def stream_read(stream, group, consumer, count: 1, conn: nil)
-        patterns = _stream_patterns(stream)
-        Utils.stream_read(_resolve_conn(conn), stream, group, consumer, count: count, patterns: patterns)
-      end
-
-      def stream_ack(stream, group, message_id, conn: nil)
-        patterns = _stream_patterns(stream)
-        Utils.stream_ack(_resolve_conn(conn), stream, group, message_id, patterns: patterns)
-      end
-
-      def stream_claim(stream, group, consumer, min_idle_ms: 60000, conn: nil)
-        patterns = _stream_patterns(stream)
-        Utils.stream_claim(_resolve_conn(conn), stream, group, consumer, min_idle_ms: min_idle_ms, patterns: patterns)
-      end
-
-      # See GoldLapel::Instance#_stream_patterns — same semantics, cached on self.
-      def _stream_patterns(stream)
-        GoldLapel._validate_identifier(stream)
-        require "goldlapel/ddl"
-        token = (@proxy&.dashboard_token) || GoldLapel::DDL.token_from_env_or_file
-        port = @proxy&.dashboard_port
-        GoldLapel::DDL.fetch_patterns(self, "stream", stream, port, token)
-      end
+      # --- Stream methods: gl.streams.<verb>(...). See goldlapel/async/streams.rb. ---
 
       # --- Percolate methods ---
 

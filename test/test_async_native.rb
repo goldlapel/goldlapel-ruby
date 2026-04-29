@@ -252,14 +252,22 @@ class TestAsyncNativeIntegration < Minitest::Test
   def test_async_instance_uses_async_utils_not_sync_utils
     skip_unless_ready
 
-    # Source-level guard: Async::Instance must route through Async::Utils.
-    src = File.read(File.expand_path("../lib/goldlapel/async.rb", __dir__))
-    assert_match(/Utils\.doc_insert\b/, src,
-      "Async::Instance#doc_insert should delegate to Async::Utils.doc_insert")
-    assert_match(/Utils\.search\b/, src,
+    # Source-level guard: doc-store / search calls must route through the
+    # async Utils layer, never the sync one. Phase 4 split the doc verbs into
+    # `lib/goldlapel/async/documents.rb`, so check both files.
+    async_src = File.read(File.expand_path("../lib/goldlapel/async.rb", __dir__))
+    documents_src = File.read(File.expand_path("../lib/goldlapel/async/documents.rb", __dir__))
+
+    assert_match(/Utils\.doc_insert\b/, documents_src,
+      "Async::DocumentsAPI#insert should delegate to Async::Utils.doc_insert")
+    assert_match(/Utils\.search\b/, async_src,
       "Async::Instance#search should delegate to Async::Utils.search")
-    # And no GoldLapel.doc_insert (that's the sync module-level delegator)
-    refute_match(/\bGoldLapel\.doc_insert\b/, src,
+
+    # No sync GoldLapel.doc_* / GoldLapel.search delegations from the async
+    # entry points — that would defeat the cooperative-yield invariant.
+    refute_match(/\bGoldLapel\.doc_insert\b/, async_src,
       "Async::Instance should not route through the sync GoldLapel.* delegators")
+    refute_match(/\bGoldLapel\.doc_insert\b/, documents_src,
+      "Async::DocumentsAPI should not route through the sync GoldLapel.* delegators")
   end
 end

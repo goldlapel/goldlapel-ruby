@@ -15,7 +15,7 @@ module GoldLapel
   # The `using(conn)` scoped override uses a Fiber-local key so it correctly
   # composes with Ruby's `async` gem (Fiber-based concurrency).
   class Instance
-    attr_reader :upstream
+    attr_reader :upstream, :documents, :streams
 
     def initialize(
       upstream,
@@ -53,6 +53,19 @@ module GoldLapel
       @internal_conn = nil
       @wrapped_conn = nil
       @fiber_key = :"__goldlapel_conn_#{object_id}"
+
+      # Nested namespaces — see goldlapel/documents.rb and goldlapel/streams.rb.
+      # These are the canonical schema-to-core sub-API instances. Each holds a
+      # back-reference to this client for shared state (license, dashboard
+      # token, http session, conn, DDL pattern cache). Other namespaces (cache,
+      # search, queues, counters, hashes, zsets, geo, auth, ...) stay flat for
+      # now; they migrate to nested form one-at-a-time as their own
+      # schema-to-core phase fires.
+      require "goldlapel/documents"
+      require "goldlapel/streams"
+      @documents = DocumentsAPI.new(self)
+      @streams = StreamsAPI.new(self)
+
       start! if eager_connect
     end
 
@@ -209,95 +222,7 @@ module GoldLapel
       end
     end
 
-    # --- Document methods ---
-
-    def doc_insert(collection, document, conn: nil)
-      GoldLapel.doc_insert(_resolve_conn(conn), collection, document)
-    end
-
-    def doc_insert_many(collection, documents, conn: nil)
-      GoldLapel.doc_insert_many(_resolve_conn(conn), collection, documents)
-    end
-
-    def doc_find(collection, filter: nil, sort: nil, limit: nil, skip: nil, conn: nil)
-      GoldLapel.doc_find(_resolve_conn(conn), collection, filter: filter, sort: sort, limit: limit, skip: skip)
-    end
-
-    def doc_find_cursor(collection, filter: nil, sort: nil, limit: nil, skip: nil, batch_size: 100, conn: nil)
-      GoldLapel.doc_find_cursor(_resolve_conn(conn), collection, filter: filter, sort: sort, limit: limit, skip: skip, batch_size: batch_size)
-    end
-
-    def doc_find_one(collection, filter: nil, conn: nil)
-      GoldLapel.doc_find_one(_resolve_conn(conn), collection, filter: filter)
-    end
-
-    def doc_update(collection, filter, update, conn: nil)
-      GoldLapel.doc_update(_resolve_conn(conn), collection, filter, update)
-    end
-
-    def doc_update_one(collection, filter, update, conn: nil)
-      GoldLapel.doc_update_one(_resolve_conn(conn), collection, filter, update)
-    end
-
-    def doc_delete(collection, filter, conn: nil)
-      GoldLapel.doc_delete(_resolve_conn(conn), collection, filter)
-    end
-
-    def doc_delete_one(collection, filter, conn: nil)
-      GoldLapel.doc_delete_one(_resolve_conn(conn), collection, filter)
-    end
-
-    def doc_count(collection, filter: nil, conn: nil)
-      GoldLapel.doc_count(_resolve_conn(conn), collection, filter: filter)
-    end
-
-    def doc_find_one_and_update(collection, filter, update, conn: nil)
-      GoldLapel.doc_find_one_and_update(_resolve_conn(conn), collection, filter, update)
-    end
-
-    def doc_find_one_and_delete(collection, filter, conn: nil)
-      GoldLapel.doc_find_one_and_delete(_resolve_conn(conn), collection, filter)
-    end
-
-    def doc_distinct(collection, field, filter: nil, conn: nil)
-      GoldLapel.doc_distinct(_resolve_conn(conn), collection, field, filter: filter)
-    end
-
-    def doc_create_index(collection, keys: nil, conn: nil)
-      GoldLapel.doc_create_index(_resolve_conn(conn), collection, keys: keys)
-    end
-
-    def doc_aggregate(collection, pipeline, conn: nil)
-      GoldLapel.doc_aggregate(_resolve_conn(conn), collection, pipeline)
-    end
-
-    def doc_watch(collection, conn: nil, &block)
-      GoldLapel.doc_watch(_resolve_conn(conn), collection, &block)
-    end
-
-    def doc_unwatch(collection, conn: nil)
-      GoldLapel.doc_unwatch(_resolve_conn(conn), collection)
-    end
-
-    def doc_create_ttl_index(collection, field, expire_after_seconds:, conn: nil)
-      GoldLapel.doc_create_ttl_index(_resolve_conn(conn), collection, field, expire_after_seconds: expire_after_seconds)
-    end
-
-    def doc_remove_ttl_index(collection, conn: nil)
-      GoldLapel.doc_remove_ttl_index(_resolve_conn(conn), collection)
-    end
-
-    def doc_create_collection(collection, conn: nil, **opts)
-      GoldLapel.doc_create_collection(_resolve_conn(conn), collection, **opts)
-    end
-
-    def doc_create_capped(collection, max:, conn: nil)
-      GoldLapel.doc_create_capped(_resolve_conn(conn), collection, max: max)
-    end
-
-    def doc_remove_cap(collection, conn: nil)
-      GoldLapel.doc_remove_cap(_resolve_conn(conn), collection)
-    end
+    # --- Document methods: gl.documents.<verb>(...). See goldlapel/documents.rb. ---
 
     # --- Search methods ---
 
@@ -431,43 +356,7 @@ module GoldLapel
       GoldLapel.script(_resolve_conn(conn), lua_code, *args)
     end
 
-    # --- Stream methods ---
-
-    def stream_add(stream, payload, conn: nil)
-      patterns = _stream_patterns(stream)
-      GoldLapel.stream_add(_resolve_conn(conn), stream, payload, patterns: patterns)
-    end
-
-    def stream_create_group(stream, group, conn: nil)
-      patterns = _stream_patterns(stream)
-      GoldLapel.stream_create_group(_resolve_conn(conn), stream, group, patterns: patterns)
-    end
-
-    def stream_read(stream, group, consumer, count: 1, conn: nil)
-      patterns = _stream_patterns(stream)
-      GoldLapel.stream_read(_resolve_conn(conn), stream, group, consumer, count: count, patterns: patterns)
-    end
-
-    def stream_ack(stream, group, message_id, conn: nil)
-      patterns = _stream_patterns(stream)
-      GoldLapel.stream_ack(_resolve_conn(conn), stream, group, message_id, patterns: patterns)
-    end
-
-    def stream_claim(stream, group, consumer, min_idle_ms: 60000, conn: nil)
-      patterns = _stream_patterns(stream)
-      GoldLapel.stream_claim(_resolve_conn(conn), stream, group, consumer, min_idle_ms: min_idle_ms, patterns: patterns)
-    end
-
-    # Fetch (and cache per-instance) canonical DDL + query patterns for a stream.
-    # The DDL itself runs on the proxy side — this returns only the patterns
-    # the wrapper should execute.
-    def _stream_patterns(stream)
-      GoldLapel._validate_identifier(stream)
-      require "goldlapel/ddl"
-      token = (@proxy&.dashboard_token) || GoldLapel::DDL.token_from_env_or_file
-      port = @proxy&.dashboard_port
-      GoldLapel::DDL.fetch_patterns(self, "stream", stream, port, token)
-    end
+    # --- Stream methods: gl.streams.<verb>(...). See goldlapel/streams.rb. ---
 
     # --- Percolate methods ---
 

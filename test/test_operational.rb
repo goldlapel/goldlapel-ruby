@@ -5,6 +5,7 @@ require "json"
 require_relative "../lib/goldlapel/cache"
 require_relative "../lib/goldlapel/wrap"
 require_relative "../lib/goldlapel/utils"
+require_relative "_doc_patterns_helper"
 
 class OpMockResult
   attr_reader :values, :fields
@@ -259,14 +260,14 @@ end
 # --- doc_create_capped ---
 
 class TestDocCreateCapped < Minitest::Test
-  def test_creates_table_and_cap_trigger
+  def test_creates_only_cap_trigger
+    # Phase 4: proxy owns CREATE TABLE for doc-store. doc_create_capped only
+    # adds the cap trigger + function on top of the proxy-managed table.
     mock = OpMockConnection.new
     GoldLapel.doc_create_capped(mock, "logs", max: 1000)
 
-    create_table = mock.calls.find { |c| c[:sql].include?("CREATE TABLE IF NOT EXISTS logs") }
-    refute_nil create_table
-    assert_includes create_table[:sql], "_id UUID PRIMARY KEY DEFAULT gen_random_uuid()"
-    assert_includes create_table[:sql], "JSONB NOT NULL"
+    assert_nil mock.calls.find { |c| c[:sql].include?("CREATE TABLE") },
+               "doc_create_capped must not CREATE TABLE — proxy owns doc-store DDL"
 
     fn_calls = mock.calls.select { |c| c[:sql].include?("CREATE OR REPLACE FUNCTION") }
     assert_equal 1, fn_calls.length

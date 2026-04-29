@@ -5,6 +5,7 @@ require "json"
 require_relative "../lib/goldlapel/cache"
 require_relative "../lib/goldlapel/wrap"
 require_relative "../lib/goldlapel/utils"
+require_relative "_doc_patterns_helper"
 
 class CompMockResult
   attr_reader :values, :fields

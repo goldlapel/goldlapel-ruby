@@ -7,6 +7,8 @@ require_relative "../lib/goldlapel/wrap"
 require_relative "../lib/goldlapel/utils"
 require_relative "../lib/goldlapel/proxy"
 require_relative "../lib/goldlapel/instance"
+require_relative "../lib/goldlapel/documents"
+require_relative "../lib/goldlapel/streams"
 
 class InstanceMockResult
   attr_reader :values, :fields
@@ -62,7 +64,10 @@ class InstanceMockConnection
   def finished?; false; end
 end
 
-# Helper: build an Instance with a mock conn without spawning the proxy
+# Helper: build an Instance with a mock conn without spawning the proxy.
+# Sub-APIs (documents/streams) are wired up so `inst.documents.<verb>` works
+# in tests without going through Instance#initialize (which would try to
+# spawn the binary).
 def make_test_instance(mock_conn)
   inst = GoldLapel::Instance.allocate
   inst.instance_variable_set(:@upstream, "postgresql://localhost/test")
@@ -70,6 +75,8 @@ def make_test_instance(mock_conn)
   inst.instance_variable_set(:@wrapped_conn, mock_conn)
   inst.instance_variable_set(:@proxy, nil)
   inst.instance_variable_set(:@fiber_key, :"__goldlapel_conn_#{inst.object_id}")
+  inst.instance_variable_set(:@documents, GoldLapel::DocumentsAPI.new(inst))
+  inst.instance_variable_set(:@streams, GoldLapel::StreamsAPI.new(inst))
   inst
 end
 
@@ -81,7 +88,21 @@ def make_stopped_instance
   inst.instance_variable_set(:@wrapped_conn, nil)
   inst.instance_variable_set(:@proxy, nil)
   inst.instance_variable_set(:@fiber_key, :"__goldlapel_conn_#{inst.object_id}")
+  inst.instance_variable_set(:@documents, GoldLapel::DocumentsAPI.new(inst))
+  inst.instance_variable_set(:@streams, GoldLapel::StreamsAPI.new(inst))
   inst
+end
+
+# Stub DocumentsAPI._patterns so doc_* tests don't need a live dashboard.
+# Returns a stub keyed off the user collection name (the SQL still reads
+# `INSERT INTO users`, matching pre-Phase-4 assertions).
+def stub_doc_patterns_on(documents_api)
+  documents_api.define_singleton_method(:_patterns) do |collection, **_opts|
+    {
+      tables: { "main" => collection.to_s },
+      query_patterns: {},
+    }
+  end
 end
 
 # --- conn accessor ---
@@ -95,8 +116,9 @@ class TestInstanceConn < Minitest::Test
 
   def test_conn_nil_after_stop_raises
     inst = make_stopped_instance
+    stub_doc_patterns_on(inst.documents)
 
-    error = assert_raises(RuntimeError) { inst.doc_insert("col", { a: 1 }) }
+    error = assert_raises(RuntimeError) { inst.documents.insert("col", { a: 1 }) }
     assert_match(/Connection not available/, error.message)
   end
 
@@ -147,13 +169,14 @@ class TestInstanceConn < Minitest::Test
 
   def test_all_methods_raise_when_stopped
     inst = make_stopped_instance
+    # Stub DDL-fetching sub-APIs so the assertion homes in on _resolve_conn
+    # rather than the DDL fetch path (which has its own coverage in test_ddl.rb).
+    stub_doc_patterns_on(inst.documents)
+    inst.streams.define_singleton_method(:_patterns) do |_stream|
+      { query_patterns: {}, tables: { "main" => "_goldlapel.stream_x" } }
+    end
 
-    methods_with_args = {
-      doc_create_collection: ["col"],
-      doc_insert: ["col", { a: 1 }],
-      doc_find: ["col"],
-      doc_find_one: ["col"],
-      doc_count: ["col"],
+    flat_methods = {
       search: ["tbl", "col", "q"],
       incr: ["tbl", "key"],
       get_counter: ["tbl", "key"],
@@ -165,52 +188,56 @@ class TestInstanceConn < Minitest::Test
       enqueue: ["q", { a: 1 }],
       dequeue: ["q"],
       count_distinct: ["tbl", "col"],
-      stream_add: ["s", { a: 1 }],
       percolate_add: ["n", "qid", "q"],
       analyze: ["text"],
     }
-
-    methods_with_args.each do |method, args|
+    flat_methods.each do |method, args|
       error = assert_raises(RuntimeError, "Expected #{method} to raise") { inst.send(method, *args) }
-      # stream_* hits the DDL fetch first (no dashboard when stopped — no port/token).
-      # The error surface is still "a clear RuntimeError the caller can't miss";
-      # the exact message differs for streams because the failure cascade reaches
-      # goldlapel/ddl.rb before _resolve_conn. Accept either pattern.
-      expected = if method.to_s.start_with?("stream_")
-        /Connection not available|No dashboard port|No dashboard token/
-      else
-        /Connection not available/
-      end
-      assert_match(expected, error.message, "#{method} error message mismatch")
+      assert_match(/Connection not available/, error.message, "#{method} error message mismatch")
     end
+
+    # Sub-API verbs that touch a connection hit the same _resolve_conn guard.
+    # `create_collection` is a pure DDL-side fetch — when patterns are stubbed
+    # (no live dashboard), it returns nil without consulting the conn, which
+    # is the correct contract: an instance whose proxy is stopped can still
+    # ask `do you exist?` of a cached pattern. So it's not in this set.
+    documents_calls = {
+      insert: ["col", { a: 1 }],
+      find: ["col"],
+      find_one: ["col"],
+      count: ["col"],
+    }
+    documents_calls.each do |verb, args|
+      error = assert_raises(RuntimeError, "Expected documents.#{verb} to raise") do
+        inst.documents.send(verb, *args)
+      end
+      assert_match(/Connection not available/, error.message, "documents.#{verb} error mismatch")
+    end
+
+    error = assert_raises(RuntimeError, "Expected streams.add to raise") do
+      inst.streams.add("s", { a: 1 })
+    end
+    assert_match(/Connection not available/, error.message)
   end
 end
 
-# --- doc_create_collection delegation ---
+# --- documents.create_collection delegation ---
 
 class TestInstanceDocCreateCollection < Minitest::Test
-  def test_delegates_to_module
+  def test_no_op_when_patterns_supplied
+    # Phase 4: proxy owns DDL. Wrapper-side `documents.create_collection` is
+    # purely a pattern-fetch — no SQL flows through the customer's conn.
     mock = InstanceMockConnection.new
     inst = make_test_instance(mock)
+    stub_doc_patterns_on(inst.documents)
 
-    inst.doc_create_collection("events")
-    create_call = mock.calls.find { |c| c[:method] == :exec && c[:sql].include?("CREATE TABLE") }
-    refute_nil create_call
-    assert_includes create_call[:sql], "CREATE TABLE IF NOT EXISTS events"
-  end
-
-  def test_delegates_unlogged
-    mock = InstanceMockConnection.new
-    inst = make_test_instance(mock)
-
-    inst.doc_create_collection("temp_data", unlogged: true)
-    create_call = mock.calls.find { |c| c[:method] == :exec && c[:sql].include?("CREATE") }
-    refute_nil create_call
-    assert_includes create_call[:sql], "CREATE UNLOGGED TABLE IF NOT EXISTS temp_data"
+    inst.documents.create_collection("events")
+    assert_empty mock.calls,
+                 "documents.create_collection must not issue any SQL on the customer connection"
   end
 end
 
-# --- doc_insert delegation ---
+# --- documents.insert delegation ---
 
 class TestInstanceDocInsert < Minitest::Test
   def test_delegates_to_module
@@ -220,8 +247,9 @@ class TestInstanceDocInsert < Minitest::Test
     )
     mock = InstanceMockConnection.new("INSERT" => insert_result)
     inst = make_test_instance(mock)
+    stub_doc_patterns_on(inst.documents)
 
-    result = inst.doc_insert("users", { name: "Alice" })
+    result = inst.documents.insert("users", { name: "Alice" })
     assert_equal "550e8400-e29b-41d4-a716-446655440000", result["_id"]
     assert_equal({ "name" => "Alice" }, result["data"])
 
@@ -231,7 +259,7 @@ class TestInstanceDocInsert < Minitest::Test
   end
 end
 
-# --- doc_find delegation ---
+# --- documents.find delegation ---
 
 class TestInstanceDocFind < Minitest::Test
   def test_delegates_to_module
@@ -244,8 +272,9 @@ class TestInstanceDocFind < Minitest::Test
     )
     mock = InstanceMockConnection.new("SELECT" => find_result)
     inst = make_test_instance(mock)
+    stub_doc_patterns_on(inst.documents)
 
-    results = inst.doc_find("users")
+    results = inst.documents.find("users")
     assert_equal 2, results.length
     assert_equal "Alice", results[0]["data"]["name"]
   end
@@ -257,8 +286,9 @@ class TestInstanceDocFind < Minitest::Test
     )
     mock = InstanceMockConnection.new("SELECT" => find_result)
     inst = make_test_instance(mock)
+    stub_doc_patterns_on(inst.documents)
 
-    inst.doc_find("users", filter: { name: "Alice" })
+    inst.documents.find("users", filter: { name: "Alice" })
     select_call = mock.calls.find { |c| c[:method] == :exec_params && c[:sql].include?("SELECT") }
     refute_nil select_call
     assert_includes select_call[:sql], "@>"
@@ -365,7 +395,7 @@ class TestInstanceSortedSet < Minitest::Test
   end
 end
 
-# --- stream delegation ---
+# --- streams.* delegation ---
 
 class TestInstanceStreams < Minitest::Test
   def test_stream_add_delegates
@@ -375,17 +405,19 @@ class TestInstanceStreams < Minitest::Test
     )
     mock = InstanceMockConnection.new("INSERT" => add_result)
     inst = make_test_instance(mock)
-    # Stub _stream_patterns so we don't POST to a fake dashboard — the DDL
-    # fetch is covered end-to-end in test_ddl.rb / test_streams_integration.rb.
-    inst.define_singleton_method(:_stream_patterns) do |_stream|
+    # Stub _patterns on the streams sub-API so we don't POST to a fake
+    # dashboard — the DDL fetch is covered end-to-end in test_ddl.rb /
+    # test_streams_integration.rb.
+    inst.streams.define_singleton_method(:_patterns) do |_stream|
       {
         query_patterns: {
           "insert" => "INSERT INTO _goldlapel.stream_events (payload) VALUES ($1) RETURNING id, created_at",
         },
+        tables: { "main" => "_goldlapel.stream_events" },
       }
     end
 
-    result = inst.stream_add("events", { task: "test" })
+    result = inst.streams.add("events", { task: "test" })
     assert_equal 1, result["id"]
     # wrapper hydrates payload from the input hash (proxy pattern returns (id, created_at))
     assert_equal({ task: "test" }, result["payload"])

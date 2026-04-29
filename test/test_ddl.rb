@@ -83,6 +83,61 @@ class TestSupportedVersion < Minitest::Test
   def test_stream_is_v1
     assert_equal "v1", GoldLapel::DDL.supported_version("stream")
   end
+
+  def test_doc_store_is_v1
+    assert_equal "v1", GoldLapel::DDL.supported_version("doc_store")
+  end
+end
+
+class TestFetchDocStoreOptions < Minitest::Test
+  def setup
+    @srv = FakeDashboard.new
+  end
+
+  def teardown
+    @srv.stop
+  end
+
+  def test_doc_store_create_with_unlogged_option
+    @srv.responses << [200, {
+      "tables" => { "main" => "_goldlapel.doc_users" },
+      "query_patterns" => {},
+    }]
+    GoldLapel::DDL.fetch_patterns(
+      FakeOwner.new, "doc_store", "users", @srv.port, "tok",
+      options: { "unlogged" => true },
+    )
+    cap = @srv.captured[0]
+    assert_equal "/api/ddl/doc_store/create", cap[:path]
+    assert_equal({ "unlogged" => true }, cap[:body]["options"])
+  end
+
+  def test_doc_store_create_omits_options_when_not_passed
+    @srv.responses << [200, {
+      "tables" => { "main" => "_goldlapel.doc_users" },
+      "query_patterns" => {},
+    }]
+    GoldLapel::DDL.fetch_patterns(
+      FakeOwner.new, "doc_store", "users", @srv.port, "tok",
+    )
+    cap = @srv.captured[0]
+    refute cap[:body].key?("options"),
+           "no `options` field should be sent when caller didn't pass one"
+  end
+
+  def test_doc_store_create_omits_empty_options
+    @srv.responses << [200, {
+      "tables" => { "main" => "_goldlapel.doc_users" },
+      "query_patterns" => {},
+    }]
+    GoldLapel::DDL.fetch_patterns(
+      FakeOwner.new, "doc_store", "users", @srv.port, "tok",
+      options: {},
+    )
+    cap = @srv.captured[0]
+    refute cap[:body].key?("options"),
+           "empty options hash should not be sent on the wire"
+  end
 end
 
 class TestFetchHappyPath < Minitest::Test
