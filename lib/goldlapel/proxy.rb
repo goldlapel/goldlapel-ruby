@@ -313,16 +313,44 @@ module GoldLapel
             "install the platform-specific package, or ensure 'goldlapel' is on PATH."
     end
 
+    # Wrapper version, read from the loaded gem spec or the GEM_VERSION env
+    # var (set by CI at publish time). Local dev installs return "0.0.0".
+    # Used to build the application_name marker on PG connections so the proxy
+    # can classify wrapper-vs-raw traffic and gate L2 result cache.
+    def self.wrapper_version
+      spec = Gem.loaded_specs["goldlapel"]
+      return spec.version.to_s if spec && spec.version
+      ENV.fetch("GEM_VERSION", "0.0.0")
+    rescue StandardError
+      "0.0.0"
+    end
+
+    def self.application_name_marker
+      "goldlapel:ruby:#{wrapper_version}"
+    end
+
+    # Append `application_name=goldlapel:ruby:<version>` to `url` unless it
+    # already has one (or PGAPPNAME is set in the env). The marker tells the
+    # proxy this is wrapper traffic, so it can skip L2 result cache (the
+    # wrapper has its own L1). Idempotent and override-respecting.
+    def self.inject_application_name(url)
+      return url if url =~ /[?&]application_name=/
+      return url if ENV["PGAPPNAME"] && !ENV["PGAPPNAME"].empty?
+      sep = url.include?("?") ? "&" : "?"
+      "#{url}#{sep}application_name=#{application_name_marker}"
+    end
+
     def self.make_proxy_url(upstream, port)
       # pg URL with explicit port
       if upstream =~ /\A(postgres(?:ql)?:\/\/(?:.*@)?)([^:\/?#]+):(\d+)(.*)\z/
-        return "#{$1}localhost:#{port}#{$4}"
+        return inject_application_name("#{$1}localhost:#{port}#{$4}")
       end
       # pg URL without port
       if upstream =~ /\A(postgres(?:ql)?:\/\/(?:.*@)?)([^:\/?#]+)(.*)\z/
-        return "#{$1}localhost:#{port}#{$3}"
+        return inject_application_name("#{$1}localhost:#{port}#{$3}")
       end
-      # bare host:port (guard against scheme colons)
+      # bare host:port (guard against scheme colons).
+      # Bare-host form skips the marker — atypical caller path.
       if !upstream.include?("://") && upstream.include?(":")
         return "localhost:#{port}"
       end
