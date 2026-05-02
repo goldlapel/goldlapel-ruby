@@ -48,19 +48,34 @@ class TestFindBinary < Minitest::Test
 end
 
 class TestMakeProxyUrl < Minitest::Test
+  # The wrapper appends `application_name=goldlapel:ruby:<version>` to the
+  # rewritten URL so the proxy can classify wrapper-vs-raw traffic and skip
+  # L2 result cache for wrappers (they have their own L1).
+  APP_NAME_SUFFIX = "application_name=#{GoldLapel::Proxy.application_name_marker}"
+
+  def setup
+    @orig_pgappname = ENV["PGAPPNAME"]
+    ENV.delete("PGAPPNAME")
+  end
+
+  def teardown
+    @orig_pgappname ? ENV["PGAPPNAME"] = @orig_pgappname : ENV.delete("PGAPPNAME")
+  end
+
   def test_postgresql_url
     url = "postgresql://user:pass@remotehost:5432/mydb"
-    assert_equal "postgresql://user:pass@localhost:7932/mydb",
+    assert_equal "postgresql://user:pass@localhost:7932/mydb?#{APP_NAME_SUFFIX}",
                  GoldLapel::Proxy.make_proxy_url(url, 7932)
   end
 
   def test_postgres_url
     url = "postgres://user:pass@dbhost:5432/mydb"
-    assert_equal "postgres://user:pass@localhost:7932/mydb",
+    assert_equal "postgres://user:pass@localhost:7932/mydb?#{APP_NAME_SUFFIX}",
                  GoldLapel::Proxy.make_proxy_url(url, 7932)
   end
 
   def test_bare_host_port
+    # Bare-host form skips the marker — atypical caller path.
     assert_equal "localhost:7932",
                  GoldLapel::Proxy.make_proxy_url("remotehost:5432", 7932)
   end
@@ -72,62 +87,107 @@ class TestMakeProxyUrl < Minitest::Test
 
   def test_preserves_params
     url = "postgresql://user:pass@remotehost:5432/mydb?sslmode=require"
-    assert_equal "postgresql://user:pass@localhost:7932/mydb?sslmode=require",
+    assert_equal "postgresql://user:pass@localhost:7932/mydb?sslmode=require&#{APP_NAME_SUFFIX}",
                  GoldLapel::Proxy.make_proxy_url(url, 7932)
   end
 
   def test_preserves_percent_encoded_password
     url = "postgresql://user:p%40ss@remotehost:5432/mydb"
-    assert_equal "postgresql://user:p%40ss@localhost:7932/mydb",
+    assert_equal "postgresql://user:p%40ss@localhost:7932/mydb?#{APP_NAME_SUFFIX}",
                  GoldLapel::Proxy.make_proxy_url(url, 7932)
   end
 
   def test_no_userinfo
     url = "postgresql://remotehost:5432/mydb"
-    assert_equal "postgresql://localhost:7932/mydb",
+    assert_equal "postgresql://localhost:7932/mydb?#{APP_NAME_SUFFIX}",
                  GoldLapel::Proxy.make_proxy_url(url, 7932)
   end
 
   def test_pg_url_without_port
     url = "postgresql://user:pass@remotehost/mydb"
-    assert_equal "postgresql://user:pass@localhost:7932/mydb",
+    assert_equal "postgresql://user:pass@localhost:7932/mydb?#{APP_NAME_SUFFIX}",
                  GoldLapel::Proxy.make_proxy_url(url, 7932)
   end
 
   def test_pg_url_without_port_or_path
     url = "postgresql://user:pass@remotehost"
-    assert_equal "postgresql://user:pass@localhost:7932",
+    assert_equal "postgresql://user:pass@localhost:7932?#{APP_NAME_SUFFIX}",
                  GoldLapel::Proxy.make_proxy_url(url, 7932)
   end
 
   def test_no_userinfo_no_port
     url = "postgresql://remotehost/mydb"
-    assert_equal "postgresql://localhost:7932/mydb",
+    assert_equal "postgresql://localhost:7932/mydb?#{APP_NAME_SUFFIX}",
                  GoldLapel::Proxy.make_proxy_url(url, 7932)
   end
 
   def test_literal_at_in_password
     url = "postgresql://user:p@ss@remotehost:5432/mydb"
-    assert_equal "postgresql://user:p@ss@localhost:7932/mydb",
+    assert_equal "postgresql://user:p@ss@localhost:7932/mydb?#{APP_NAME_SUFFIX}",
                  GoldLapel::Proxy.make_proxy_url(url, 7932)
   end
 
   def test_at_sign_in_password_without_port
     url = "postgresql://user:p@ss@host/mydb"
-    assert_equal "postgresql://user:p@ss@localhost:7932/mydb",
+    assert_equal "postgresql://user:p@ss@localhost:7932/mydb?#{APP_NAME_SUFFIX}",
                  GoldLapel::Proxy.make_proxy_url(url, 7932)
   end
 
   def test_at_sign_in_password_with_query_params
     url = "postgresql://user:p@ss@host:5432/mydb?sslmode=require&param=val@ue"
-    assert_equal "postgresql://user:p@ss@localhost:7932/mydb?sslmode=require&param=val@ue",
+    assert_equal "postgresql://user:p@ss@localhost:7932/mydb?sslmode=require&param=val@ue&#{APP_NAME_SUFFIX}",
                  GoldLapel::Proxy.make_proxy_url(url, 7932)
   end
 
   def test_localhost_stays_localhost
     url = "postgresql://user:pass@localhost:5432/mydb"
-    assert_equal "postgresql://user:pass@localhost:7932/mydb",
+    assert_equal "postgresql://user:pass@localhost:7932/mydb?#{APP_NAME_SUFFIX}",
                  GoldLapel::Proxy.make_proxy_url(url, 7932)
+  end
+end
+
+
+class TestApplicationNameMarker < Minitest::Test
+  # L2-router architecture: wrappers identify themselves to the proxy via PG
+  # `application_name` so the proxy can gate L2 result cache (wrapper has L1;
+  # raw clients don't).
+
+  def setup
+    @orig_pgappname = ENV["PGAPPNAME"]
+    ENV.delete("PGAPPNAME")
+  end
+
+  def teardown
+    @orig_pgappname ? ENV["PGAPPNAME"] = @orig_pgappname : ENV.delete("PGAPPNAME")
+  end
+
+  def test_marker_format
+    marker = GoldLapel::Proxy.application_name_marker
+    assert_match(/\Agoldlapel:ruby:.+\z/, marker)
+  end
+
+  def test_marker_appended_with_no_existing_query
+    out = GoldLapel::Proxy.make_proxy_url("postgresql://localhost:5432/mydb", 7932)
+    assert_includes out, "?application_name=goldlapel:ruby:"
+  end
+
+  def test_marker_appended_with_existing_query
+    out = GoldLapel::Proxy.make_proxy_url("postgresql://localhost:5432/mydb?sslmode=require", 7932)
+    assert_includes out, "sslmode=require"
+    assert_includes out, "&application_name=goldlapel:ruby:"
+  end
+
+  def test_user_override_via_url_respected
+    out = GoldLapel::Proxy.make_proxy_url("postgresql://localhost:5432/mydb?application_name=my-app", 7932)
+    assert_includes out, "application_name=my-app"
+    refute_includes out, "goldlapel:ruby"
+  end
+
+  def test_user_override_via_pgappname_respected
+    ENV["PGAPPNAME"] = "my-app"
+    out = GoldLapel::Proxy.make_proxy_url("postgresql://localhost:5432/mydb", 7932)
+    refute_includes out, "application_name="
+    refute_includes out, "goldlapel:ruby"
   end
 end
 
@@ -424,6 +484,10 @@ class TestModuleFunctions < Minitest::Test
 end
 
 class TestMultiInstance < Minitest::Test
+  # The wrapper appends `application_name=goldlapel:ruby:<version>` to every
+  # rewritten URL. We compute it once and append in each `expected_url` below.
+  APP_NAME_SUFFIX = "?application_name=#{GoldLapel::Proxy.application_name_marker}"
+
   # Helper: inject a fake proxy instance into the registry for testing
   # without actually spawning a binary.
   FakeProxy = Struct.new(:upstream, :url, :dashboard_url, :alive) do
@@ -444,11 +508,14 @@ class TestMultiInstance < Minitest::Test
   end
 
   def setup
+    @orig_pgappname = ENV["PGAPPNAME"]
+    ENV.delete("PGAPPNAME")
     GoldLapel::Proxy.stop
   end
 
   def teardown
     GoldLapel::Proxy.stop
+    @orig_pgappname ? ENV["PGAPPNAME"] = @orig_pgappname : ENV.delete("PGAPPNAME")
   end
 
   def inject_fake(upstream, port)
@@ -489,15 +556,15 @@ class TestMultiInstance < Minitest::Test
     inject_fake(up1, 7932)
     inject_fake(up2, 7934)
 
-    assert_equal "postgresql://localhost:7932/db1", GoldLapel::Proxy.proxy_url(up1)
-    assert_equal "postgresql://localhost:7934/db2", GoldLapel::Proxy.proxy_url(up2)
+    assert_equal "postgresql://localhost:7932/db1#{APP_NAME_SUFFIX}", GoldLapel::Proxy.proxy_url(up1)
+    assert_equal "postgresql://localhost:7934/db2#{APP_NAME_SUFFIX}", GoldLapel::Proxy.proxy_url(up2)
   end
 
   def test_proxy_url_without_upstream_returns_first
     up1 = "postgresql://host1:5432/db1"
     inject_fake(up1, 7932)
 
-    assert_equal "postgresql://localhost:7932/db1", GoldLapel::Proxy.proxy_url
+    assert_equal "postgresql://localhost:7932/db1#{APP_NAME_SUFFIX}", GoldLapel::Proxy.proxy_url
   end
 
   def test_dashboard_url_with_specific_upstream
@@ -527,7 +594,7 @@ class TestMultiInstance < Minitest::Test
 
     refute fake1.running?
     assert_nil GoldLapel::Proxy.proxy_url(up1)
-    assert_equal "postgresql://localhost:7934/db2", GoldLapel::Proxy.proxy_url(up2)
+    assert_equal "postgresql://localhost:7934/db2#{APP_NAME_SUFFIX}", GoldLapel::Proxy.proxy_url(up2)
     assert_equal 1, GoldLapel::Proxy.instances.size
   end
 
@@ -558,14 +625,14 @@ class TestMultiInstance < Minitest::Test
     GoldLapel.stop(up1)
 
     assert_nil GoldLapel.proxy_url(up1)
-    assert_equal "postgresql://localhost:7934/db2", GoldLapel.proxy_url(up2)
+    assert_equal "postgresql://localhost:7934/db2#{APP_NAME_SUFFIX}", GoldLapel.proxy_url(up2)
   end
 
   def test_module_level_proxy_url_delegates_upstream
     up1 = "postgresql://host1:5432/db1"
     inject_fake(up1, 7932)
 
-    assert_equal "postgresql://localhost:7932/db1", GoldLapel.proxy_url(up1)
+    assert_equal "postgresql://localhost:7932/db1#{APP_NAME_SUFFIX}", GoldLapel.proxy_url(up1)
   end
 
   def test_module_level_dashboard_url_delegates_upstream
@@ -584,7 +651,7 @@ class TestMultiInstance < Minitest::Test
       existing = GoldLapel::Proxy.instance_variable_get(:@instances)[up1]
       existing.url if existing&.running?
     end
-    assert_equal "postgresql://localhost:7932/db1", url
+    assert_equal "postgresql://localhost:7932/db1#{APP_NAME_SUFFIX}", url
   end
 
   def test_proxy_url_returns_nil_for_unknown_upstream
