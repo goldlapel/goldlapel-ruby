@@ -1,5 +1,6 @@
 require "minitest/autorun"
 require "socket"
+require "json"
 require_relative "../lib/goldlapel/cache"
 
 class TestDetectWrite < Minitest::Test
@@ -552,5 +553,403 @@ class TestCachedResult < Minitest::Test
   def test_size_returns_ntuples
     result = GoldLapel::CachedResult.new([["1"], ["2"]], ["id"])
     assert_equal 2, result.size
+  end
+end
+
+
+# --- L1 telemetry: counters + snapshot shape ---
+
+class TestEvictionsCounter < Minitest::Test
+  def setup
+    GoldLapel::NativeCache.reset!
+    ENV["GOLDLAPEL_NATIVE_CACHE_SIZE"] = "4"
+    @cache = GoldLapel::NativeCache.new
+    @cache.instance_variable_set(:@invalidation_connected, true)
+  end
+
+  def teardown
+    ENV.delete("GOLDLAPEL_NATIVE_CACHE_SIZE")
+    GoldLapel::NativeCache.reset!
+  end
+
+  def test_evictions_counter_starts_zero
+    assert_equal 0, @cache.stats_evictions
+  end
+
+  def test_evictions_counter_bumps_on_overflow
+    8.times do |i|
+      @cache.put("SELECT #{i}", nil, [[i.to_s]], [])
+    end
+    # 8 puts, capacity 4 → 4 evictions.
+    assert_equal 4, @cache.stats_evictions
+  end
+
+  def test_evictions_counter_no_bump_within_capacity
+    ENV["GOLDLAPEL_NATIVE_CACHE_SIZE"] = "8"
+    GoldLapel::NativeCache.reset!
+    cache = GoldLapel::NativeCache.new
+    cache.instance_variable_set(:@invalidation_connected, true)
+    4.times do |i|
+      cache.put("SELECT #{i}", nil, [[i.to_s]], [])
+    end
+    assert_equal 0, cache.stats_evictions
+  end
+end
+
+
+class TestSnapshotShape < Minitest::Test
+  def setup
+    GoldLapel::NativeCache.reset!
+    ENV["GOLDLAPEL_NATIVE_CACHE_SIZE"] = "64"
+    @cache = GoldLapel::NativeCache.new
+    @cache.instance_variable_set(:@invalidation_connected, true)
+  end
+
+  def teardown
+    ENV.delete("GOLDLAPEL_NATIVE_CACHE_SIZE")
+    GoldLapel::NativeCache.reset!
+  end
+
+  def test_snapshot_carries_required_fields
+    @cache.put("SELECT 1", nil, [["1"]], [])
+    @cache.get("SELECT 1", nil)
+    @cache.get("SELECT MISS", nil)
+    snap = @cache.send(:build_snapshot)
+    assert_equal @cache.wrapper_id, snap["wrapper_id"]
+    assert_equal "ruby", snap["lang"]
+    assert snap.key?("version")
+    assert_equal 1, snap["hits"]
+    assert_equal 1, snap["misses"]
+    assert_equal 0, snap["evictions"]
+    assert_equal 0, snap["invalidations"]
+    assert_equal 1, snap["current_size_entries"]
+    assert_equal 64, snap["capacity_entries"]
+  end
+
+  def test_wrapper_id_is_uuid_v4
+    # Format: 8-4-4-4-12 hex chars; version nibble is 4.
+    assert_match(/\A\h{8}-\h{4}-4\h{3}-[89ab]\h{3}-\h{12}\z/i, @cache.wrapper_id)
+  end
+
+  def test_wrapper_id_stable_across_calls
+    a = @cache.send(:build_snapshot)["wrapper_id"]
+    b = @cache.send(:build_snapshot)["wrapper_id"]
+    assert_equal a, b
+  end
+
+  def test_wrapper_lang_is_ruby
+    assert_equal "ruby", @cache.wrapper_lang
+  end
+end
+
+
+# --- L1 telemetry: state-change emission (unit, no socket) ---
+
+class TestEvictionRateStateChange < Minitest::Test
+  def setup
+    GoldLapel::NativeCache.reset!
+    ENV["GOLDLAPEL_NATIVE_CACHE_SIZE"] = "4"
+    @cache = GoldLapel::NativeCache.new
+    @cache.instance_variable_set(:@invalidation_connected, true)
+    # Capture emissions in lieu of a socket.
+    @emissions = emissions = []
+    @cache.define_singleton_method(:send_line) { |line| emissions << line }
+  end
+
+  def teardown
+    ENV.delete("GOLDLAPEL_NATIVE_CACHE_SIZE")
+    GoldLapel::NativeCache.reset!
+  end
+
+  def test_cache_full_fires_when_evictions_dominate
+    # Capacity 4 — every put past the 4th evicts. Window = 200 puts.
+    (GoldLapel::EVICT_RATE_WINDOW + 10).times do |i|
+      @cache.put("SELECT #{i}", nil, [[i.to_s]], [])
+    end
+    s_lines = @emissions.select { |e| e.include?("cache_full") }
+    refute_empty s_lines, "expected at least one cache_full emission"
+    # Latched — second pass should NOT re-emit cache_full.
+    before = s_lines.length
+    50.times do |i|
+      @cache.put("SELECT extra #{i}", nil, [[i.to_s]], [])
+    end
+    s_lines2 = @emissions.select { |e| e.include?("cache_full") }
+    assert_equal before, s_lines2.length, "cache_full re-emitted; latch broken"
+  end
+
+  def test_cache_full_does_not_fire_below_window
+    # With fewer puts than the window, no state-change fires (warmup gate).
+    (GoldLapel::EVICT_RATE_WINDOW - 1).times do |i|
+      @cache.put("SELECT #{i}", nil, [[i.to_s]], [])
+    end
+    refute @emissions.any? { |e| e.include?("cache_full") }
+  end
+
+  def test_state_lines_carry_state_field
+    (GoldLapel::EVICT_RATE_WINDOW + 5).times do |i|
+      @cache.put("SELECT #{i}", nil, [[i.to_s]], [])
+    end
+    s_line = @emissions.find { |e| e.start_with?("S:") && e.include?("cache_full") }
+    refute_nil s_line
+    payload = JSON.parse(s_line[2..])
+    assert_equal "cache_full", payload["state"]
+    assert_equal @cache.wrapper_id, payload["wrapper_id"]
+    assert_equal "ruby", payload["lang"]
+    assert payload.key?("ts_ms")
+  end
+end
+
+
+class TestProcessRequest < Minitest::Test
+  def setup
+    GoldLapel::NativeCache.reset!
+    @cache = GoldLapel::NativeCache.new
+    @cache.instance_variable_set(:@invalidation_connected, true)
+    @emissions = emissions = []
+    @cache.define_singleton_method(:send_line) { |line| emissions << line }
+  end
+
+  def teardown
+    GoldLapel::NativeCache.reset!
+  end
+
+  def test_request_snapshot_emits_response
+    @cache.send(:process_request, "snapshot")
+    r_lines = @emissions.select { |e| e.start_with?("R:") }
+    assert_equal 1, r_lines.length
+    payload = JSON.parse(r_lines[0][2..])
+    assert_equal @cache.wrapper_id, payload["wrapper_id"]
+  end
+
+  def test_request_empty_body_treated_as_snapshot
+    @cache.send(:process_request, "")
+    r_lines = @emissions.select { |e| e.start_with?("R:") }
+    assert_equal 1, r_lines.length
+  end
+
+  def test_request_unknown_body_silently_dropped
+    @cache.send(:process_request, "future_request_type")
+    r_lines = @emissions.select { |e| e.start_with?("R:") }
+    assert_empty r_lines
+  end
+
+  def test_process_signal_question_routes_to_request
+    @cache.process_signal("?:snapshot")
+    r_lines = @emissions.select { |e| e.start_with?("R:") }
+    assert_equal 1, r_lines.length
+  end
+
+  def test_process_signal_unknown_silently_ignored
+    # Backwards-compat: future proxy prefixes must not crash.
+    @cache.process_signal("Z:future-prefix")
+    @cache.process_signal("$:bogus")
+    @cache.process_signal("")
+  end
+
+  def test_emit_wrapper_disconnected_emits_state_event
+    @cache.emit_wrapper_disconnected
+    s_lines = @emissions.select { |e| e.start_with?("S:") }
+    assert_equal 1, s_lines.length
+    payload = JSON.parse(s_lines[0][2..])
+    assert_equal "wrapper_disconnected", payload["state"]
+    assert_equal @cache.wrapper_id, payload["wrapper_id"]
+  end
+
+  def test_report_stats_disabled_suppresses_unit_emissions
+    ENV["GOLDLAPEL_REPORT_STATS"] = "false"
+    begin
+      GoldLapel::NativeCache.reset!
+      cache = GoldLapel::NativeCache.new
+    ensure
+      ENV.delete("GOLDLAPEL_REPORT_STATS")
+    end
+    refute cache.report_stats?
+    emissions = []
+    cache.define_singleton_method(:send_line) { |line| emissions << line }
+    cache.send(:process_request, "snapshot")
+    cache.emit_wrapper_disconnected
+    cache.send(:emit_state_change, "test")
+    assert_empty emissions, "report_stats=false should suppress all emissions"
+  end
+end
+
+
+# --- L1 telemetry: state-change emission via real socket ---
+
+class TestStateChangeEmission < Minitest::Test
+  def setup
+    GoldLapel::NativeCache.reset!
+  end
+
+  def teardown
+    GoldLapel::NativeCache.reset!
+  end
+
+  def _spawn_server
+    server = TCPServer.new("127.0.0.1", 0)
+    [server, server.addr[1]]
+  end
+
+  def _wait_for(timeout: 2.0, interval: 0.02)
+    deadline = Time.now + timeout
+    while Time.now < deadline
+      return true if yield
+      sleep interval
+    end
+    false
+  end
+
+  def _accept_with_buf(server)
+    conn = server.accept
+    lines = []
+    lines_mutex = Mutex.new
+    stop = false
+    reader = Thread.new do
+      buf = ""
+      until stop
+        begin
+          ready = IO.select([conn], nil, nil, 0.2)
+          next unless ready
+          chunk = conn.read_nonblock(4096)
+          buf += chunk
+          while (idx = buf.index("\n"))
+            line = buf[0...idx]
+            buf = buf[(idx + 1)..]
+            lines_mutex.synchronize { lines << line }
+          end
+        rescue IO::WaitReadable
+          next
+        rescue EOFError, IOError, Errno::ECONNRESET
+          break
+        end
+      end
+    end
+    snapshot_lines = -> { lines_mutex.synchronize { lines.dup } }
+    stop_fn = lambda do
+      stop = true
+      conn.close rescue nil
+      reader.join(2)
+    end
+    [conn, snapshot_lines, stop_fn]
+  end
+
+  def test_wrapper_connected_emitted_on_socket_connect
+    cache = GoldLapel::NativeCache.new
+    server, port = _spawn_server
+    begin
+      cache.connect_invalidation(port)
+      conn, snapshot_lines, stop_fn = _accept_with_buf(server)
+      begin
+        _wait_for { snapshot_lines.call.any? { |l| l.start_with?("S:") } }
+        s_lines = snapshot_lines.call.select { |l| l.start_with?("S:") }
+        refute_empty s_lines, "expected S: line, got #{snapshot_lines.call.inspect}"
+        payload = JSON.parse(s_lines[0][2..])
+        assert_equal "wrapper_connected", payload["state"]
+        assert_equal cache.wrapper_id, payload["wrapper_id"]
+        assert_equal "ruby", payload["lang"]
+      ensure
+        stop_fn.call
+      end
+    ensure
+      cache.stop_invalidation
+      server.close
+    end
+  end
+
+  def test_snapshot_request_returns_response
+    cache = GoldLapel::NativeCache.new
+    cache.instance_variable_set(:@invalidation_connected, true)
+    cache.put("SELECT 1", nil, [["1"]], [])
+    cache.get("SELECT 1", nil)
+    # Reset the connected flag so connect_invalidation flips it for real.
+    cache.instance_variable_set(:@invalidation_connected, false)
+    server, port = _spawn_server
+    begin
+      cache.connect_invalidation(port)
+      conn, snapshot_lines, stop_fn = _accept_with_buf(server)
+      begin
+        _wait_for { snapshot_lines.call.any? { |l| l.start_with?("S:") } }
+        # Send the snapshot request from the "proxy" side.
+        conn.write("?:snapshot\n")
+        _wait_for { snapshot_lines.call.any? { |l| l.start_with?("R:") } }
+        r_lines = snapshot_lines.call.select { |l| l.start_with?("R:") }
+        refute_empty r_lines, "expected R: line, got #{snapshot_lines.call.inspect}"
+        payload = JSON.parse(r_lines[0][2..])
+        assert_equal cache.wrapper_id, payload["wrapper_id"]
+        assert_equal 1, payload["hits"]
+        assert_equal 1, payload["current_size_entries"]
+        # R: lines must NOT carry a state field.
+        refute payload.key?("state"), "R: payload must not include state"
+      ensure
+        stop_fn.call
+      end
+    ensure
+      cache.stop_invalidation
+      server.close
+    end
+  end
+
+  def test_report_stats_disabled_suppresses_emissions
+    ENV["GOLDLAPEL_REPORT_STATS"] = "false"
+    begin
+      GoldLapel::NativeCache.reset!
+      cache = GoldLapel::NativeCache.new
+    ensure
+      ENV.delete("GOLDLAPEL_REPORT_STATS")
+    end
+    refute cache.report_stats?
+    server, port = _spawn_server
+    begin
+      cache.connect_invalidation(port)
+      conn, snapshot_lines, stop_fn = _accept_with_buf(server)
+      begin
+        sleep 0.2
+        conn.write("?:snapshot\n")
+        sleep 0.2
+        out = snapshot_lines.call.select { |l| l.start_with?("S:") || l.start_with?("R:") }
+        assert_empty out, "expected no S/R lines, got #{out.inspect}"
+      ensure
+        stop_fn.call
+      end
+    ensure
+      cache.stop_invalidation
+      server.close
+    end
+  end
+
+  def test_cache_full_emitted_after_eviction_burst_over_socket
+    ENV["GOLDLAPEL_NATIVE_CACHE_SIZE"] = "4"
+    begin
+      GoldLapel::NativeCache.reset!
+      cache = GoldLapel::NativeCache.new
+    ensure
+      ENV.delete("GOLDLAPEL_NATIVE_CACHE_SIZE")
+    end
+    server, port = _spawn_server
+    begin
+      cache.connect_invalidation(port)
+      conn, snapshot_lines, stop_fn = _accept_with_buf(server)
+      begin
+        # Wait for wrapper_connected so the socket is wired.
+        _wait_for { snapshot_lines.call.any? { |l| l.start_with?("S:") } }
+        # Push more puts than the eviction window so cache_full latches.
+        (GoldLapel::EVICT_RATE_WINDOW + 10).times do |i|
+          cache.put("SELECT #{i}", nil, [[i.to_s]], [])
+        end
+        _wait_for(timeout: 3.0) do
+          snapshot_lines.call.any? { |l| l.include?("cache_full") }
+        end
+        full_lines = snapshot_lines.call.select { |l| l.include?("cache_full") }
+        refute_empty full_lines, "expected cache_full S: line, got #{snapshot_lines.call.inspect}"
+        payload = JSON.parse(full_lines[0][2..])
+        assert_equal "cache_full", payload["state"]
+        assert_equal cache.wrapper_id, payload["wrapper_id"]
+      ensure
+        stop_fn.call
+      end
+    ensure
+      cache.stop_invalidation
+      server.close
+    end
   end
 end

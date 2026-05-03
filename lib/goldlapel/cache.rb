@@ -2,11 +2,31 @@
 
 require "socket"
 require "set"
+require "json"
+require "securerandom"
 
 module GoldLapel
   DDL_SENTINEL = "__ddl__"
   TX_START = /\A\s*(BEGIN|START\s+TRANSACTION)\b/i
   TX_END = /\A\s*(COMMIT|ROLLBACK|END)\b/i
+
+  # --- L1 telemetry tuning ---
+  #
+  # Demand-driven model (mirrors goldlapel-python). The wrapper has NO
+  # background timer. Cache counters increment on cache ops (free);
+  # state-change events are emitted synchronously when a relevant counter
+  # crosses a threshold; snapshot replies are sent only when the proxy
+  # asks via `?:<request>`.
+  #
+  # Eviction-rate sliding window. `cache_full` fires when ≥
+  # EVICT_RATE_HIGH of the last EVICT_RATE_WINDOW cache writes (puts)
+  # caused an eviction; `cache_recovered` fires when the rate falls back
+  # below EVICT_RATE_LOW. With a 32k-entry default capacity, a
+  # steady-state high eviction rate means the working set exceeds the
+  # cache — actionable signal for the dashboard.
+  EVICT_RATE_WINDOW = 200
+  EVICT_RATE_HIGH = 0.5  # 50% of recent puts evicted → cache_full
+  EVICT_RATE_LOW = 0.1   # ≤ 10% → cache_recovered
 
   TABLE_PATTERN = /\b(?:FROM|JOIN)\s+(?:ONLY\s+)?(?:(\w+)\.)?(\w+)/i
   SQL_KEYWORDS = Set.new(%w[
@@ -173,7 +193,7 @@ module GoldLapel
   end
 
   class NativeCache
-    attr_reader :stats_hits, :stats_misses, :stats_invalidations
+    attr_reader :stats_hits, :stats_misses, :stats_invalidations, :stats_evictions
 
     def initialize
       @cache = {}
@@ -192,6 +212,36 @@ module GoldLapel
       @stats_hits = 0
       @stats_misses = 0
       @stats_invalidations = 0
+      # L1 telemetry — eviction counter bumped under @mutex in evict_one.
+      # Configurable opt-out: set GOLDLAPEL_REPORT_STATS=false to disable
+      # all snapshot replies and state-change emissions (cache continues
+      # to function; only the wire output is suppressed).
+      @stats_evictions = 0
+      @report_stats = ENV.fetch("GOLDLAPEL_REPORT_STATS", "true").downcase != "false"
+      # Stable wrapper identity for the lifetime of the process. Lets the
+      # proxy aggregate per wrapper across reconnects.
+      @wrapper_id = SecureRandom.uuid
+      @wrapper_lang = "ruby"
+      @wrapper_version = self.class.detect_wrapper_version
+      # Synchronizes writes from the recv thread (replies to ?:) and any
+      # cache-op thread (state-change emissions). The socket is a single
+      # full-duplex stream; concurrent writes would interleave bytes.
+      # Read stays on the recv thread; writes serialize behind this mutex.
+      @send_mutex = Mutex.new
+      # Sliding window for eviction-rate state-change detection. A
+      # bounded ring buffer; updates are O(1).
+      @recent_evictions = []  # 1 = evicted, 0 = inserted; len ≤ window
+      @recent_evictions_idx = 0
+      # Latched state — only emit a state-change event when the state
+      # transitions. Without latching the wrapper would re-emit every
+      # put while the rate stays bad.
+      @state_cache_full = false
+    end
+
+    attr_reader :wrapper_id, :wrapper_lang, :wrapper_version
+
+    def report_stats?
+      @report_stats
     end
 
     def connected?
@@ -229,9 +279,13 @@ module GoldLapel
       key = make_key(sql, params)
       return unless key
       tables = GoldLapel.extract_tables(sql)
+      evicted = 0
       @mutex.synchronize do
-        unless @cache.key?(key)
-          evict_one if @cache.size >= @max_entries
+        if @cache.key?(key)
+          # Re-put refreshes LRU; no eviction.
+        elsif @cache.size >= @max_entries
+          evict_one
+          evicted = 1
         end
         @cache[key] = { values: values, fields: fields, tables: tables }
         @counter += 1
@@ -240,7 +294,13 @@ module GoldLapel
           @table_index[table] ||= Set.new
           @table_index[table].add(key)
         end
+        # Window tracks every put — re-puts record 0 (no eviction).
+        record_eviction_locked(evicted)
       end
+      # Eviction-rate threshold check happens outside the cache mutex —
+      # emit may take @send_mutex and we don't want to nest locks across
+      # socket I/O.
+      maybe_emit_eviction_rate_state_change
     end
 
     def invalidate_table(table)
@@ -293,6 +353,10 @@ module GoldLapel
     end
 
     def process_signal(line)
+      # Backwards-compat: unknown prefixes are silently ignored. Older
+      # proxies sent only `I:` / `C:` / `P:`; newer proxies add `?:`
+      # request types. Forward-compat: the wrapper accepts any
+      # well-formed prefix and routes by type.
       if line.start_with?("I:")
         table = line[2..].strip
         if table == "*"
@@ -300,7 +364,31 @@ module GoldLapel
         else
           invalidate_table(table)
         end
+      elsif line.start_with?("?:")
+        # Snapshot request from the proxy. Reply with R:<json>.
+        process_request(line[2..])
       end
+      # `C:` (config), `P:` (ping), and anything else — ignored.
+    end
+
+    # Handle `?:<request>` from the proxy. Today the only request is
+    # `snapshot` — the proxy asks for a current counter snapshot and we
+    # reply with `R:<json>`. Future requests can extend this without
+    # breaking older proxies (they'd ignore unknown R: lines, but only
+    # the proxy that sent `?:<x>` will be expecting a reply, so the
+    # contract is local to the request type).
+    def process_request(raw)
+      body = raw ? raw.strip : ""
+      if body.empty? || body == "snapshot"
+        emit_response
+      end
+    end
+
+    # Emit a final `wrapper_disconnected` snapshot before shutdown.
+    # Called from at_exit (registered at module load) — best effort; the
+    # socket may already be torn down.
+    def emit_wrapper_disconnected
+      emit_state_change("wrapper_disconnected")
     end
 
     @instance_mutex = Mutex.new
@@ -340,6 +428,113 @@ module GoldLapel
           end
         end
       end
+      @stats_evictions += 1
+    end
+
+    # ---- L1 telemetry: sliding window ----
+
+    # Record a put() outcome (1 evicted, 0 inserted). Caller holds
+    # @mutex. Bounded ring — once at capacity, overwrites oldest in O(1).
+    def record_eviction_locked(evicted)
+      if @recent_evictions.length < EVICT_RATE_WINDOW
+        @recent_evictions << evicted
+      else
+        @recent_evictions[@recent_evictions_idx] = evicted
+        @recent_evictions_idx = (@recent_evictions_idx + 1) % EVICT_RATE_WINDOW
+      end
+    end
+
+    # ---- L1 telemetry: snapshot + state-change emission ----
+
+    # Build the L1 snapshot hash the proxy aggregates per-tick. All
+    # counters + cache size read in a single critical section so the
+    # snapshot is internally consistent (no torn reads where, e.g., hits
+    # and misses straddle a concurrent get()). The proxy computes deltas
+    # across ticks; we just expose the raw counters.
+    def build_snapshot
+      @mutex.synchronize do
+        {
+          "wrapper_id" => @wrapper_id,
+          "lang" => @wrapper_lang,
+          "version" => @wrapper_version,
+          "hits" => @stats_hits,
+          "misses" => @stats_misses,
+          "evictions" => @stats_evictions,
+          "invalidations" => @stats_invalidations,
+          "current_size_entries" => @cache.size,
+          "capacity_entries" => @max_entries,
+        }
+      end
+    end
+
+    # Serialize a line write under @send_mutex. Best-effort — socket
+    # errors are swallowed (the recv loop will detect the broken
+    # connection on its next iteration and reconnect).
+    def send_line(line)
+      return unless @report_stats
+      sock = @socket
+      return if sock.nil?
+      data = line.end_with?("\n") ? line : "#{line}\n"
+      @send_mutex.synchronize do
+        begin
+          sock.write(data)
+        rescue IOError, Errno::EPIPE, Errno::ECONNRESET, Errno::EBADF, Errno::ENOTCONN
+          # Connection dead — recv loop will rebuild on next iteration.
+          # Don't try to repair here; we'd race the reconnect logic.
+        end
+      end
+    end
+
+    # Emit S:<json> with snapshot + state name.
+    def emit_state_change(state)
+      return unless @report_stats
+      payload = build_snapshot
+      payload["state"] = state
+      payload["ts_ms"] = (Time.now.to_f * 1000).to_i
+      line = "S:" + JSON.generate(payload)
+      send_line(line)
+    rescue StandardError
+      # Snapshot serialization or send failure — swallow.
+    end
+
+    # Emit R:<json> snapshot reply to a `?:<request>`.
+    def emit_response(snapshot = nil)
+      return unless @report_stats
+      snapshot ||= build_snapshot
+      snapshot["ts_ms"] ||= (Time.now.to_f * 1000).to_i
+      line = "R:" + JSON.generate(snapshot)
+      send_line(line)
+    rescue StandardError
+      # Snapshot serialization or send failure — swallow.
+    end
+
+    # Check the eviction-rate sliding window and emit a state change if
+    # the latched flag should flip. Hysteresis-guarded: crossing HIGH
+    # emits cache_full, falling back below LOW emits cache_recovered, and
+    # rates between LOW and HIGH leave the latched state unchanged (no
+    # flapping).
+    def maybe_emit_eviction_rate_state_change
+      # Read window state + flip latched flag under @mutex so two
+      # concurrent puts that both cross the threshold can't both emit.
+      # Need at least a full window before reporting state — a single
+      # eviction in 3 puts is noise.
+      emit = nil
+      @mutex.synchronize do
+        n = @recent_evictions.length
+        return if n < EVICT_RATE_WINDOW
+        rate = @recent_evictions.sum.to_f / n
+        if !@state_cache_full && rate >= EVICT_RATE_HIGH
+          @state_cache_full = true
+          emit = "cache_full"
+        elsif @state_cache_full && rate <= EVICT_RATE_LOW
+          @state_cache_full = false
+          emit = "cache_recovered"
+        end
+      end
+      # Emit outside the cache mutex — emit_state_change takes
+      # @send_mutex and may block on a socket write; we don't want to
+      # nest locks or hold @mutex across I/O.
+      emit_state_change(emit) if emit
     end
 
     def invalidation_loop
@@ -348,22 +543,29 @@ module GoldLapel
 
       until @invalidation_stop
         begin
-          if RUBY_PLATFORM !~ /win|mingw/ && File.socket?(sock_path)
-            @socket = UNIXSocket.new(sock_path)
-          else
-            @socket = TCPSocket.new("127.0.0.1", port)
-          end
+          sock = if RUBY_PLATFORM !~ /win|mingw/ && File.socket?(sock_path)
+                   UNIXSocket.new(sock_path)
+                 else
+                   TCPSocket.new("127.0.0.1", port)
+                 end
 
+          # Stash the socket so send_line (called from cache-op threads
+          # on state-change, and from process_request on this thread for
+          # ?:/R:) writes to the live FD. Set before the
+          # wrapper_connected emit so the very first message goes out
+          # cleanly.
+          @socket = sock
           @invalidation_connected = true
           @reconnect_attempt = 0
+          emit_state_change("wrapper_connected")
           buf = ""
 
           until @invalidation_stop
-            ready = IO.select([@socket], nil, nil, 30)
+            ready = IO.select([sock], nil, nil, 30)
             unless ready
               break # timeout — connection may be dead
             end
-            data = @socket.read_nonblock(4096)
+            data = sock.read_nonblock(4096)
             buf += data
             while (idx = buf.index("\n"))
               line = buf[0...idx]
@@ -374,18 +576,49 @@ module GoldLapel
         rescue EOFError, IOError, Errno::ECONNREFUSED, Errno::ECONNRESET, Errno::ENOENT, Errno::EPIPE
           # connection failed or dropped
         ensure
+          # Drop the socket reference under @send_mutex so any concurrent
+          # emitter doesn't write to a closed FD.
+          @send_mutex.synchronize { @socket = nil }
           if @invalidation_connected
             @invalidation_connected = false
             invalidate_all
           end
-          @socket&.close rescue nil
-          @socket = nil
+          sock&.close rescue nil
         end
 
         break if @invalidation_stop
+        # Exponential backoff 1s → 2s → 4s → 8s → 15s, capped. Retry
+        # forever — long-lived processes outlive proxy restarts.
         delay = [2**@reconnect_attempt, 15].min
         @reconnect_attempt += 1
         sleep(delay) unless @invalidation_stop
+      end
+    end
+
+    def self.detect_wrapper_version
+      spec = Gem.loaded_specs["goldlapel"]
+      return spec.version.to_s if spec && spec.version
+      v = ENV["GEM_VERSION"]
+      return v if v && !v.empty?
+      "unknown"
+    rescue StandardError
+      "unknown"
+    end
+  end
+
+  # Register a single at_exit hook at module load. Best-effort emit of
+  # `wrapper_disconnected` so the proxy/dashboard can show the wrapper
+  # leaving cleanly. Only runs if a NativeCache instance exists; the
+  # socket may already be torn down, in which case the emit is a silent
+  # no-op.
+  unless @at_exit_registered
+    @at_exit_registered = true
+    at_exit do
+      begin
+        cache = NativeCache.instance_variable_get(:@instance)
+        cache&.emit_wrapper_disconnected
+      rescue StandardError
+        # Process is exiting — swallow everything.
       end
     end
   end
