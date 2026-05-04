@@ -202,6 +202,14 @@ module GoldLapel
       @counter = 0
       @max_entries = Integer(ENV.fetch("GOLDLAPEL_NATIVE_CACHE_SIZE", "32768"))
       @enabled = ENV.fetch("GOLDLAPEL_NATIVE_CACHE", "true").downcase != "false"
+      # Explicit L1 disable — orthogonal to `@enabled` (which is the
+      # GOLDLAPEL_NATIVE_CACHE env-var kill-switch) and orthogonal to
+      # cache size. When set, `get` always returns nil (incrementing
+      # misses) and `put` is a silent no-op. The invalidation thread
+      # still runs so telemetry signal flow (wrapper_connected /
+      # snapshot replies) continues to work — Manor and the dashboard
+      # need to see the wrapper even when L1 is off.
+      @disable_l1 = false
       @mutex = Mutex.new
       @invalidation_connected = false
       @invalidation_thread = nil
@@ -252,12 +260,30 @@ module GoldLapel
       @enabled
     end
 
+    # When true, `get` always returns nil (miss) and `put` is a no-op.
+    # The invalidation thread continues to run and telemetry emissions
+    # still fire — only the local hit path is suppressed. Set via the
+    # `disable_l1:` kwarg to `GoldLapel.start` / `.new` / `.wrap`.
+    def disable_l1?
+      @disable_l1
+    end
+
+    def disable_l1=(value)
+      @disable_l1 = value ? true : false
+    end
+
     def size
       @cache.size
     end
 
     def get(sql, params)
       return nil unless @enabled && @invalidation_connected
+      # disable_l1: tick misses (callers measure miss rate), never hit.
+      # Skip the key-build + cache lookup entirely — no point.
+      if @disable_l1
+        @mutex.synchronize { @stats_misses += 1 }
+        return nil
+      end
       key = make_key(sql, params)
       return nil unless key
       @mutex.synchronize do
@@ -276,6 +302,9 @@ module GoldLapel
 
     def put(sql, params, values, fields)
       return unless @enabled && @invalidation_connected
+      # disable_l1: silent no-op. Don't touch cache state, don't touch
+      # the eviction-rate window, don't bump counters — the layer is off.
+      return if @disable_l1
       key = make_key(sql, params)
       return unless key
       tables = GoldLapel.extract_tables(sql)
@@ -453,7 +482,7 @@ module GoldLapel
     # across ticks; we just expose the raw counters.
     def build_snapshot
       @mutex.synchronize do
-        {
+        snap = {
           "wrapper_id" => @wrapper_id,
           "lang" => @wrapper_lang,
           "version" => @wrapper_version,
@@ -464,6 +493,11 @@ module GoldLapel
           "current_size_entries" => @cache.size,
           "capacity_entries" => @max_entries,
         }
+        # Forward-compat: surface the disable flag so HQ/Manor can render
+        # the wrapper's L1 state correctly. Only emitted when set; older
+        # consumers that don't know the field will simply ignore it.
+        snap["l1_disabled"] = true if @disable_l1
+        snap
       end
     end
 

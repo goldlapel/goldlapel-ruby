@@ -34,7 +34,8 @@ module GoldLapel
       silent: false,
       mesh: false,
       mesh_tag: nil,
-      enable_l2_for_wrappers: false
+      enable_l2_for_wrappers: false,
+      disable_l1: false
     )
       @upstream = upstream
       @proxy_port = proxy_port
@@ -52,6 +53,7 @@ module GoldLapel
       tag = mesh_tag.to_s
       @mesh_tag = tag.empty? ? nil : tag
       @enable_l2_for_wrappers = enable_l2_for_wrappers ? true : false
+      @disable_l1 = disable_l1 ? true : false
       @proxy = nil
       @internal_conn = nil
       @wrapped_conn = nil
@@ -131,7 +133,11 @@ module GoldLapel
         raw = PG.connect(@proxy.url)
         # invalidation_port is resolved at Proxy construction: either the
         # explicit kwarg or proxy_port + 2.
-        @wrapped_conn = GoldLapel.wrap(raw, invalidation_port: @proxy.invalidation_port)
+        @wrapped_conn = GoldLapel.wrap(
+          raw,
+          invalidation_port: @proxy.invalidation_port,
+          disable_l1: @disable_l1,
+        )
         @internal_conn = @wrapped_conn
         @proxy.wrapped_conn = @wrapped_conn
       rescue Exception # rubocop:disable Lint/RescueException

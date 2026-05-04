@@ -68,7 +68,8 @@ module GoldLapel
     silent: false,
     mesh: false,
     mesh_tag: nil,
-    enable_l2_for_wrappers: false
+    enable_l2_for_wrappers: false,
+    disable_l1: false
   )
     Instance.new(
       upstream,
@@ -87,6 +88,7 @@ module GoldLapel
       mesh: mesh,
       mesh_tag: mesh_tag,
       enable_l2_for_wrappers: enable_l2_for_wrappers,
+      disable_l1: disable_l1,
     )
   end
 
@@ -105,7 +107,8 @@ module GoldLapel
     silent: false,
     mesh: false,
     mesh_tag: nil,
-    enable_l2_for_wrappers: false
+    enable_l2_for_wrappers: false,
+    disable_l1: false
   )
     # Legacy/advanced: construct without eagerly spawning or connecting.
     Instance.new(
@@ -125,6 +128,7 @@ module GoldLapel
       mesh: mesh,
       mesh_tag: mesh_tag,
       enable_l2_for_wrappers: enable_l2_for_wrappers,
+      disable_l1: disable_l1,
     )
   end
 

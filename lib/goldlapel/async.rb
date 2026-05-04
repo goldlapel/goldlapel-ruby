@@ -58,7 +58,8 @@ module GoldLapel
       silent: false,
       mesh: false,
       mesh_tag: nil,
-      enable_l2_for_wrappers: false
+      enable_l2_for_wrappers: false,
+      disable_l1: false
     )
       unless ::Async::Task.current?
         raise "GoldLapel::Async.start must be called inside an Async { ... } block"
@@ -80,6 +81,7 @@ module GoldLapel
         mesh: mesh,
         mesh_tag: mesh_tag,
         enable_l2_for_wrappers: enable_l2_for_wrappers,
+        disable_l1: disable_l1,
       )
     end
 
@@ -111,7 +113,8 @@ module GoldLapel
         silent: false,
         mesh: false,
         mesh_tag: nil,
-        enable_l2_for_wrappers: false
+        enable_l2_for_wrappers: false,
+        disable_l1: false
       )
         @upstream = upstream
         @proxy_port = proxy_port
@@ -129,6 +132,7 @@ module GoldLapel
         tag = mesh_tag.to_s
         @mesh_tag = tag.empty? ? nil : tag
         @enable_l2_for_wrappers = enable_l2_for_wrappers ? true : false
+        @disable_l1 = disable_l1 ? true : false
         @proxy = nil
         @internal_conn = nil
         @wrapped_conn = nil
@@ -197,7 +201,11 @@ module GoldLapel
           end
 
           raw = PG.connect(@proxy.url)
-          @wrapped_conn = GoldLapel.wrap(raw, invalidation_port: @proxy.invalidation_port)
+          @wrapped_conn = GoldLapel.wrap(
+            raw,
+            invalidation_port: @proxy.invalidation_port,
+            disable_l1: @disable_l1,
+          )
           @internal_conn = @wrapped_conn
           @proxy.wrapped_conn = @wrapped_conn
         rescue Exception # rubocop:disable Lint/RescueException
