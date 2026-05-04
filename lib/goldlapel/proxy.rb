@@ -12,7 +12,8 @@ module GoldLapel
 
   class Proxy
     attr_reader :url, :upstream, :dashboard_url, :proxy_port, :config, :dashboard_port,
-                :invalidation_port, :dashboard_token, :mesh, :mesh_tag
+                :invalidation_port, :dashboard_token, :mesh, :mesh_tag,
+                :enable_l2_for_wrappers
     attr_accessor :wrapped_conn
 
     # Keys that are valid inside the structured `config` hash. Top-level
@@ -120,7 +121,8 @@ module GoldLapel
       extra_args: [],
       silent: false,
       mesh: false,
-      mesh_tag: nil
+      mesh_tag: nil,
+      enable_l2_for_wrappers: false
     )
       @upstream = upstream
       @proxy_port = proxy_port || DEFAULT_PROXY_PORT
@@ -154,6 +156,12 @@ module GoldLapel
       @mesh = mesh ? true : false
       tag = mesh_tag.to_s
       @mesh_tag = tag.empty? ? nil : tag
+      # Opt-in: re-enable L2 (proxy result cache) for wrapper traffic. Default
+      # is false because per-connection L2-skip ships as the wrapper default
+      # (the wrapper has its own L1). Fleets with multi-pod / frequent restart
+      # / mesh topologies benefit from L2 as a shared cache and can opt back
+      # in here.
+      @enable_l2_for_wrappers = enable_l2_for_wrappers ? true : false
       @pid = nil
       @url = nil
       @dashboard_url = nil
@@ -191,6 +199,7 @@ module GoldLapel
       cmd.push("--config", @config_file) if @config_file
       cmd.push("--mesh") if @mesh
       cmd.push("--mesh-tag", @mesh_tag) if @mesh_tag
+      cmd.push("--enable-l2-for-wrappers") if @enable_l2_for_wrappers
       cmd.concat(self.class.config_to_args(@config))
       cmd.concat(@extra_args)
 
@@ -395,7 +404,8 @@ module GoldLapel
         extra_args: [],
         silent: false,
         mesh: false,
-        mesh_tag: nil
+        mesh_tag: nil,
+        enable_l2_for_wrappers: false
       )
         @mutex.synchronize do
           existing = @instances[upstream]
@@ -416,6 +426,7 @@ module GoldLapel
             silent: silent,
             mesh: mesh,
             mesh_tag: mesh_tag,
+            enable_l2_for_wrappers: enable_l2_for_wrappers,
           )
           unless @cleanup_registered
             at_exit { cleanup }

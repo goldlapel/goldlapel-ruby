@@ -33,7 +33,8 @@ module GoldLapel
       eager_connect: true,
       silent: false,
       mesh: false,
-      mesh_tag: nil
+      mesh_tag: nil,
+      enable_l2_for_wrappers: false
     )
       @upstream = upstream
       @proxy_port = proxy_port
@@ -50,6 +51,7 @@ module GoldLapel
       @mesh = mesh ? true : false
       tag = mesh_tag.to_s
       @mesh_tag = tag.empty? ? nil : tag
+      @enable_l2_for_wrappers = enable_l2_for_wrappers ? true : false
       @proxy = nil
       @internal_conn = nil
       @wrapped_conn = nil
@@ -107,6 +109,7 @@ module GoldLapel
         silent: @silent,
         mesh: @mesh,
         mesh_tag: @mesh_tag,
+        enable_l2_for_wrappers: @enable_l2_for_wrappers,
       )
 
       # Register the proxy in the module-level registry so GoldLapel.stop,
