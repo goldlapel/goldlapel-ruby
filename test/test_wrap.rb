@@ -291,6 +291,56 @@ class TestTransactions < Minitest::Test
   end
 end
 
+# Session-state commands (SET / RESET / LISTEN / UNLISTEN / NOTIFY /
+# SAVEPOINT) return results with empty `fields` — they're not real
+# query results and have no business sitting in the L1 cache. The
+# wrapper must skip cache-put on those responses.
+class TestSessionStateNotCached < Minitest::Test
+  def setup
+    GoldLapel::NativeCache.reset!
+    @cache = GoldLapel::NativeCache.new
+    @cache.instance_variable_set(:@invalidation_connected, true)
+  end
+
+  def teardown
+    GoldLapel::NativeCache.reset!
+  end
+
+  def test_set_response_not_cached
+    # SET returns a result with empty values + empty fields. The
+    # state-hash changes (`app.foo` is unsafe), so the cache key is
+    # the new hash. Either way no entry should land.
+    mock = MockConnection.new(MockResult.new([], []))
+    conn = GoldLapel::CachedConnection.new(mock, @cache)
+    conn.exec("SET app.foo = 'bar'")
+    assert_equal 0, @cache.size
+  end
+
+  def test_reset_response_not_cached
+    mock = MockConnection.new(MockResult.new([], []))
+    conn = GoldLapel::CachedConnection.new(mock, @cache)
+    conn.exec("RESET app.foo")
+    assert_equal 0, @cache.size
+  end
+
+  def test_listen_response_not_cached
+    mock = MockConnection.new(MockResult.new([], []))
+    conn = GoldLapel::CachedConnection.new(mock, @cache)
+    conn.exec("LISTEN my_channel")
+    assert_equal 0, @cache.size
+  end
+
+  def test_select_with_zero_rows_still_cached
+    # Empty rows but a real schema — that's a legitimate cacheable
+    # result (a query that returned no rows). Don't conflate it with
+    # session-state commands.
+    mock = MockConnection.new(MockResult.new([], ["id"]))
+    conn = GoldLapel::CachedConnection.new(mock, @cache)
+    conn.exec("SELECT id FROM orders WHERE 1=0")
+    assert_equal 1, @cache.size
+  end
+end
+
 class TestExecParams < Minitest::Test
   def setup
     GoldLapel::NativeCache.reset!

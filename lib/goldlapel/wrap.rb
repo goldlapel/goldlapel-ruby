@@ -143,8 +143,15 @@ module GoldLapel
       # Cache miss: execute WITHOUT block so we can cache before PG clears the result
       result = delegate(method, sql, params, result_format)
 
-      # Cache the result if it has rows
-      if result && result.respond_to?(:values) && result.respond_to?(:fields)
+      # Cache the result if it carries column schema. SET / RESET /
+      # LISTEN / UNLISTEN / NOTIFY / SAVEPOINT all return a result with
+      # empty `fields` and empty `values` — those are session-state
+      # commands, not cacheable reads. `fields.empty?` is a clean
+      # signal: any real SELECT (even one with zero rows) has a non-
+      # empty field list. Skipping the put avoids bloating the cache
+      # with no-row entries that never serve real data.
+      if result && result.respond_to?(:values) && result.respond_to?(:fields) &&
+         !result.fields.empty?
         @cache.put(sql, params, result.values, result.fields, sh)
       end
 
