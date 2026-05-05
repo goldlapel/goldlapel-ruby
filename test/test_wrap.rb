@@ -289,6 +289,76 @@ class TestTransactions < Minitest::Test
     conn.exec("INSERT INTO orders VALUES (2)")
     assert_nil @cache.get("SELECT * FROM orders", nil)
   end
+
+  # ----- Multi-statement BEGIN/COMMIT bookkeeping -----
+  #
+  # The pre-fix wrapper checked TX_START/TX_END only against the prefix
+  # of the SQL string. A body like `BEGIN; INSERT INTO t VALUES (1);
+  # COMMIT` would match TX_START on `BEGIN`, set `@in_transaction =
+  # true`, return early — and never observe the trailing COMMIT. The
+  # server ends out-of-tx; the wrapper stays stuck in-tx and silently
+  # bypasses the cache forever (until the connection is replaced).
+  # update_transaction_state walks every segment so the final wrapper
+  # state matches the server.
+
+  def test_multi_statement_begin_insert_commit_ends_out_of_transaction
+    mock = MockConnection.new(MockResult.new([["1"]], ["id"]))
+    conn = GoldLapel::CachedConnection.new(mock, @cache)
+    conn.exec("BEGIN; INSERT INTO orders VALUES (1); COMMIT")
+    assert_equal false, conn.instance_variable_get(:@in_transaction)
+    # Cache should still serve subsequent reads (not stuck bypassed).
+    @cache.put("SELECT * FROM orders", nil, [["x"]], ["id"])
+    mock.calls.clear
+    conn.exec("SELECT * FROM orders")
+    assert_empty mock.calls
+  end
+
+  def test_multi_statement_begin_insert_leaves_wrapper_in_transaction
+    # BEGIN with a write but no closing COMMIT — server stays in tx,
+    # wrapper must too.
+    mock = MockConnection.new(MockResult.new([["1"]], ["id"]))
+    conn = GoldLapel::CachedConnection.new(mock, @cache)
+    conn.exec("BEGIN; INSERT INTO orders VALUES (1)")
+    assert_equal true, conn.instance_variable_get(:@in_transaction)
+  end
+
+  def test_set_then_begin_then_insert_leaves_wrapper_in_transaction
+    # The pre-fix gap: SQL doesn't *start* with BEGIN, so TX_START
+    # didn't match and `@in_transaction` was never set — but the server
+    # opened a transaction. Segment walking catches the BEGIN.
+    mock = MockConnection.new(MockResult.new([["1"]], ["id"]))
+    conn = GoldLapel::CachedConnection.new(mock, @cache)
+    conn.exec("SET app.user = 'x'; BEGIN; INSERT INTO orders VALUES (1)")
+    assert_equal true, conn.instance_variable_get(:@in_transaction)
+  end
+
+  def test_insert_then_commit_ends_out_of_transaction
+    # Even when the prefix isn't a tx-control statement, a trailing
+    # COMMIT must register. (Server-side behavior depends on prior
+    # state; the wrapper just tracks what the server's about to do.)
+    mock = MockConnection.new(MockResult.new([["1"]], ["id"]))
+    conn = GoldLapel::CachedConnection.new(mock, @cache)
+    conn.instance_variable_set(:@in_transaction, true)
+    conn.exec("INSERT INTO orders VALUES (1); COMMIT")
+    assert_equal false, conn.instance_variable_get(:@in_transaction)
+  end
+
+  def test_multi_statement_begin_rollback_ends_out_of_transaction
+    mock = MockConnection.new(MockResult.new([["1"]], ["id"]))
+    conn = GoldLapel::CachedConnection.new(mock, @cache)
+    conn.exec("BEGIN; SELECT 1; ROLLBACK")
+    assert_equal false, conn.instance_variable_get(:@in_transaction)
+  end
+
+  def test_multi_statement_begin_commit_still_invalidates_writes
+    # Regression guard: tx-flag walking must not break the existing
+    # multi-statement write-detection path.
+    mock = MockConnection.new(MockResult.new([["1"]], ["id"]))
+    @cache.put("SELECT * FROM orders", nil, [["1"]], ["id"])
+    conn = GoldLapel::CachedConnection.new(mock, @cache)
+    conn.exec("BEGIN; INSERT INTO orders VALUES (2); COMMIT")
+    assert_nil @cache.get("SELECT * FROM orders", nil)
+  end
 end
 
 # Session-state commands (SET / RESET / LISTEN / UNLISTEN / NOTIFY /

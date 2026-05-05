@@ -4,6 +4,15 @@ require_relative "cache"
 require_relative "guc_state"
 
 module GoldLapel
+  # Cheap pre-check used by `update_transaction_state` to avoid running
+  # the statement splitter on multi-statement bodies that contain no tx-
+  # control keyword. Matches BEGIN / START / COMMIT / ROLLBACK / END
+  # anywhere in the body, case-insensitively. False positives (a literal
+  # like `'BEGIN of a story'`) just route through the splitter — the
+  # per-segment regex anchors then correctly classify them as not-a-
+  # tx-control statement.
+  TX_KEYWORD_HINT = /\b(BEGIN|START|COMMIT|ROLLBACK|END)\b/i
+
   def self.wrap(conn, invalidation_port: nil, disable_native_cache: false)
     cache = NativeCache.instance
     # Set the flag before the invalidation thread connects so the very
@@ -95,11 +104,11 @@ module GoldLapel
       # the resulting invalidations. DDL_SENTINEL short-circuits to
       # invalidate_all.
       #
-      # Runs BEFORE the TX_START/TX_END check so that
+      # Runs BEFORE the tx-state walk so that
       # `SET app.x = 'y'; INSERT INTO t VALUES (1); SELECT 1` properly
       # invalidates `t`. Standalone `BEGIN`/`COMMIT` flow through the
       # collector cheaply (single segment, no `;`, empty result) and
-      # then hit the TX state toggle below.
+      # then hit the tx-state walk below.
       tables_to_invalidate, all_invalid = collect_write_invalidations(sql)
       if all_invalid
         @cache.invalidate_all
@@ -108,13 +117,16 @@ module GoldLapel
       end
       wrote_something = all_invalid || !tables_to_invalidate.empty?
 
-      # Transaction tracking
-      if GoldLapel::TX_START.match?(sql)
-        @in_transaction = true
-        return delegate(method, sql, params, result_format, &block)
-      end
-      if GoldLapel::TX_END.match?(sql)
-        @in_transaction = false
+      # Transaction tracking — segment-aware so multi-statement bodies
+      # like `BEGIN; INSERT INTO t VALUES (1); COMMIT` leave the wrapper's
+      # `@in_transaction` matching the server's actual tx state. Walking
+      # the prefix only would set `in_transaction=true` from the leading
+      # BEGIN, never see the trailing COMMIT, and silently bypass the
+      # cache forever until the next process restart. Same gap covers
+      # bodies that *start* with a non-tx token but contain BEGIN/COMMIT
+      # later (e.g. `SET app.x = 'y'; BEGIN; INSERT ...`).
+      tx_changed = update_transaction_state(sql)
+      if tx_changed
         return delegate(method, sql, params, result_format, &block)
       end
 
@@ -162,6 +174,62 @@ module GoldLapel
       end
 
       result
+    end
+
+    # Walk segments of a (possibly) multi-statement SQL body and update
+    # the per-connection `@in_transaction` flag once per tx-control
+    # segment (BEGIN / START TRANSACTION → true; COMMIT / ROLLBACK / END →
+    # false; SAVEPOINT / RELEASE SAVEPOINT are no-ops because they're
+    # only legal mid-transaction and don't change the boolean flag).
+    # Returns true if any segment was a tx-control statement (so the
+    # caller can dispatch directly to the underlying connection —
+    # tx-control statements are never cacheable anyway).
+    #
+    # Per-segment classification mirrors the server's view: it's the
+    # *last* tx-control statement that determines the final state. For
+    # `BEGIN; INSERT INTO t VALUES (1); COMMIT`, BEGIN flips to true,
+    # COMMIT flips back to false — final wrapper state = false, matching
+    # the server.
+    #
+    # Fast path: SQL with no top-level `;` skips the splitter — the
+    # common case (one SELECT/INSERT/UPDATE/... per query) only pays
+    # two anchored regex matches.
+    def update_transaction_state(sql)
+      return false unless sql.is_a?(String)
+
+      # Single-statement fast path: no top-level `;` means we can match
+      # the whole string against the anchored regex without splitting.
+      # Covers the overwhelmingly common case (one SELECT/INSERT/etc.
+      # per query) without paying the splitter cost.
+      unless sql.include?(";")
+        if GoldLapel::TX_START.match?(sql)
+          @in_transaction = true
+          return true
+        end
+        if GoldLapel::TX_END.match?(sql)
+          @in_transaction = false
+          return true
+        end
+        return false
+      end
+
+      # Multi-statement body: cheap keyword pre-check, then walk every
+      # segment if (and only if) a tx-control keyword appears anywhere.
+      # `SELECT a; SELECT b` — common case for legitimate batched reads —
+      # short-circuits without paying the splitter.
+      return false unless TX_KEYWORD_HINT.match?(sql)
+
+      changed = false
+      GucState.split_statements(sql).each do |seg|
+        if GoldLapel::TX_START.match?(seg)
+          @in_transaction = true
+          changed = true
+        elsif GoldLapel::TX_END.match?(seg)
+          @in_transaction = false
+          changed = true
+        end
+      end
+      changed
     end
 
     # Run `detect_write` over every segment of a (possibly) multi-
