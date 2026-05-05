@@ -58,8 +58,8 @@ module GoldLapel
       silent: false,
       mesh: false,
       mesh_tag: nil,
-      enable_l2_for_wrappers: false,
-      disable_l1: false
+      enable_proxy_cache_for_wrappers: false,
+      disable_native_cache: false
     )
       unless ::Async::Task.current?
         raise "GoldLapel::Async.start must be called inside an Async { ... } block"
@@ -80,8 +80,8 @@ module GoldLapel
         silent: silent,
         mesh: mesh,
         mesh_tag: mesh_tag,
-        enable_l2_for_wrappers: enable_l2_for_wrappers,
-        disable_l1: disable_l1,
+        enable_proxy_cache_for_wrappers: enable_proxy_cache_for_wrappers,
+        disable_native_cache: disable_native_cache,
       )
     end
 
@@ -113,8 +113,8 @@ module GoldLapel
         silent: false,
         mesh: false,
         mesh_tag: nil,
-        enable_l2_for_wrappers: false,
-        disable_l1: false
+        enable_proxy_cache_for_wrappers: false,
+        disable_native_cache: false
       )
         @upstream = upstream
         @proxy_port = proxy_port
@@ -131,8 +131,8 @@ module GoldLapel
         @mesh = mesh ? true : false
         tag = mesh_tag.to_s
         @mesh_tag = tag.empty? ? nil : tag
-        @enable_l2_for_wrappers = enable_l2_for_wrappers ? true : false
-        @disable_l1 = disable_l1 ? true : false
+        @enable_proxy_cache_for_wrappers = enable_proxy_cache_for_wrappers ? true : false
+        @disable_native_cache = disable_native_cache ? true : false
         @proxy = nil
         @internal_conn = nil
         @wrapped_conn = nil
@@ -185,7 +185,7 @@ module GoldLapel
           silent: @silent,
           mesh: @mesh,
           mesh_tag: @mesh_tag,
-          enable_l2_for_wrappers: @enable_l2_for_wrappers,
+          enable_proxy_cache_for_wrappers: @enable_proxy_cache_for_wrappers,
         )
         Proxy.register(@proxy)
         @proxy.start
@@ -204,7 +204,7 @@ module GoldLapel
           @wrapped_conn = GoldLapel.wrap(
             raw,
             invalidation_port: @proxy.invalidation_port,
-            disable_l1: @disable_l1,
+            disable_native_cache: @disable_native_cache,
           )
           @internal_conn = @wrapped_conn
           @proxy.wrapped_conn = @wrapped_conn

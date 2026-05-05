@@ -297,66 +297,67 @@ class TestMeshKwargs < Minitest::Test
   end
 end
 
-class TestEnableL2ForWrappersKwargs < Minitest::Test
-  # `enable_l2_for_wrappers` — top-level canonical-surface bool. Default false
-  # (per-connection L2 wrapper-skip is the wrapper default). When true, the
-  # spawned proxy receives `--enable-l2-for-wrappers` so wrapper traffic is
-  # served by L2 too — a knob fleet customers (multi-pod, frequent restarts,
-  # mesh) flip on to share the proxy result cache across wrapper processes.
+class TestEnableProxyCacheForWrappersKwargs < Minitest::Test
+  # `enable_proxy_cache_for_wrappers` — top-level canonical-surface bool.
+  # Default false (per-connection proxy-cache wrapper-skip is the wrapper
+  # default). When true, the spawned proxy receives
+  # `--enable-proxy-cache-for-wrappers` so wrapper traffic is served by the
+  # proxy cache too — a knob fleet customers (multi-pod, frequent restarts,
+  # mesh) flip on to share the proxy cache across wrapper processes.
 
   def test_default
     proxy = GoldLapel::Proxy.new("postgresql://user@host/db")
-    assert_equal false, proxy.enable_l2_for_wrappers
+    assert_equal false, proxy.enable_proxy_cache_for_wrappers
   end
 
   def test_stored_when_true
     proxy = GoldLapel::Proxy.new(
-      "postgresql://user@host/db", enable_l2_for_wrappers: true,
+      "postgresql://user@host/db", enable_proxy_cache_for_wrappers: true,
     )
-    assert_equal true, proxy.enable_l2_for_wrappers
+    assert_equal true, proxy.enable_proxy_cache_for_wrappers
   end
 
   def test_truthy_normalized_to_true
     proxy = GoldLapel::Proxy.new(
-      "postgresql://user@host/db", enable_l2_for_wrappers: "yes",
+      "postgresql://user@host/db", enable_proxy_cache_for_wrappers: "yes",
     )
-    assert_equal true, proxy.enable_l2_for_wrappers
+    assert_equal true, proxy.enable_proxy_cache_for_wrappers
   end
 
   def test_flag_forwarded_to_binary_when_true
     BannerTestSupport.with_stubbed_spawn do |recorded|
       BannerTestSupport.start_proxy(
-        proxy_port: 17937, enable_l2_for_wrappers: true, silent: true,
+        proxy_port: 17937, enable_proxy_cache_for_wrappers: true, silent: true,
       )
-      assert_includes recorded[:cmd], "--enable-l2-for-wrappers"
+      assert_includes recorded[:cmd], "--enable-proxy-cache-for-wrappers"
     end
   end
 
   def test_flag_absent_by_default
     BannerTestSupport.with_stubbed_spawn do |recorded|
       BannerTestSupport.start_proxy(proxy_port: 17938, silent: true)
-      refute_includes recorded[:cmd], "--enable-l2-for-wrappers"
+      refute_includes recorded[:cmd], "--enable-proxy-cache-for-wrappers"
     end
   end
 
   def test_flag_absent_when_false
     BannerTestSupport.with_stubbed_spawn do |recorded|
       BannerTestSupport.start_proxy(
-        proxy_port: 17939, enable_l2_for_wrappers: false, silent: true,
+        proxy_port: 17939, enable_proxy_cache_for_wrappers: false, silent: true,
       )
-      refute_includes recorded[:cmd], "--enable-l2-for-wrappers"
+      refute_includes recorded[:cmd], "--enable-proxy-cache-for-wrappers"
     end
   end
 
   def test_not_in_valid_config_keys
-    refute_includes GoldLapel::Proxy::VALID_CONFIG_KEYS, "enable_l2_for_wrappers"
+    refute_includes GoldLapel::Proxy::VALID_CONFIG_KEYS, "enable_proxy_cache_for_wrappers"
   end
 
   def test_in_config_map_rejected
     # Top-level canonical-surface option — passing it through the structured
     # `config:` hash must raise instead of silently turning into a CLI flag.
     assert_raises(ArgumentError) do
-      GoldLapel::Proxy.config_to_args({ enable_l2_for_wrappers: true })
+      GoldLapel::Proxy.config_to_args({ enable_proxy_cache_for_wrappers: true })
     end
   end
 
@@ -367,15 +368,15 @@ class TestEnableL2ForWrappersKwargs < Minitest::Test
     inst = GoldLapel::Instance.new(
       "postgresql://user:pass@host/db",
       eager_connect: false,
-      enable_l2_for_wrappers: true,
+      enable_proxy_cache_for_wrappers: true,
     )
-    assert_equal true, inst.instance_variable_get(:@enable_l2_for_wrappers)
+    assert_equal true, inst.instance_variable_get(:@enable_proxy_cache_for_wrappers)
   end
 
   def test_defaults_to_false_on_instance
     inst = GoldLapel::Instance.new(
       "postgresql://user:pass@host/db", eager_connect: false,
     )
-    assert_equal false, inst.instance_variable_get(:@enable_l2_for_wrappers)
+    assert_equal false, inst.instance_variable_get(:@enable_proxy_cache_for_wrappers)
   end
 end

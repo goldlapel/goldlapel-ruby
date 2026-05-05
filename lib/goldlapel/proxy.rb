@@ -13,7 +13,7 @@ module GoldLapel
   class Proxy
     attr_reader :url, :upstream, :dashboard_url, :proxy_port, :config, :dashboard_port,
                 :invalidation_port, :dashboard_token, :mesh, :mesh_tag,
-                :enable_l2_for_wrappers
+                :enable_proxy_cache_for_wrappers
     attr_accessor :wrapped_conn
 
     # Keys that are valid inside the structured `config` hash. Top-level
@@ -24,15 +24,15 @@ module GoldLapel
     VALID_CONFIG_KEYS = %w[
       min_pattern_count refresh_interval_secs pattern_ttl_secs
       max_tables_per_view max_columns_per_view deep_pagination_threshold
-      report_interval_secs result_cache_size batch_cache_size
+      report_interval_secs proxy_cache_size batch_cache_size
       batch_cache_ttl_secs pool_size pool_timeout_secs
       pool_mode mgmt_idle_timeout fallback read_after_write_secs
       n1_threshold n1_window_ms n1_cross_threshold
       tls_cert tls_key tls_client_ca
       disable_matviews disable_consolidation disable_btree_indexes
       disable_trigram_indexes disable_expression_indexes
-      disable_partial_indexes disable_rewrite disable_prepared_cache
-      disable_result_cache disable_pool
+      disable_partial_indexes disable_rewrite disable_rewrite_prepared_cache
+      disable_proxy_cache disable_pool
       disable_n1 disable_n1_cross_connection disable_shadow_mode
       enable_coalescing replica exclude_tables
     ].freeze
@@ -40,8 +40,8 @@ module GoldLapel
     BOOLEAN_KEYS = %w[
       disable_matviews disable_consolidation disable_btree_indexes
       disable_trigram_indexes disable_expression_indexes
-      disable_partial_indexes disable_rewrite disable_prepared_cache
-      disable_result_cache disable_pool
+      disable_partial_indexes disable_rewrite disable_rewrite_prepared_cache
+      disable_proxy_cache disable_pool
       disable_n1 disable_n1_cross_connection disable_shadow_mode
       enable_coalescing
     ].freeze
@@ -122,7 +122,7 @@ module GoldLapel
       silent: false,
       mesh: false,
       mesh_tag: nil,
-      enable_l2_for_wrappers: false
+      enable_proxy_cache_for_wrappers: false
     )
       @upstream = upstream
       @proxy_port = proxy_port || DEFAULT_PROXY_PORT
@@ -156,12 +156,12 @@ module GoldLapel
       @mesh = mesh ? true : false
       tag = mesh_tag.to_s
       @mesh_tag = tag.empty? ? nil : tag
-      # Opt-in: re-enable L2 (proxy result cache) for wrapper traffic. Default
-      # is false because per-connection L2-skip ships as the wrapper default
-      # (the wrapper has its own L1). Fleets with multi-pod / frequent restart
-      # / mesh topologies benefit from L2 as a shared cache and can opt back
-      # in here.
-      @enable_l2_for_wrappers = enable_l2_for_wrappers ? true : false
+      # Opt-in: re-enable the proxy cache for wrapper traffic. Default is
+      # false because per-connection proxy-cache-skip ships as the wrapper
+      # default (the wrapper has its own native cache). Fleets with multi-pod
+      # / frequent restart / mesh topologies benefit from the proxy cache as
+      # a shared cache and can opt back in here.
+      @enable_proxy_cache_for_wrappers = enable_proxy_cache_for_wrappers ? true : false
       @pid = nil
       @url = nil
       @dashboard_url = nil
@@ -199,7 +199,7 @@ module GoldLapel
       cmd.push("--config", @config_file) if @config_file
       cmd.push("--mesh") if @mesh
       cmd.push("--mesh-tag", @mesh_tag) if @mesh_tag
-      cmd.push("--enable-l2-for-wrappers") if @enable_l2_for_wrappers
+      cmd.push("--enable-proxy-cache-for-wrappers") if @enable_proxy_cache_for_wrappers
       cmd.concat(self.class.config_to_args(@config))
       cmd.concat(@extra_args)
 
@@ -405,7 +405,7 @@ module GoldLapel
         silent: false,
         mesh: false,
         mesh_tag: nil,
-        enable_l2_for_wrappers: false
+        enable_proxy_cache_for_wrappers: false
       )
         @mutex.synchronize do
           existing = @instances[upstream]
@@ -426,7 +426,7 @@ module GoldLapel
             silent: silent,
             mesh: mesh,
             mesh_tag: mesh_tag,
-            enable_l2_for_wrappers: enable_l2_for_wrappers,
+            enable_proxy_cache_for_wrappers: enable_proxy_cache_for_wrappers,
           )
           unless @cleanup_registered
             at_exit { cleanup }

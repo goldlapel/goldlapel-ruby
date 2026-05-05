@@ -296,9 +296,9 @@ class TestEdgeCases < Minitest::Test
   end
 end
 
-# --- GoldLapel.wrap(disable_l1:) flag plumbs through to NativeCache ---
+# --- GoldLapel.wrap(disable_native_cache:) flag plumbs through to NativeCache ---
 
-class TestWrapDisableL1 < Minitest::Test
+class TestWrapDisableNativeCache < Minitest::Test
   def setup
     GoldLapel::NativeCache.reset!
   end
@@ -307,29 +307,29 @@ class TestWrapDisableL1 < Minitest::Test
     GoldLapel::NativeCache.reset!
   end
 
-  def test_wrap_default_does_not_disable_l1
+  def test_wrap_default_does_not_disable_native_cache
     mock = MockConnection.new
     # Use a port that won't actually connect — we only want to verify
     # the flag side-effect on the singleton, not the network behavior.
     GoldLapel.wrap(mock, invalidation_port: 1)
-    refute GoldLapel::NativeCache.instance.disable_l1?
+    refute GoldLapel::NativeCache.instance.disable_native_cache?
     GoldLapel::NativeCache.instance.stop_invalidation
   end
 
-  def test_wrap_disable_l1_true_sets_flag
+  def test_wrap_disable_native_cache_true_sets_flag
     mock = MockConnection.new
-    GoldLapel.wrap(mock, invalidation_port: 1, disable_l1: true)
-    assert GoldLapel::NativeCache.instance.disable_l1?
+    GoldLapel.wrap(mock, invalidation_port: 1, disable_native_cache: true)
+    assert GoldLapel::NativeCache.instance.disable_native_cache?
     GoldLapel::NativeCache.instance.stop_invalidation
   end
 
-  def test_wrap_disable_l1_false_clears_flag
+  def test_wrap_disable_native_cache_false_clears_flag
     # Pre-set the flag, then wrap with default false; the wrap call
     # should reset it (explicit configuration wins on every wrap).
-    GoldLapel::NativeCache.instance.disable_l1 = true
+    GoldLapel::NativeCache.instance.disable_native_cache = true
     mock = MockConnection.new
-    GoldLapel.wrap(mock, invalidation_port: 1, disable_l1: false)
-    refute GoldLapel::NativeCache.instance.disable_l1?
+    GoldLapel.wrap(mock, invalidation_port: 1, disable_native_cache: false)
+    refute GoldLapel::NativeCache.instance.disable_native_cache?
     GoldLapel::NativeCache.instance.stop_invalidation
   end
 end

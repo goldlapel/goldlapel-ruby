@@ -3,13 +3,13 @@
 require_relative "cache"
 
 module GoldLapel
-  def self.wrap(conn, invalidation_port: nil, disable_l1: false)
+  def self.wrap(conn, invalidation_port: nil, disable_native_cache: false)
     cache = NativeCache.instance
     # Set the flag before the invalidation thread connects so the very
     # first `wrapper_connected` snapshot carries the correct
-    # `l1_disabled` field — Manor/HQ see the wrapper's L1 state from the
-    # first emit, not after a subsequent state-change.
-    cache.disable_l1 = disable_l1
+    # `disabled` field — Manor/HQ see the wrapper's native-cache state
+    # from the first emit, not after a subsequent state-change.
+    cache.disable_native_cache = disable_native_cache
     invalidation_port ||= detect_invalidation_port
     cache.connect_invalidation(invalidation_port) unless cache.connected?
     CachedConnection.new(conn, cache)

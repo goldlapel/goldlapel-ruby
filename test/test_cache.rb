@@ -957,7 +957,7 @@ end
 
 # --- Explicit L1 disable: get() always misses, put() is a no-op ---
 
-class TestDisableL1 < Minitest::Test
+class TestDisableNativeCache < Minitest::Test
   def setup
     GoldLapel::NativeCache.reset!
     @cache = GoldLapel::NativeCache.new
@@ -969,7 +969,7 @@ class TestDisableL1 < Minitest::Test
   end
 
   def test_default_is_false
-    refute @cache.disable_l1?
+    refute @cache.disable_native_cache?
   end
 
   def test_default_cache_works_as_today
@@ -985,25 +985,25 @@ class TestDisableL1 < Minitest::Test
   def test_disabled_get_always_returns_nil
     # Pre-populate while enabled, then flip the switch.
     @cache.put("SELECT 1", nil, [["1"]], [])
-    @cache.disable_l1 = true
+    @cache.disable_native_cache = true
     assert_nil @cache.get("SELECT 1", nil)
     assert_nil @cache.get("SELECT 2", nil)
     assert_nil @cache.get("SELECT 3", nil)
   end
 
   def test_disabled_put_is_silent_noop
-    @cache.disable_l1 = true
+    @cache.disable_native_cache = true
     @cache.put("SELECT 1", nil, [["1"]], [])
     @cache.put("SELECT 2", nil, [["2"]], [])
     # Cache must remain empty — put didn't store.
     assert_equal 0, @cache.size
     # Re-enable and confirm get still misses (nothing was actually stored).
-    @cache.disable_l1 = false
+    @cache.disable_native_cache = false
     assert_nil @cache.get("SELECT 1", nil)
   end
 
   def test_disabled_misses_tick_hits_stay_zero
-    @cache.disable_l1 = true
+    @cache.disable_native_cache = true
     5.times { |i| @cache.get("SELECT #{i}", nil) }
     assert_equal 0, @cache.stats_hits
     assert_equal 5, @cache.stats_misses
@@ -1011,34 +1011,35 @@ class TestDisableL1 < Minitest::Test
 
   def test_disabled_evictions_stay_zero
     # Even under heavy put pressure, disabled put never evicts.
-    @cache.disable_l1 = true
+    @cache.disable_native_cache = true
     100.times { |i| @cache.put("SELECT #{i}", nil, [[i.to_s]], []) }
     assert_equal 0, @cache.stats_evictions
   end
 
-  def test_snapshot_l1_disabled_field_absent_when_enabled
+  def test_snapshot_disabled_field_absent_when_enabled
     snap = @cache.send(:build_snapshot)
-    refute snap.key?("l1_disabled"),
-      "l1_disabled must not appear when L1 is on (forward-compat: only present when set)"
+    refute snap.key?("disabled"),
+      "disabled must not appear when native cache is on (forward-compat: only present when set)"
   end
 
-  def test_snapshot_l1_disabled_field_present_when_disabled
-    @cache.disable_l1 = true
+  def test_snapshot_disabled_field_present_when_disabled
+    @cache.disable_native_cache = true
     snap = @cache.send(:build_snapshot)
-    assert_equal true, snap["l1_disabled"]
+    assert_equal true, snap["disabled"]
   end
 
-  def test_disable_l1_setter_normalizes_truthy
-    @cache.disable_l1 = "yes"
-    assert_equal true, @cache.disable_l1?
-    @cache.disable_l1 = nil
-    assert_equal false, @cache.disable_l1?
+  def test_disable_native_cache_setter_normalizes_truthy
+    @cache.disable_native_cache = "yes"
+    assert_equal true, @cache.disable_native_cache?
+    @cache.disable_native_cache = nil
+    assert_equal false, @cache.disable_native_cache?
   end
 
   def test_invalidation_thread_still_runs_when_disabled
-    # Telemetry signal flow must keep working even with L1 off — the
-    # proxy/Manor still need to see snapshot replies + state changes.
-    @cache.disable_l1 = true
+    # Telemetry signal flow must keep working even with the native cache
+    # off — the proxy/Manor still need to see snapshot replies + state
+    # changes.
+    @cache.disable_native_cache = true
     server = TCPServer.new("127.0.0.1", 0)
     port = server.addr[1]
     @cache.instance_variable_set(:@invalidation_connected, false)
@@ -1047,7 +1048,7 @@ class TestDisableL1 < Minitest::Test
     sleep 0.1
     assert @cache.connected?, "invalidation thread must still establish a connection"
 
-    # The wrapper_connected snapshot should carry l1_disabled: true.
+    # The wrapper_connected snapshot should carry disabled: true.
     buf = ""
     deadline = Time.now + 2.0
     while Time.now < deadline
@@ -1066,7 +1067,7 @@ class TestDisableL1 < Minitest::Test
     s_lines = buf.split("\n").select { |l| l.start_with?("S:") && l.include?("wrapper_connected") }
     refute_empty s_lines
     payload = JSON.parse(s_lines[0][2..])
-    assert_equal true, payload["l1_disabled"]
+    assert_equal true, payload["disabled"]
 
     conn.close
     server.close

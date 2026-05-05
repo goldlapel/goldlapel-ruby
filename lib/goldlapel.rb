@@ -68,8 +68,8 @@ module GoldLapel
     silent: false,
     mesh: false,
     mesh_tag: nil,
-    enable_l2_for_wrappers: false,
-    disable_l1: false
+    enable_proxy_cache_for_wrappers: false,
+    disable_native_cache: false
   )
     Instance.new(
       upstream,
@@ -87,8 +87,8 @@ module GoldLapel
       silent: silent,
       mesh: mesh,
       mesh_tag: mesh_tag,
-      enable_l2_for_wrappers: enable_l2_for_wrappers,
-      disable_l1: disable_l1,
+      enable_proxy_cache_for_wrappers: enable_proxy_cache_for_wrappers,
+      disable_native_cache: disable_native_cache,
     )
   end
 
@@ -107,8 +107,8 @@ module GoldLapel
     silent: false,
     mesh: false,
     mesh_tag: nil,
-    enable_l2_for_wrappers: false,
-    disable_l1: false
+    enable_proxy_cache_for_wrappers: false,
+    disable_native_cache: false
   )
     # Legacy/advanced: construct without eagerly spawning or connecting.
     Instance.new(
@@ -127,8 +127,8 @@ module GoldLapel
       silent: silent,
       mesh: mesh,
       mesh_tag: mesh_tag,
-      enable_l2_for_wrappers: enable_l2_for_wrappers,
-      disable_l1: disable_l1,
+      enable_proxy_cache_for_wrappers: enable_proxy_cache_for_wrappers,
+      disable_native_cache: disable_native_cache,
     )
   end
 
@@ -149,7 +149,7 @@ module GoldLapel
     silent: false,
     mesh: false,
     mesh_tag: nil,
-    enable_l2_for_wrappers: false
+    enable_proxy_cache_for_wrappers: false
   )
     Proxy.start(
       upstream,
@@ -166,7 +166,7 @@ module GoldLapel
       silent: silent,
       mesh: mesh,
       mesh_tag: mesh_tag,
-      enable_l2_for_wrappers: enable_l2_for_wrappers,
+      enable_proxy_cache_for_wrappers: enable_proxy_cache_for_wrappers,
     )
   end
 

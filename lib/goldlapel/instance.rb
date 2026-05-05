@@ -34,8 +34,8 @@ module GoldLapel
       silent: false,
       mesh: false,
       mesh_tag: nil,
-      enable_l2_for_wrappers: false,
-      disable_l1: false
+      enable_proxy_cache_for_wrappers: false,
+      disable_native_cache: false
     )
       @upstream = upstream
       @proxy_port = proxy_port
@@ -52,8 +52,8 @@ module GoldLapel
       @mesh = mesh ? true : false
       tag = mesh_tag.to_s
       @mesh_tag = tag.empty? ? nil : tag
-      @enable_l2_for_wrappers = enable_l2_for_wrappers ? true : false
-      @disable_l1 = disable_l1 ? true : false
+      @enable_proxy_cache_for_wrappers = enable_proxy_cache_for_wrappers ? true : false
+      @disable_native_cache = disable_native_cache ? true : false
       @proxy = nil
       @internal_conn = nil
       @wrapped_conn = nil
@@ -111,7 +111,7 @@ module GoldLapel
         silent: @silent,
         mesh: @mesh,
         mesh_tag: @mesh_tag,
-        enable_l2_for_wrappers: @enable_l2_for_wrappers,
+        enable_proxy_cache_for_wrappers: @enable_proxy_cache_for_wrappers,
       )
 
       # Register the proxy in the module-level registry so GoldLapel.stop,
@@ -136,7 +136,7 @@ module GoldLapel
         @wrapped_conn = GoldLapel.wrap(
           raw,
           invalidation_port: @proxy.invalidation_port,
-          disable_l1: @disable_l1,
+          disable_native_cache: @disable_native_cache,
         )
         @internal_conn = @wrapped_conn
         @proxy.wrapped_conn = @wrapped_conn
