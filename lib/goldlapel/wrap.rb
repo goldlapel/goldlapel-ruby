@@ -84,6 +84,30 @@ module GoldLapel
       # reads of `@guc_state.state_hash` are O(1).
       @guc_state.observe_sql(sql) if sql.is_a?(String)
 
+      # Write detection + self-invalidation.
+      #
+      # Multi-statement Q messages (e.g. `SET app.user_id = '42';
+      # INSERT INTO orders VALUES (1)`) need every segment classified —
+      # the single-token `detect_write` would otherwise see `SET` and
+      # let the INSERT escape invalidation, leaving stale cached
+      # SELECTs from `orders` to survive the write. Reuse the GUC-
+      # state splitter (already wired for SET observation) and union
+      # the resulting invalidations. DDL_SENTINEL short-circuits to
+      # invalidate_all.
+      #
+      # Runs BEFORE the TX_START/TX_END check so that
+      # `SET app.x = 'y'; INSERT INTO t VALUES (1); SELECT 1` properly
+      # invalidates `t`. Standalone `BEGIN`/`COMMIT` flow through the
+      # collector cheaply (single segment, no `;`, empty result) and
+      # then hit the TX state toggle below.
+      tables_to_invalidate, all_invalid = collect_write_invalidations(sql)
+      if all_invalid
+        @cache.invalidate_all
+      elsif !tables_to_invalidate.empty?
+        tables_to_invalidate.each { |t| @cache.invalidate_table(t) }
+      end
+      wrote_something = all_invalid || !tables_to_invalidate.empty?
+
       # Transaction tracking
       if GoldLapel::TX_START.match?(sql)
         @in_transaction = true
@@ -94,16 +118,10 @@ module GoldLapel
         return delegate(method, sql, params, result_format, &block)
       end
 
-      # Write detection + self-invalidation
-      write_table = GoldLapel.detect_write(sql)
-      if write_table
-        if write_table == GoldLapel::DDL_SENTINEL
-          @cache.invalidate_all
-        else
-          @cache.invalidate_table(write_table)
-        end
-        return delegate(method, sql, params, result_format, &block)
-      end
+      # If the SQL contained a write (single-statement or in a multi-
+      # statement body), it must NOT be served from cache — dispatch
+      # to the underlying connection so the server actually runs it.
+      return delegate(method, sql, params, result_format, &block) if wrote_something
 
       # Inside transaction: bypass cache
       return delegate(method, sql, params, result_format, &block) if @in_transaction
@@ -137,6 +155,38 @@ module GoldLapel
       end
 
       result
+    end
+
+    # Run `detect_write` over every segment of a (possibly) multi-
+    # statement SQL body and return `[tables_set, all_invalid]`.
+    #
+    # `tables_set` is a Set of bare table names that need
+    # invalidation; `all_invalid` is `true` when any segment hit
+    # DDL_SENTINEL (CREATE / ALTER / DROP / WITH-write CTE / ...) and
+    # the entire L1 cache must be cleared.
+    #
+    # Fast path: SQL with no top-level `;` skips the splitter entirely
+    # and runs `detect_write` once on the whole string.
+    def collect_write_invalidations(sql)
+      return [Set.new, false] unless sql.is_a?(String)
+
+      segments =
+        if sql.include?(";")
+          GucState.split_statements(sql)
+        else
+          [sql]
+        end
+
+      tables = Set.new
+      segments.each do |seg|
+        t = GoldLapel.detect_write(seg)
+        next if t.nil?
+        if t == GoldLapel::DDL_SENTINEL
+          return [Set.new, true]
+        end
+        tables.add(t)
+      end
+      [tables, false]
     end
 
     def delegate(method, sql, params, result_format, &block)

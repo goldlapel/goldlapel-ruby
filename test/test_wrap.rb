@@ -154,6 +154,89 @@ class TestWrites < Minitest::Test
     assert_nil @cache.get("SELECT * FROM orders", nil)
     assert_nil @cache.get("SELECT * FROM users", nil)
   end
+
+  # ----- Multi-statement Q-message write detection -----
+  #
+  # `detect_write` only inspects the first token, so writes hidden
+  # behind a leading `SET` / harmless command in a multi-statement
+  # Q-message would otherwise escape invalidation. The wrapper must
+  # split on top-level `;` and run write detection per segment.
+
+  def test_set_then_insert_invalidates_target_table
+    # The classic gap: `SET app.user_id = '42'; INSERT INTO orders ...`.
+    # Prior to the multi-statement fix, the `SET` first token won and
+    # the INSERT escaped invalidation, leaving a stale cached SELECT.
+    mock = MockConnection.new
+    @cache.put("SELECT * FROM orders", nil, [["1"]], ["id"])
+    conn = GoldLapel::CachedConnection.new(mock, @cache)
+    conn.exec("SET app.user_id = '42'; INSERT INTO orders VALUES (2)")
+    assert_nil @cache.get("SELECT * FROM orders", nil, conn.guc_state.state_hash)
+    assert_nil @cache.get("SELECT * FROM orders", nil)
+  end
+
+  def test_set_then_update_invalidates_target_table
+    mock = MockConnection.new
+    @cache.put("SELECT * FROM users", nil, [["1"]], ["id"])
+    conn = GoldLapel::CachedConnection.new(mock, @cache)
+    conn.exec("SET app.tenant = 'x'; UPDATE users SET name = 'a' WHERE id = 1")
+    assert_nil @cache.get("SELECT * FROM users", nil, conn.guc_state.state_hash)
+    assert_nil @cache.get("SELECT * FROM users", nil)
+  end
+
+  def test_set_then_delete_invalidates_target_table
+    mock = MockConnection.new
+    @cache.put("SELECT * FROM logs", nil, [["1"]], ["id"])
+    conn = GoldLapel::CachedConnection.new(mock, @cache)
+    conn.exec("SET app.tenant = 'x'; DELETE FROM logs WHERE id = 1")
+    assert_nil @cache.get("SELECT * FROM logs", nil, conn.guc_state.state_hash)
+    assert_nil @cache.get("SELECT * FROM logs", nil)
+  end
+
+  def test_multi_statement_writes_to_two_tables_invalidate_both
+    mock = MockConnection.new
+    @cache.put("SELECT * FROM orders", nil, [["1"]], ["id"])
+    @cache.put("SELECT * FROM audit", nil, [["2"]], ["id"])
+    conn = GoldLapel::CachedConnection.new(mock, @cache)
+    conn.exec(
+      "INSERT INTO orders VALUES (3); INSERT INTO audit VALUES (4)"
+    )
+    assert_nil @cache.get("SELECT * FROM orders", nil)
+    assert_nil @cache.get("SELECT * FROM audit", nil)
+  end
+
+  def test_multi_statement_ddl_invalidates_all
+    mock = MockConnection.new
+    @cache.put("SELECT * FROM orders", nil, [["1"]], ["id"])
+    @cache.put("SELECT * FROM users", nil, [["2"]], ["id"])
+    conn = GoldLapel::CachedConnection.new(mock, @cache)
+    # DDL anywhere in the segment list short-circuits to invalidate_all.
+    conn.exec("SET app.user = 'x'; CREATE TABLE foo (id int)")
+    assert_nil @cache.get("SELECT * FROM orders", nil)
+    assert_nil @cache.get("SELECT * FROM users", nil)
+  end
+
+  def test_multi_statement_write_delegates_to_real_connection
+    # Even after invalidation, the SQL itself must be sent to the
+    # underlying connection — invalidation alone is not enough.
+    mock = MockConnection.new
+    conn = GoldLapel::CachedConnection.new(mock, @cache)
+    conn.exec("SET app.user_id = '42'; INSERT INTO orders VALUES (1)")
+    assert_equal 1, mock.calls.length
+    assert_match(/INSERT INTO orders/, mock.calls.first[:sql])
+  end
+
+  def test_multi_statement_with_only_set_does_not_invalidate
+    # No write segment, no invalidation. The state-hash changes (new
+    # GUC), so a future SELECT under the new state hashes to a fresh
+    # slot — but the OLD state hash (here `0`) is still valid, exactly
+    # what we want for cross-connection cache reuse.
+    mock = MockConnection.new
+    @cache.put("SELECT * FROM orders", nil, [["1"]], ["id"])
+    conn = GoldLapel::CachedConnection.new(mock, @cache)
+    conn.exec("SET app.user = 'x'; SET app.tenant = 'y'")
+    # Old (empty-state) entry survives the SET-only multi-statement.
+    assert @cache.get("SELECT * FROM orders", nil)
+  end
 end
 
 class TestTransactions < Minitest::Test
