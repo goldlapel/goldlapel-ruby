@@ -39,6 +39,14 @@ module GoldLapel
           config = gl_config[:config]
           extra_args = gl_config[:extra_args] || []
           @goldlapel_invalidation_port = gl_config[:invalidation_port]
+          # Wave 3 promoted these flags out of the `config:` bag onto
+          # the canonical top-level surface; surface them on the
+          # railtie too so Rails users can reach them via
+          # `database.yml` without dropping down to direct
+          # `GoldLapel.start_proxy`. `disable_native_cache` is the
+          # only flag that belongs on `wrap` (L1 lives in the
+          # wrapper); the rest go to the proxy spawn.
+          @goldlapel_disable_native_cache = gl_config[:disable_native_cache] ? true : false
 
           upstream = GoldLapel::Rails.build_upstream_url(@connection_parameters)
 
@@ -58,6 +66,13 @@ module GoldLapel
               config_file: gl_config[:config_file],
               config: config,
               extra_args: extra_args,
+              silent: gl_config[:silent] ? true : false,
+              mesh: gl_config[:mesh] ? true : false,
+              mesh_tag: gl_config[:mesh_tag],
+              disable_proxy_cache: gl_config[:disable_proxy_cache] ? true : false,
+              disable_matviews: gl_config[:disable_matviews] ? true : false,
+              disable_sqloptimize: gl_config[:disable_sqloptimize] ? true : false,
+              disable_auto_indexes: gl_config[:disable_auto_indexes] ? true : false,
             )
           rescue => e
             ::Rails.logger.warn("[Gold Lapel] Proxy failed to start: #{e.message} — falling back to direct connection")
@@ -79,7 +94,8 @@ module GoldLapel
           begin
             @raw_connection = GoldLapel.wrap(
               @raw_connection,
-              invalidation_port: @goldlapel_invalidation_port
+              invalidation_port: @goldlapel_invalidation_port,
+              disable_native_cache: @goldlapel_disable_native_cache,
             )
           rescue => e
             ::Rails.logger.warn("[Gold Lapel] L1 cache wrap failed: #{e.message} — using unwrapped connection")

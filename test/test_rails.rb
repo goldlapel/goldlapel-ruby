@@ -53,8 +53,12 @@ module RailsTestGoldLapelStub
     GoldLapel.define_singleton_method(:start_proxy) do |upstream, **kwargs|
       @start_calls << { upstream: upstream, **kwargs }
     end
-    GoldLapel.define_singleton_method(:wrap) do |conn, invalidation_port: nil|
-      @wrap_calls << { conn: conn, invalidation_port: invalidation_port }
+    GoldLapel.define_singleton_method(:wrap) do |conn, invalidation_port: nil, disable_native_cache: false|
+      @wrap_calls << {
+        conn: conn,
+        invalidation_port: invalidation_port,
+        disable_native_cache: disable_native_cache,
+      }
       GoldLapel::WrappedConnection.new(conn, invalidation_port)
     end
   ensure
@@ -416,6 +420,162 @@ class TestConnect < Minitest::Test
     assert_equal 9000, adapter.connection_parameters[:port]
   end
 
+  # ----- Wave 3 canonical-surface kwarg forwarding -----
+  #
+  # `database.yml`'s `goldlapel:` block exposes the canonical top-
+  # level surface (proxy_port, dashboard_port, ..., silent, mesh,
+  # mesh_tag, disable_proxy_cache, disable_matviews,
+  # disable_sqloptimize, disable_auto_indexes, disable_native_cache).
+  # Each kwarg must thread from configuration through to
+  # `start_proxy` (or `wrap`, for `disable_native_cache`).
+
+  def test_silent_forwarded_to_start_proxy
+    adapter = FakeAdapter.new(
+      config: { goldlapel: { silent: true } },
+      connection_parameters: {
+        host: "db.example.com", port: "5432",
+        user: "u", password: "p", dbname: "mydb"
+      }
+    )
+    adapter.send(:connect)
+    assert_equal true, GoldLapel.start_calls.first[:silent]
+  end
+
+  def test_silent_defaults_to_false
+    adapter = FakeAdapter.new(
+      config: {},
+      connection_parameters: {
+        host: "db.example.com", port: "5432",
+        user: "u", password: "p", dbname: "mydb"
+      }
+    )
+    adapter.send(:connect)
+    assert_equal false, GoldLapel.start_calls.first[:silent]
+  end
+
+  def test_mesh_and_mesh_tag_forwarded_to_start_proxy
+    adapter = FakeAdapter.new(
+      config: { goldlapel: { mesh: true, mesh_tag: "tenant-7" } },
+      connection_parameters: {
+        host: "db.example.com", port: "5432",
+        user: "u", password: "p", dbname: "mydb"
+      }
+    )
+    adapter.send(:connect)
+    call = GoldLapel.start_calls.first
+    assert_equal true, call[:mesh]
+    assert_equal "tenant-7", call[:mesh_tag]
+  end
+
+  def test_mesh_defaults
+    adapter = FakeAdapter.new(
+      config: {},
+      connection_parameters: {
+        host: "db.example.com", port: "5432",
+        user: "u", password: "p", dbname: "mydb"
+      }
+    )
+    adapter.send(:connect)
+    call = GoldLapel.start_calls.first
+    assert_equal false, call[:mesh]
+    assert_nil call[:mesh_tag]
+  end
+
+  def test_disable_proxy_cache_forwarded
+    adapter = FakeAdapter.new(
+      config: { goldlapel: { disable_proxy_cache: true } },
+      connection_parameters: {
+        host: "db.example.com", port: "5432",
+        user: "u", password: "p", dbname: "mydb"
+      }
+    )
+    adapter.send(:connect)
+    assert_equal true, GoldLapel.start_calls.first[:disable_proxy_cache]
+  end
+
+  def test_disable_matviews_forwarded
+    adapter = FakeAdapter.new(
+      config: { goldlapel: { disable_matviews: true } },
+      connection_parameters: {
+        host: "db.example.com", port: "5432",
+        user: "u", password: "p", dbname: "mydb"
+      }
+    )
+    adapter.send(:connect)
+    assert_equal true, GoldLapel.start_calls.first[:disable_matviews]
+  end
+
+  def test_disable_sqloptimize_forwarded
+    adapter = FakeAdapter.new(
+      config: { goldlapel: { disable_sqloptimize: true } },
+      connection_parameters: {
+        host: "db.example.com", port: "5432",
+        user: "u", password: "p", dbname: "mydb"
+      }
+    )
+    adapter.send(:connect)
+    assert_equal true, GoldLapel.start_calls.first[:disable_sqloptimize]
+  end
+
+  def test_disable_auto_indexes_forwarded
+    adapter = FakeAdapter.new(
+      config: { goldlapel: { disable_auto_indexes: true } },
+      connection_parameters: {
+        host: "db.example.com", port: "5432",
+        user: "u", password: "p", dbname: "mydb"
+      }
+    )
+    adapter.send(:connect)
+    assert_equal true, GoldLapel.start_calls.first[:disable_auto_indexes]
+  end
+
+  def test_disable_proxy_side_flags_default_false
+    adapter = FakeAdapter.new(
+      config: {},
+      connection_parameters: {
+        host: "db.example.com", port: "5432",
+        user: "u", password: "p", dbname: "mydb"
+      }
+    )
+    adapter.send(:connect)
+    call = GoldLapel.start_calls.first
+    assert_equal false, call[:disable_proxy_cache]
+    assert_equal false, call[:disable_matviews]
+    assert_equal false, call[:disable_sqloptimize]
+    assert_equal false, call[:disable_auto_indexes]
+  end
+
+  def test_string_keys_for_new_kwargs_from_yaml
+    # Rails' YAML parsing produces string keys; transform_keys
+    # symbolises shallowly so the new kwargs must work via strings too.
+    adapter = FakeAdapter.new(
+      config: {
+        goldlapel: {
+          "silent" => true,
+          "mesh" => true,
+          "mesh_tag" => "node-a",
+          "disable_proxy_cache" => true,
+          "disable_matviews" => true,
+          "disable_sqloptimize" => true,
+          "disable_auto_indexes" => true,
+        }
+      },
+      connection_parameters: {
+        host: "db.example.com", port: "5432",
+        user: "u", password: "p", dbname: "mydb"
+      }
+    )
+    adapter.send(:connect)
+    call = GoldLapel.start_calls.first
+    assert_equal true, call[:silent]
+    assert_equal true, call[:mesh]
+    assert_equal "node-a", call[:mesh_tag]
+    assert_equal true, call[:disable_proxy_cache]
+    assert_equal true, call[:disable_matviews]
+    assert_equal true, call[:disable_sqloptimize]
+    assert_equal true, call[:disable_auto_indexes]
+  end
+
   def test_graceful_fallback_on_start_failure
     RailsTestGoldLapelStub.override_start_proxy do |upstream, **kwargs|
       raise RuntimeError, "binary not found"
@@ -564,6 +724,45 @@ class TestL1CacheWrapping < Minitest::Test
     assert_equal 2, GoldLapel.wrap_calls.length
   end
 
+  def test_disable_native_cache_forwarded_to_wrap
+    adapter = FakeAdapter.new(
+      config: { goldlapel: { disable_native_cache: true } },
+      connection_parameters: {
+        host: "db.example.com", port: "5432",
+        user: "u", password: "p", dbname: "mydb"
+      }
+    )
+    adapter.send(:connect)
+    call = GoldLapel.wrap_calls.first
+    assert_equal true, call[:disable_native_cache]
+  end
+
+  def test_disable_native_cache_defaults_to_false
+    adapter = FakeAdapter.new(
+      config: {},
+      connection_parameters: {
+        host: "db.example.com", port: "5432",
+        user: "u", password: "p", dbname: "mydb"
+      }
+    )
+    adapter.send(:connect)
+    call = GoldLapel.wrap_calls.first
+    assert_equal false, call[:disable_native_cache]
+  end
+
+  def test_disable_native_cache_string_key_from_yaml
+    adapter = FakeAdapter.new(
+      config: { goldlapel: { "disable_native_cache" => true } },
+      connection_parameters: {
+        host: "db.example.com", port: "5432",
+        user: "u", password: "p", dbname: "mydb"
+      }
+    )
+    adapter.send(:connect)
+    call = GoldLapel.wrap_calls.first
+    assert_equal true, call[:disable_native_cache]
+  end
+
   def test_no_wrap_on_fallback
     RailsTestGoldLapelStub.override_start_proxy do |upstream, **kwargs|
       raise RuntimeError, "binary not found"
@@ -586,8 +785,12 @@ class TestL1CacheWrapping < Minitest::Test
   end
 
   def test_graceful_fallback_on_wrap_failure
-    RailsTestGoldLapelStub.override_wrap do |conn, invalidation_port: nil|
-      @wrap_calls << { conn: conn, invalidation_port: invalidation_port }
+    RailsTestGoldLapelStub.override_wrap do |conn, invalidation_port: nil, disable_native_cache: false|
+      @wrap_calls << {
+        conn: conn,
+        invalidation_port: invalidation_port,
+        disable_native_cache: disable_native_cache,
+      }
       raise RuntimeError, "wrap exploded"
     end
 
