@@ -35,6 +35,45 @@ module GoldLapel
     limit offset union intersect except all distinct lateral values
   ]).freeze
 
+  # Replace the contents of `'...'` and `"..."` string literals with
+  # spaces, preserving overall length so positions line up with the
+  # original. PG's doubled-quote `''` / `""` escapes are handled the
+  # same way as in `GucState.split_statements`. Used by `detect_write`'s
+  # SELECT branch so that bare words like `INTO` inside a literal
+  # (e.g. `SELECT 'INSERT INTO orders' FROM audit_log`) don't trip the
+  # SELECT-INTO DDL classifier.
+  def self.strip_string_literals(sql)
+    return sql unless sql.is_a?(String) && !sql.empty?
+    out = sql.dup
+    quote = nil
+    i = 0
+    n = sql.length
+    while i < n
+      c = sql[i]
+      if quote
+        if c == quote
+          if i + 1 < n && sql[i + 1] == quote
+            # Doubled-quote escape: blank both, stay inside literal.
+            out[i] = " "
+            out[i + 1] = " "
+            i += 2
+            next
+          end
+          # Closing quote: leave the delimiter, drop the literal body.
+          quote = nil
+        else
+          out[i] = " "
+        end
+      else
+        if c == "'" || c == '"'
+          quote = c
+        end
+      end
+      i += 1
+    end
+    out
+  end
+
   def self.detect_write(sql)
     trimmed = sql.strip
     tokens = trimmed.split(/\s+/)
@@ -65,9 +104,14 @@ module GoldLapel
       return nil if tokens.length < 3 || tokens[1].upcase != "INTO"
       bare_table(tokens[2])
     when "SELECT"
+      # Re-tokenize from a literal-stripped form so that bare words like
+      # `INTO` or `FROM` inside `'...'` / `"..."` don't trigger the
+      # SELECT-INTO DDL classifier (e.g. `SELECT 'INSERT INTO orders'
+      # FROM audit_log`, `SELECT * FROM "into_table"`).
+      scan_tokens = strip_string_literals(trimmed).split(/\s+/)
       saw_into = false
       into_target = nil
-      tokens[1..].each do |tok|
+      scan_tokens[1..].each do |tok|
         upper = tok.upcase
         if upper == "INTO" && !saw_into
           saw_into = true
