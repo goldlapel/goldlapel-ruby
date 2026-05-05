@@ -276,7 +276,7 @@ module GoldLapel
       @cache.size
     end
 
-    def get(sql, params)
+    def get(sql, params, state_hash = 0)
       return nil unless @enabled && @invalidation_connected
       # disable_native_cache: tick misses (callers measure miss rate),
       # never hit. Skip the key-build + cache lookup entirely — no point.
@@ -284,7 +284,7 @@ module GoldLapel
         @mutex.synchronize { @stats_misses += 1 }
         return nil
       end
-      key = make_key(sql, params)
+      key = make_key(sql, params, state_hash)
       return nil unless key
       @mutex.synchronize do
         entry = @cache[key]
@@ -300,13 +300,13 @@ module GoldLapel
       end
     end
 
-    def put(sql, params, values, fields)
+    def put(sql, params, values, fields, state_hash = 0)
       return unless @enabled && @invalidation_connected
       # disable_native_cache: silent no-op. Don't touch cache state,
       # don't touch the eviction-rate window, don't bump counters — the
       # layer is off.
       return if @disable_native_cache
-      key = make_key(sql, params)
+      key = make_key(sql, params, state_hash)
       return unless key
       tables = GoldLapel.extract_tables(sql)
       evicted = 0
@@ -440,8 +440,17 @@ module GoldLapel
 
     private
 
-    def make_key(sql, params)
-      "#{sql}\0#{params&.to_s}"
+    # Cache key shape: `<state_hash_hex>\0<sql>\0<params>`. The
+    # `state_hash` is a per-connection fingerprint of the unsafe-GUC
+    # state (see `GoldLapel::GucState::ConnectionGucState`). Two
+    # connections with different unsafe-GUC state map to different
+    # cache slots, so custom-GUC RLS can never leak user A's rows to
+    # user B. `0` is the fingerprint for the default ("no unsafe GUCs
+    # set") state — a fresh connection's keys collide with peer
+    # connections that also have no unsafe state, which is what we
+    # want.
+    def make_key(sql, params, state_hash = 0)
+      "#{state_hash.to_s(16)}\0#{sql}\0#{params&.to_s}"
     end
 
     def evict_one

@@ -13,7 +13,8 @@ module GoldLapel
   class Proxy
     attr_reader :url, :upstream, :dashboard_url, :proxy_port, :config, :dashboard_port,
                 :invalidation_port, :dashboard_token, :mesh, :mesh_tag,
-                :enable_proxy_cache_for_wrappers
+                :disable_proxy_cache, :disable_matviews, :disable_sqloptimize,
+                :disable_auto_indexes
     attr_accessor :wrapped_conn
 
     # Keys that are valid inside the structured `config` hash. Top-level
@@ -21,6 +22,11 @@ module GoldLapel
     # mode, license, client, config_file) are exposed as their own keyword
     # arguments on GoldLapel.start / Proxy.new and are NOT valid keys here
     # — passing them through `config` raises.
+    #
+    # The four cache-/optimization-disable flags
+    # (disable_proxy_cache, disable_matviews, disable_sqloptimize,
+    # disable_auto_indexes) are also top-level kwargs now and intentionally
+    # absent from this list — the config-map path rejects them.
     VALID_CONFIG_KEYS = %w[
       min_pattern_count refresh_interval_secs pattern_ttl_secs
       max_tables_per_view max_columns_per_view deep_pagination_threshold
@@ -29,19 +35,19 @@ module GoldLapel
       pool_mode mgmt_idle_timeout fallback read_after_write_secs
       n1_threshold n1_window_ms n1_cross_threshold
       tls_cert tls_key tls_client_ca
-      disable_matviews disable_consolidation disable_btree_indexes
+      disable_consolidation disable_btree_indexes
       disable_trigram_indexes disable_expression_indexes
       disable_partial_indexes disable_rewrite disable_rewrite_prepared_cache
-      disable_proxy_cache disable_pool
+      disable_pool
       disable_n1 disable_n1_cross_connection disable_shadow_mode
       enable_coalescing replica exclude_tables
     ].freeze
 
     BOOLEAN_KEYS = %w[
-      disable_matviews disable_consolidation disable_btree_indexes
+      disable_consolidation disable_btree_indexes
       disable_trigram_indexes disable_expression_indexes
       disable_partial_indexes disable_rewrite disable_rewrite_prepared_cache
-      disable_proxy_cache disable_pool
+      disable_pool
       disable_n1 disable_n1_cross_connection disable_shadow_mode
       enable_coalescing
     ].freeze
@@ -122,7 +128,10 @@ module GoldLapel
       silent: false,
       mesh: false,
       mesh_tag: nil,
-      enable_proxy_cache_for_wrappers: false
+      disable_proxy_cache: false,
+      disable_matviews: false,
+      disable_sqloptimize: false,
+      disable_auto_indexes: false
     )
       @upstream = upstream
       @proxy_port = proxy_port || DEFAULT_PROXY_PORT
@@ -156,12 +165,12 @@ module GoldLapel
       @mesh = mesh ? true : false
       tag = mesh_tag.to_s
       @mesh_tag = tag.empty? ? nil : tag
-      # Opt-in: re-enable the proxy cache for wrapper traffic. Default is
-      # false because per-connection proxy-cache-skip ships as the wrapper
-      # default (the wrapper has its own native cache). Fleets with multi-pod
-      # / frequent restart / mesh topologies benefit from the proxy cache as
-      # a shared cache and can opt back in here.
-      @enable_proxy_cache_for_wrappers = enable_proxy_cache_for_wrappers ? true : false
+      # Top-level disable flags promoted out of the structured config map.
+      # Each maps 1:1 to a CLI flag on the spawned binary.
+      @disable_proxy_cache = disable_proxy_cache ? true : false
+      @disable_matviews = disable_matviews ? true : false
+      @disable_sqloptimize = disable_sqloptimize ? true : false
+      @disable_auto_indexes = disable_auto_indexes ? true : false
       @pid = nil
       @url = nil
       @dashboard_url = nil
@@ -199,7 +208,10 @@ module GoldLapel
       cmd.push("--config", @config_file) if @config_file
       cmd.push("--mesh") if @mesh
       cmd.push("--mesh-tag", @mesh_tag) if @mesh_tag
-      cmd.push("--enable-proxy-cache-for-wrappers") if @enable_proxy_cache_for_wrappers
+      cmd.push("--disable-proxy-cache") if @disable_proxy_cache
+      cmd.push("--disable-matviews") if @disable_matviews
+      cmd.push("--disable-sqloptimize") if @disable_sqloptimize
+      cmd.push("--disable-auto-indexes") if @disable_auto_indexes
       cmd.concat(self.class.config_to_args(@config))
       cmd.concat(@extra_args)
 
@@ -405,7 +417,10 @@ module GoldLapel
         silent: false,
         mesh: false,
         mesh_tag: nil,
-        enable_proxy_cache_for_wrappers: false
+        disable_proxy_cache: false,
+        disable_matviews: false,
+        disable_sqloptimize: false,
+        disable_auto_indexes: false
       )
         @mutex.synchronize do
           existing = @instances[upstream]
@@ -426,7 +441,10 @@ module GoldLapel
             silent: silent,
             mesh: mesh,
             mesh_tag: mesh_tag,
-            enable_proxy_cache_for_wrappers: enable_proxy_cache_for_wrappers,
+            disable_proxy_cache: disable_proxy_cache,
+            disable_matviews: disable_matviews,
+            disable_sqloptimize: disable_sqloptimize,
+            disable_auto_indexes: disable_auto_indexes,
           )
           unless @cleanup_registered
             at_exit { cleanup }

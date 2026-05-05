@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "cache"
+require_relative "guc_state"
 
 module GoldLapel
   def self.wrap(conn, invalidation_port: nil, disable_native_cache: false)
@@ -27,10 +28,17 @@ module GoldLapel
   end
 
   class CachedConnection
+    # Exposed for tests and rare adapters. Don't mutate from outside.
+    attr_reader :guc_state
+
     def initialize(real_conn, cache)
       @real = real_conn
       @cache = cache
       @in_transaction = false
+      # Per-connection unsafe-GUC fingerprint. Folded into the L1
+      # cache key so custom-GUC RLS (`SET app.user_id = '42'`) can
+      # never leak user A's rows to user B. See `goldlapel/guc_state.rb`.
+      @guc_state = GucState::ConnectionGucState.new
     end
 
     def exec(sql, &block)
@@ -69,6 +77,13 @@ module GoldLapel
     private
 
     def handle_query(sql, params, method, block, result_format = nil)
+      # Observe SET / RESET on every query so the per-connection
+      # unsafe-GUC state stays current. Runs first — even DDL/writes
+      # and the in-transaction bypass paths must update state if the
+      # SQL body contains a `SET app.x = ...`. Update is in-place;
+      # reads of `@guc_state.state_hash` are O(1).
+      @guc_state.observe_sql(sql) if sql.is_a?(String)
+
       # Transaction tracking
       if GoldLapel::TX_START.match?(sql)
         @in_transaction = true
@@ -93,8 +108,11 @@ module GoldLapel
       # Inside transaction: bypass cache
       return delegate(method, sql, params, result_format, &block) if @in_transaction
 
-      # Read path: check L1 cache
-      entry = @cache.get(sql, params)
+      # Read path: check L1 cache. Pass the per-connection state hash
+      # so cache slots never cross connections with different unsafe
+      # GUC state.
+      sh = @guc_state.state_hash
+      entry = @cache.get(sql, params, sh)
       if entry
         result = CachedResult.new(entry[:values], entry[:fields])
         if block
@@ -109,7 +127,7 @@ module GoldLapel
 
       # Cache the result if it has rows
       if result && result.respond_to?(:values) && result.respond_to?(:fields)
-        @cache.put(sql, params, result.values, result.fields)
+        @cache.put(sql, params, result.values, result.fields, sh)
       end
 
       # Yield to block if provided (matching PG gem's block API)

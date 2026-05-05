@@ -297,86 +297,156 @@ class TestMeshKwargs < Minitest::Test
   end
 end
 
-class TestEnableProxyCacheForWrappersKwargs < Minitest::Test
-  # `enable_proxy_cache_for_wrappers` — top-level canonical-surface bool.
-  # Default false (per-connection proxy-cache wrapper-skip is the wrapper
-  # default). When true, the spawned proxy receives
-  # `--enable-proxy-cache-for-wrappers` so wrapper traffic is served by the
-  # proxy cache too — a knob fleet customers (multi-pod, frequent restarts,
-  # mesh) flip on to share the proxy cache across wrapper processes.
+class TestDisableTopLevelKwargs < Minitest::Test
+  # The four cache-/optimization-disable flags
+  # (disable_proxy_cache, disable_matviews, disable_sqloptimize,
+  # disable_auto_indexes) are top-level canonical-surface kwargs. Each
+  # maps 1:1 to a CLI flag on the spawned proxy binary. None of them
+  # belong in the structured `config:` map — passing them through there
+  # raises ArgumentError. (Atomic break for `disable_proxy_cache` and
+  # `disable_matviews`, which used to live in the config map.)
 
-  def test_default
+  DISABLE_FLAGS = {
+    disable_proxy_cache: "--disable-proxy-cache",
+    disable_matviews: "--disable-matviews",
+    disable_sqloptimize: "--disable-sqloptimize",
+    disable_auto_indexes: "--disable-auto-indexes",
+  }.freeze
+
+  def test_defaults_are_false
     proxy = GoldLapel::Proxy.new("postgresql://user@host/db")
-    assert_equal false, proxy.enable_proxy_cache_for_wrappers
+    assert_equal false, proxy.disable_proxy_cache
+    assert_equal false, proxy.disable_matviews
+    assert_equal false, proxy.disable_sqloptimize
+    assert_equal false, proxy.disable_auto_indexes
   end
 
   def test_stored_when_true
     proxy = GoldLapel::Proxy.new(
-      "postgresql://user@host/db", enable_proxy_cache_for_wrappers: true,
+      "postgresql://user@host/db",
+      disable_proxy_cache: true,
+      disable_matviews: true,
+      disable_sqloptimize: true,
+      disable_auto_indexes: true,
     )
-    assert_equal true, proxy.enable_proxy_cache_for_wrappers
+    assert_equal true, proxy.disable_proxy_cache
+    assert_equal true, proxy.disable_matviews
+    assert_equal true, proxy.disable_sqloptimize
+    assert_equal true, proxy.disable_auto_indexes
   end
 
   def test_truthy_normalized_to_true
     proxy = GoldLapel::Proxy.new(
-      "postgresql://user@host/db", enable_proxy_cache_for_wrappers: "yes",
+      "postgresql://user@host/db",
+      disable_proxy_cache: "yes",
+      disable_matviews: 1,
+      disable_sqloptimize: Object.new,
+      disable_auto_indexes: "no", # any truthy string normalizes to true
     )
-    assert_equal true, proxy.enable_proxy_cache_for_wrappers
+    assert_equal true, proxy.disable_proxy_cache
+    assert_equal true, proxy.disable_matviews
+    assert_equal true, proxy.disable_sqloptimize
+    assert_equal true, proxy.disable_auto_indexes
   end
 
-  def test_flag_forwarded_to_binary_when_true
-    BannerTestSupport.with_stubbed_spawn do |recorded|
-      BannerTestSupport.start_proxy(
-        proxy_port: 17937, enable_proxy_cache_for_wrappers: true, silent: true,
-      )
-      assert_includes recorded[:cmd], "--enable-proxy-cache-for-wrappers"
+  def test_each_flag_forwarded_when_true
+    DISABLE_FLAGS.each_with_index do |(kwarg, cli_flag), i|
+      BannerTestSupport.with_stubbed_spawn do |recorded|
+        BannerTestSupport.start_proxy(
+          proxy_port: 17940 + i, kwarg => true, silent: true,
+        )
+        assert_includes recorded[:cmd], cli_flag,
+          "expected #{cli_flag} when #{kwarg}: true"
+      end
     end
   end
 
-  def test_flag_absent_by_default
+  def test_flags_absent_by_default
     BannerTestSupport.with_stubbed_spawn do |recorded|
-      BannerTestSupport.start_proxy(proxy_port: 17938, silent: true)
-      refute_includes recorded[:cmd], "--enable-proxy-cache-for-wrappers"
+      BannerTestSupport.start_proxy(proxy_port: 17945, silent: true)
+      DISABLE_FLAGS.each_value do |cli_flag|
+        refute_includes recorded[:cmd], cli_flag,
+          "default proxy must not emit #{cli_flag}"
+      end
     end
   end
 
-  def test_flag_absent_when_false
+  def test_flags_absent_when_false
     BannerTestSupport.with_stubbed_spawn do |recorded|
       BannerTestSupport.start_proxy(
-        proxy_port: 17939, enable_proxy_cache_for_wrappers: false, silent: true,
+        proxy_port: 17946,
+        disable_proxy_cache: false,
+        disable_matviews: false,
+        disable_sqloptimize: false,
+        disable_auto_indexes: false,
+        silent: true,
       )
-      refute_includes recorded[:cmd], "--enable-proxy-cache-for-wrappers"
+      DISABLE_FLAGS.each_value do |cli_flag|
+        refute_includes recorded[:cmd], cli_flag
+      end
+    end
+  end
+
+  def test_all_four_flags_emitted_together
+    BannerTestSupport.with_stubbed_spawn do |recorded|
+      BannerTestSupport.start_proxy(
+        proxy_port: 17947,
+        disable_proxy_cache: true,
+        disable_matviews: true,
+        disable_sqloptimize: true,
+        disable_auto_indexes: true,
+        silent: true,
+      )
+      DISABLE_FLAGS.each_value do |cli_flag|
+        assert_includes recorded[:cmd], cli_flag
+      end
     end
   end
 
   def test_not_in_valid_config_keys
-    refute_includes GoldLapel::Proxy::VALID_CONFIG_KEYS, "enable_proxy_cache_for_wrappers"
+    DISABLE_FLAGS.each_key do |kwarg|
+      refute_includes GoldLapel::Proxy::VALID_CONFIG_KEYS, kwarg.to_s,
+        "#{kwarg} was promoted to a top-level kwarg; must NOT live in VALID_CONFIG_KEYS"
+    end
   end
 
   def test_in_config_map_rejected
-    # Top-level canonical-surface option — passing it through the structured
-    # `config:` hash must raise instead of silently turning into a CLI flag.
-    assert_raises(ArgumentError) do
-      GoldLapel::Proxy.config_to_args({ enable_proxy_cache_for_wrappers: true })
+    # Atomic break: `disable_proxy_cache` and `disable_matviews` used to be
+    # valid `config:` keys. After promotion to top-level kwargs they must
+    # raise on the config-map path instead of silently turning into a CLI
+    # flag (otherwise users have two ways to set them and we have a config
+    # surface drift).
+    DISABLE_FLAGS.each_key do |kwarg|
+      assert_raises(ArgumentError, "passing #{kwarg} via config: must raise") do
+        GoldLapel::Proxy.config_to_args({ kwarg => true })
+      end
     end
   end
 
   def test_plumbs_through_factory_to_instance_state
-    # Regression: the kwarg must plumb GoldLapel.start → Instance → Proxy, not
-    # get stored on Instance and then dropped before Proxy.new. Use
-    # eager_connect: false to avoid the pg connection step.
+    # Regression: each kwarg must plumb GoldLapel.start → Instance → Proxy,
+    # not get stored on Instance and then dropped before Proxy.new.
     inst = GoldLapel::Instance.new(
       "postgresql://user:pass@host/db",
       eager_connect: false,
-      enable_proxy_cache_for_wrappers: true,
+      disable_proxy_cache: true,
+      disable_matviews: true,
+      disable_sqloptimize: true,
+      disable_auto_indexes: true,
     )
-    assert_equal true, inst.instance_variable_get(:@enable_proxy_cache_for_wrappers)
+    assert_equal true, inst.instance_variable_get(:@disable_proxy_cache)
+    assert_equal true, inst.instance_variable_get(:@disable_matviews)
+    assert_equal true, inst.instance_variable_get(:@disable_sqloptimize)
+    assert_equal true, inst.instance_variable_get(:@disable_auto_indexes)
   end
 
   def test_defaults_to_false_on_instance
     inst = GoldLapel::Instance.new(
       "postgresql://user:pass@host/db", eager_connect: false,
     )
-    assert_equal false, inst.instance_variable_get(:@enable_proxy_cache_for_wrappers)
+    assert_equal false, inst.instance_variable_get(:@disable_proxy_cache)
+    assert_equal false, inst.instance_variable_get(:@disable_matviews)
+    assert_equal false, inst.instance_variable_get(:@disable_sqloptimize)
+    assert_equal false, inst.instance_variable_get(:@disable_auto_indexes)
   end
 end

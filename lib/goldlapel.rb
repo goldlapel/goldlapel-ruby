@@ -68,8 +68,11 @@ module GoldLapel
     silent: false,
     mesh: false,
     mesh_tag: nil,
-    enable_proxy_cache_for_wrappers: false,
-    disable_native_cache: false
+    disable_native_cache: false,
+    disable_proxy_cache: false,
+    disable_matviews: false,
+    disable_sqloptimize: false,
+    disable_auto_indexes: false
   )
     Instance.new(
       upstream,
@@ -87,8 +90,11 @@ module GoldLapel
       silent: silent,
       mesh: mesh,
       mesh_tag: mesh_tag,
-      enable_proxy_cache_for_wrappers: enable_proxy_cache_for_wrappers,
       disable_native_cache: disable_native_cache,
+      disable_proxy_cache: disable_proxy_cache,
+      disable_matviews: disable_matviews,
+      disable_sqloptimize: disable_sqloptimize,
+      disable_auto_indexes: disable_auto_indexes,
     )
   end
 
@@ -107,8 +113,11 @@ module GoldLapel
     silent: false,
     mesh: false,
     mesh_tag: nil,
-    enable_proxy_cache_for_wrappers: false,
-    disable_native_cache: false
+    disable_native_cache: false,
+    disable_proxy_cache: false,
+    disable_matviews: false,
+    disable_sqloptimize: false,
+    disable_auto_indexes: false
   )
     # Legacy/advanced: construct without eagerly spawning or connecting.
     Instance.new(
@@ -127,8 +136,11 @@ module GoldLapel
       silent: silent,
       mesh: mesh,
       mesh_tag: mesh_tag,
-      enable_proxy_cache_for_wrappers: enable_proxy_cache_for_wrappers,
       disable_native_cache: disable_native_cache,
+      disable_proxy_cache: disable_proxy_cache,
+      disable_matviews: disable_matviews,
+      disable_sqloptimize: disable_sqloptimize,
+      disable_auto_indexes: disable_auto_indexes,
     )
   end
 
@@ -149,7 +161,10 @@ module GoldLapel
     silent: false,
     mesh: false,
     mesh_tag: nil,
-    enable_proxy_cache_for_wrappers: false
+    disable_proxy_cache: false,
+    disable_matviews: false,
+    disable_sqloptimize: false,
+    disable_auto_indexes: false
   )
     Proxy.start(
       upstream,
@@ -166,7 +181,10 @@ module GoldLapel
       silent: silent,
       mesh: mesh,
       mesh_tag: mesh_tag,
-      enable_proxy_cache_for_wrappers: enable_proxy_cache_for_wrappers,
+      disable_proxy_cache: disable_proxy_cache,
+      disable_matviews: disable_matviews,
+      disable_sqloptimize: disable_sqloptimize,
+      disable_auto_indexes: disable_auto_indexes,
     )
   end
 

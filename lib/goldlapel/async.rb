@@ -58,8 +58,11 @@ module GoldLapel
       silent: false,
       mesh: false,
       mesh_tag: nil,
-      enable_proxy_cache_for_wrappers: false,
-      disable_native_cache: false
+      disable_native_cache: false,
+      disable_proxy_cache: false,
+      disable_matviews: false,
+      disable_sqloptimize: false,
+      disable_auto_indexes: false
     )
       unless ::Async::Task.current?
         raise "GoldLapel::Async.start must be called inside an Async { ... } block"
@@ -80,8 +83,11 @@ module GoldLapel
         silent: silent,
         mesh: mesh,
         mesh_tag: mesh_tag,
-        enable_proxy_cache_for_wrappers: enable_proxy_cache_for_wrappers,
         disable_native_cache: disable_native_cache,
+        disable_proxy_cache: disable_proxy_cache,
+        disable_matviews: disable_matviews,
+        disable_sqloptimize: disable_sqloptimize,
+        disable_auto_indexes: disable_auto_indexes,
       )
     end
 
@@ -113,8 +119,11 @@ module GoldLapel
         silent: false,
         mesh: false,
         mesh_tag: nil,
-        enable_proxy_cache_for_wrappers: false,
-        disable_native_cache: false
+        disable_native_cache: false,
+        disable_proxy_cache: false,
+        disable_matviews: false,
+        disable_sqloptimize: false,
+        disable_auto_indexes: false
       )
         @upstream = upstream
         @proxy_port = proxy_port
@@ -131,8 +140,11 @@ module GoldLapel
         @mesh = mesh ? true : false
         tag = mesh_tag.to_s
         @mesh_tag = tag.empty? ? nil : tag
-        @enable_proxy_cache_for_wrappers = enable_proxy_cache_for_wrappers ? true : false
         @disable_native_cache = disable_native_cache ? true : false
+        @disable_proxy_cache = disable_proxy_cache ? true : false
+        @disable_matviews = disable_matviews ? true : false
+        @disable_sqloptimize = disable_sqloptimize ? true : false
+        @disable_auto_indexes = disable_auto_indexes ? true : false
         @proxy = nil
         @internal_conn = nil
         @wrapped_conn = nil
@@ -185,7 +197,10 @@ module GoldLapel
           silent: @silent,
           mesh: @mesh,
           mesh_tag: @mesh_tag,
-          enable_proxy_cache_for_wrappers: @enable_proxy_cache_for_wrappers,
+          disable_proxy_cache: @disable_proxy_cache,
+          disable_matviews: @disable_matviews,
+          disable_sqloptimize: @disable_sqloptimize,
+          disable_auto_indexes: @disable_auto_indexes,
         )
         Proxy.register(@proxy)
         @proxy.start

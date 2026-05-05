@@ -271,12 +271,16 @@ class TestConfigToArgs < Minitest::Test
   end
 
   def test_boolean_true
-    result = GoldLapel::Proxy.config_to_args({ disable_matviews: true })
-    assert_equal ["--disable-matviews"], result
+    # `disable_consolidation` remains in the structured config map; the
+    # cache-/optimization-level disables (disable_proxy_cache,
+    # disable_matviews, disable_sqloptimize, disable_auto_indexes) are
+    # top-level kwargs now and rejected by the config-map path.
+    result = GoldLapel::Proxy.config_to_args({ disable_consolidation: true })
+    assert_equal ["--disable-consolidation"], result
   end
 
   def test_boolean_false_skipped
-    result = GoldLapel::Proxy.config_to_args({ disable_matviews: false })
+    result = GoldLapel::Proxy.config_to_args({ disable_consolidation: false })
     assert_equal [], result
   end
 
@@ -328,7 +332,7 @@ class TestConfigToArgs < Minitest::Test
 
   def test_boolean_key_with_non_bool_raises
     error = assert_raises(TypeError) do
-      GoldLapel::Proxy.config_to_args({ disable_matviews: "yes" })
+      GoldLapel::Proxy.config_to_args({ disable_consolidation: "yes" })
     end
     assert_match(/expects a boolean/, error.message)
   end
@@ -353,15 +357,19 @@ class TestConfigKeys < Minitest::Test
     # Tuning knobs still live in the structured config map.
     keys = GoldLapel::Proxy.config_keys
     assert_includes keys, "pool_size"
-    assert_includes keys, "disable_matviews"
+    assert_includes keys, "disable_consolidation"
     assert_includes keys, "replica"
   end
 
   def test_does_not_contain_promoted_top_level_keys
     # Top-level concepts (mode, log_level, dashboard_port, etc.) were
-    # promoted out of the structured config map.
+    # promoted out of the structured config map. The four
+    # cache-/optimization-disable flags are also top-level now.
     keys = GoldLapel::Proxy.config_keys
-    %w[mode log_level dashboard_port invalidation_port config license client].each do |promoted|
+    %w[
+      mode log_level dashboard_port invalidation_port config license client
+      disable_proxy_cache disable_matviews disable_sqloptimize disable_auto_indexes
+    ].each do |promoted|
       refute_includes keys, promoted
     end
   end
