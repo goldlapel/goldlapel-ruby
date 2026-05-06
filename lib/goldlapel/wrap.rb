@@ -13,6 +13,31 @@ module GoldLapel
   # tx-control statement.
   TX_KEYWORD_HINT = /\b(BEGIN|START|COMMIT|ROLLBACK|END)\b/i
 
+  # Top-level `SELECT <ident>(...)` — statement is a function call.
+  # Concern 6: when the wrapper observes one of these on the wire,
+  # it can't tell whether the function body issues `SET app.user_id
+  # = ...` server-side. Schedule a post-call async verify that
+  # reconciles the GUC state hash with `pg_settings`. The regex is
+  # anchored to the start (so it doesn't fire for `SELECT col FROM
+  # (SELECT funcname(...))`) and tolerates an optional schema
+  # prefix.
+  #
+  # Catches `count(*)`, `current_setting(...)`, `set_config(...)`,
+  # `now()`, custom functions, etc. — without trying to enumerate
+  # which are pure. The cheap pg_settings round-trip is the
+  # fallback price for not introspecting function bodies.
+  TOP_LEVEL_FUNCALL = /\A\s*SELECT\s+(?:[a-zA-Z_]\w*\s*\.\s*)?[a-zA-Z_]\w*\s*\(/i
+
+  # `pg_settings` query for verify-on-checkout (concern 5) and post-
+  # call async verify (concern 6). `source = 'session'` filters to
+  # rows the user (or set_config) modified during the session,
+  # excluding the noise of every default the server reports. The
+  # wrapper's `replace_from_settings` then filters again through
+  # `unsafe_guc?` so only rows that affect cache safety land in
+  # the state map.
+  PG_SETTINGS_VERIFY_SQL =
+    "SELECT name, setting FROM pg_settings WHERE source = 'session'"
+
   def self.wrap(conn, invalidation_port: nil, disable_native_cache: false)
     cache = NativeCache.instance
     # Set the flag before the invalidation thread connects so the very
@@ -48,6 +73,19 @@ module GoldLapel
       # cache key so custom-GUC RLS (`SET app.user_id = '42'`) can
       # never leak user A's rows to user B. See `goldlapel/guc_state.rb`.
       @guc_state = GucState::ConnectionGucState.new
+      # Serialises `@real` access between the user thread and any
+      # post-call verify Thread (concern 6). pg connections are
+      # not safe to use concurrently from multiple threads; the
+      # mutex prevents the verify path from interleaving with a
+      # user query.
+      @real_mutex = Mutex.new
+      # Tracks the most recent in-flight async verify Thread (if
+      # any). Set when `schedule_post_call_verify` spawns; cleared
+      # on completion. `close` joins it briefly so a
+      # connection.close() doesn't leak a verify Thread that
+      # outlives the underlying pg connection.
+      @verify_thread = nil
+      @closed = false
     end
 
     def exec(sql, &block)
@@ -68,11 +106,84 @@ module GoldLapel
     end
 
     def close
+      # Mark closed BEFORE killing the verify thread so the verify
+      # body's closed-check has a fresh value if it races with
+      # close(). Then join briefly — verify queries are short
+      # (single pg_settings round-trip) so a 1s ceiling is
+      # generous; if it overruns, kill rather than hang the
+      # caller's close. Mutex acquisition there is internal to the
+      # verify body; if we held @real_mutex here we'd deadlock
+      # with a verify mid-flight, so don't.
+      @closed = true
+      t = @verify_thread
+      if t && t.alive?
+        t.join(1)
+        t.kill if t.alive?
+      end
+      @verify_thread = nil
       @real.close
     end
 
     def finished?
       @real.finished?
+    end
+
+    # Reconcile `@guc_state` with the server's session GUCs, but
+    # only if the state map is currently dirty. Used by the verify-
+    # on-checkout fallback (concern 5) and as a public hook the
+    # railtie's `expire` patch can call (concern 4) when the
+    # adapter returns to the AR pool. No-op when:
+    #
+    # * the state is clean (`dirty?` false)
+    # * the connection is mid-transaction (pg_settings would still
+    #   succeed, but mutating state mid-transaction breaks the
+    #   wrapper's invariant that cache only participates outside
+    #   transactions; reconciling is harmless but pointless)
+    # * the underlying pg connection is closed
+    #
+    # Returns true if a reconciliation actually ran.
+    def ensure_state_clean!
+      return false unless @guc_state.dirty?
+      return false if @in_transaction
+      return false if @closed
+      reconcile_guc_state_from_pg_settings
+      true
+    end
+
+    # Force a `DISCARD ALL` on the wire, then drop the wrapper's
+    # GUC state to the empty-baseline. Used by the railtie's
+    # connection-pool checkin hook (concern 4) — AR doesn't auto-
+    # reset on checkin, so the wrapper drives it. Safe to call when
+    # the state is already empty (still issues DISCARD ALL on the
+    # wire, in case the server has stale prepared statements / temp
+    # tables / advisory locks from a previous checkout cycle).
+    #
+    # Inside an active transaction, DISCARD ALL would abort the
+    # transaction — guard against that by checking
+    # `@in_transaction` first. AR pool checkin should never happen
+    # mid-transaction, but a hostile caller (or buggy adapter)
+    # could; better to be a no-op than to abort the tx.
+    def discard_all_on_release!
+      return false if @closed
+      return false if @in_transaction
+      ok = @real_mutex.synchronize do
+        if @closed
+          false
+        else
+          begin
+            @real.exec("DISCARD ALL")
+            true
+          rescue StandardError
+            # Connection error during release — treat as a clean
+            # close path. The next checkout will get a fresh
+            # connection from AR's pool, which will re-init state.
+            false
+          end
+        end
+      end
+      return false unless ok
+      @guc_state = GucState::ConnectionGucState.new
+      true
     end
 
     def method_missing(name, *args, **kwargs, &block)
@@ -86,12 +197,35 @@ module GoldLapel
     private
 
     def handle_query(sql, params, method, block, result_format = nil)
+      # Verify-on-checkout fallback (concern 5). If a previous
+      # async post-call verify either failed or has not yet
+      # reconciled state — and the connection is now executing a
+      # new query — reconcile state synchronously before classifying
+      # this query's cache behaviour. The pg_settings round-trip is
+      # paid once per dirty cycle; clean queries pay nothing
+      # (`dirty?` short-circuits at zero cost).
+      ensure_state_clean! if @guc_state.dirty?
+
       # Observe SET / RESET on every query so the per-connection
       # unsafe-GUC state stays current. Runs first — even DDL/writes
       # and the in-transaction bypass paths must update state if the
       # SQL body contains a `SET app.x = ...`. Update is in-place;
       # reads of `@guc_state.state_hash` are O(1).
       @guc_state.observe_sql(sql) if sql.is_a?(String)
+
+      # Top-level function call (concern 6) — schedule async post-
+      # call verify after the user's query returns. Function bodies
+      # may issue server-side SETs the wire layer can't see; the
+      # verify reconciles state with pg_settings. Done here (pre-
+      # delegate) so we know the user's *intent* even if the query
+      # raises; the actual schedule fires post-success in the cache-
+      # miss / write paths below.
+      should_post_verify =
+        sql.is_a?(String) && top_level_funcall?(sql) &&
+        # `set_config` was already routed through the parser; no
+        # need to redundantly verify when we know the inline mutation
+        # is exact.
+        !GucState::SET_CONFIG_RE.match?(sql)
 
       # Write detection + self-invalidation.
       #
@@ -127,16 +261,33 @@ module GoldLapel
       # later (e.g. `SET app.x = 'y'; BEGIN; INSERT ...`).
       tx_changed = update_transaction_state(sql)
       if tx_changed
-        return delegate(method, sql, params, result_format, &block)
+        result = delegate(method, sql, params, result_format, &block)
+        schedule_post_call_verify if should_post_verify
+        return result
       end
 
       # If the SQL contained a write (single-statement or in a multi-
       # statement body), it must NOT be served from cache — dispatch
       # to the underlying connection so the server actually runs it.
-      return delegate(method, sql, params, result_format, &block) if wrote_something
+      if wrote_something
+        result = delegate(method, sql, params, result_format, &block)
+        schedule_post_call_verify if should_post_verify
+        return result
+      end
 
       # Inside transaction: bypass cache
-      return delegate(method, sql, params, result_format, &block) if @in_transaction
+      if @in_transaction
+        result = delegate(method, sql, params, result_format, &block)
+        # Don't schedule verify mid-transaction — the verify body
+        # must run outside any transaction (its own pg_settings
+        # query is cheap, but spawning it while a tx is still open
+        # would either share the tx (corrupting state checks) or
+        # block on the connection mutex until the user issues
+        # COMMIT. Mark dirty so the verify runs on the next post-
+        # commit checkout instead.
+        @guc_state.mark_dirty! if should_post_verify
+        return result
+      end
 
       # Read path: check L1 cache. Pass the per-connection state hash
       # so cache slots never cross connections with different unsafe
@@ -145,6 +296,9 @@ module GoldLapel
       entry = @cache.get(sql, params, sh)
       if entry
         result = CachedResult.new(entry[:values], entry[:fields])
+        # No real query went on the wire — don't schedule verify
+        # for cache hits. The function call's body never executed,
+        # so there's nothing to reconcile.
         if block
           block.call(result)
           return result
@@ -173,7 +327,83 @@ module GoldLapel
         result.clear if result.respond_to?(:clear) && !result.is_a?(CachedResult)
       end
 
+      schedule_post_call_verify if should_post_verify
       result
+    end
+
+    # Detect a top-level `SELECT <ident>(...)` — see
+    # `TOP_LEVEL_FUNCALL` for the regex rationale. Cheap; no SQL
+    # parsing.
+    def top_level_funcall?(sql)
+      TOP_LEVEL_FUNCALL.match?(sql)
+    end
+
+    # Reconcile the state hash with `pg_settings`. Caller has
+    # already verified that `@dirty?` is true and the connection
+    # is outside any transaction. Acquires `@real_mutex` so an
+    # in-flight async verify (or the user's next query) doesn't
+    # interleave on the underlying pg connection.
+    #
+    # On any error: leave dirty set so the next checkout retries.
+    # Never raises — verification failures must not break the
+    # user's query path.
+    def reconcile_guc_state_from_pg_settings
+      # Computed inside the synchronized block; nil signals "skip
+      # the state replace step." `return` from a synchronize block
+      # returns from the surrounding method only via a non-local
+      # exit — relying on it would cross a layered ensure. Use a
+      # local flag instead so the mutex unwinds normally.
+      rows = nil
+      @real_mutex.synchronize do
+        unless @closed
+          begin
+            result = @real.exec(PG_SETTINGS_VERIFY_SQL)
+            rows = result.values if result.respond_to?(:values)
+          rescue StandardError
+            # Connection error / transient failure — leave dirty.
+            # Next checkout will retry. `rows` stays nil.
+            rows = nil
+          end
+        end
+      end
+      return if rows.nil?
+      @guc_state.replace_from_settings(rows)
+    end
+
+    # Schedule a background reconciliation against `pg_settings`.
+    # Marks dirty unconditionally first so the next user-thread
+    # query will verify-on-checkout if the background thread races
+    # behind it. Spawned only when we're not already mid-
+    # transaction, not closed, and no other verify thread is
+    # in-flight (single-thread invariant — multiple concurrent
+    # verifies on one pg conn would just contend for `@real_mutex`
+    # without adding value).
+    def schedule_post_call_verify
+      return if @closed
+      return if @in_transaction
+      @guc_state.mark_dirty!
+      # Don't spawn a duplicate verifier if one is already running.
+      # The user's next query will verify-on-checkout if the in-
+      # flight verifier finishes after the next query starts.
+      existing = @verify_thread
+      return if existing && existing.alive?
+
+      @verify_thread = Thread.new do
+        begin
+          reconcile_guc_state_from_pg_settings
+        rescue StandardError
+          # Defensive — `reconcile_guc_state_from_pg_settings`
+          # already swallows StandardError. Anything that escapes
+          # is exotic (e.g. NoMemoryError) and shouldn't crash the
+          # process via an unhandled background-thread exception.
+          @guc_state.mark_dirty!
+        end
+      end
+      # Background verify must not crash the parent process if it
+      # raises an unexpected non-StandardError. Behave like a
+      # daemon-style telemetry thread.
+      @verify_thread.abort_on_exception = false
+      @verify_thread.report_on_exception = false
     end
 
     # Walk segments of a (possibly) multi-statement SQL body and update
@@ -264,7 +494,24 @@ module GoldLapel
       [tables, false]
     end
 
+    # Dispatch to the underlying pg connection. Serialised on
+    # `@real_mutex` so a post-call async verify Thread (concern 6)
+    # cannot interleave with a user's query on the same connection
+    # — pg connections are not safe to use from multiple threads.
+    # Recursive-acquire guard via `Mutex#owned?` makes the lock a
+    # no-op when the user thread is already inside a synchronized
+    # path (e.g. `reconcile_guc_state_from_pg_settings` calling
+    # back into `@real.exec`).
     def delegate(method, sql, params, result_format, &block)
+      if @real_mutex.owned?
+        return delegate_unlocked(method, sql, params, result_format, &block)
+      end
+      @real_mutex.synchronize do
+        delegate_unlocked(method, sql, params, result_format, &block)
+      end
+    end
+
+    def delegate_unlocked(method, sql, params, result_format, &block)
       case method
       when :exec
         @real.exec(sql, &block)

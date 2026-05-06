@@ -863,4 +863,412 @@ class TestCachedConnectionStateObservation < Minitest::Test
     @wrapped.async_exec("SET app.user_id = '42'")
     refute_equal h0, @wrapped.guc_state.state_hash
   end
+
+  def test_set_config_function_form_observed
+    h0 = @wrapped.guc_state.state_hash
+    @wrapped.exec("SELECT set_config('app.user_id', '42', false)")
+    refute_equal h0, @wrapped.guc_state.state_hash
+  end
+
+  def test_discard_all_clears_state_via_wrapper
+    @wrapped.exec("SET app.user_id = '42'")
+    refute_equal 0, @wrapped.guc_state.state_hash
+    @wrapped.exec("DISCARD ALL")
+    assert_equal 0, @wrapped.guc_state.state_hash
+  end
+end
+
+# ---------------------------------------------------------------------
+# Verify-on-checkout fallback (concern 5) and async post-call verify
+# (concern 6). Use a recording stub that lets us see exactly which
+# statements went on the wire and steer pg_settings replies.
+# ---------------------------------------------------------------------
+
+# A stub real_conn that also handles `pg_settings` queries — replies
+# with a configurable list of [name, setting] rows so we can drive
+# the verify-on-checkout path without running real PG.
+class VerifyTestStubConn
+  attr_accessor :pg_settings_rows
+  attr_reader :exec_log
+  attr_accessor :raise_on_pg_settings
+
+  StubResult = Struct.new(:rows, :columns) do
+    def values
+      rows
+    end
+    def fields
+      columns
+    end
+    def clear; end
+  end
+
+  def initialize
+    @exec_log = []
+    @pg_settings_rows = []
+    @raise_on_pg_settings = false
+  end
+
+  def exec(sql, &block)
+    @exec_log << sql
+    if sql.is_a?(String) && sql.include?("pg_settings")
+      raise PG::Error, "boom" if @raise_on_pg_settings && defined?(PG::Error)
+      raise StandardError, "pg_settings unavailable" if @raise_on_pg_settings
+      r = StubResult.new(@pg_settings_rows.dup, ["name", "setting"])
+      block&.call(r)
+      return r
+    end
+    r = StubResult.new([["1"]], ["c"])
+    block&.call(r)
+    r
+  end
+  alias_method :query, :exec
+
+  def async_exec(sql, &block) = exec(sql, &block)
+  def exec_params(sql, params = [], _rf = 0, &block) = exec(sql, &block)
+  def async_exec_params(sql, params = [], _rf = 0, &block) = exec(sql, &block)
+  def close; end
+  def finished?; false; end
+end
+
+class TestVerifyOnCheckout < Minitest::Test
+  # Concern 5: dirty state triggers a sync pg_settings reconcile on
+  # the next query. Clean state pays nothing (no extra wire query).
+
+  def setup
+    GoldLapel::NativeCache.reset!
+    @cache = GoldLapel::NativeCache.new
+    @cache.instance_variable_set(:@invalidation_connected, true)
+    @real = VerifyTestStubConn.new
+    @wrapped = GoldLapel::CachedConnection.new(@real, @cache)
+  end
+
+  def teardown
+    GoldLapel::NativeCache.reset!
+  end
+
+  def test_clean_state_does_not_query_pg_settings
+    @wrapped.exec("SELECT 1")
+    refute @real.exec_log.any? { |s| s.is_a?(String) && s.include?("pg_settings") },
+      "clean state must not pay a pg_settings round-trip"
+  end
+
+  def test_dirty_state_triggers_pg_settings_query_on_next_exec
+    @real.pg_settings_rows = [["app.user_id", "42"]]
+    @wrapped.guc_state.mark_dirty!
+    @wrapped.exec("SELECT 1")
+    assert @real.exec_log.any? { |s| s.is_a?(String) && s.include?("pg_settings") },
+      "dirty state must trigger a pg_settings reconcile"
+  end
+
+  def test_dirty_state_clears_after_successful_reconcile
+    @real.pg_settings_rows = [["app.user_id", "42"]]
+    @wrapped.guc_state.mark_dirty!
+    @wrapped.exec("SELECT 1")
+    refute @wrapped.guc_state.dirty?, "dirty must clear after pg_settings success"
+  end
+
+  def test_state_hash_reflects_pg_settings_after_reconcile
+    @real.pg_settings_rows = [["app.user_id", "42"], ["search_path", "tenant_a"]]
+    @wrapped.guc_state.mark_dirty!
+    @wrapped.exec("SELECT 1")
+    assert_equal "42", @wrapped.guc_state.values["app.user_id"]
+    assert_equal "tenant_a", @wrapped.guc_state.values["search_path"]
+  end
+
+  def test_pg_settings_failure_leaves_dirty_set
+    @real.raise_on_pg_settings = true
+    @wrapped.guc_state.mark_dirty!
+    # User's query must still succeed — verify failure is silent.
+    @wrapped.exec("SELECT 1")
+    assert @wrapped.guc_state.dirty?, "verify failure must leave dirty set for retry"
+  end
+
+  def test_dirty_state_skipped_in_transaction
+    @wrapped.exec("BEGIN")
+    @wrapped.guc_state.mark_dirty!
+    before = @real.exec_log.length
+    @wrapped.exec("SELECT 1")
+    pg_settings_calls = @real.exec_log[before..].count { |s|
+      s.is_a?(String) && s.include?("pg_settings")
+    }
+    assert_equal 0, pg_settings_calls,
+      "must not reconcile mid-transaction — would interfere with active tx"
+    assert @wrapped.guc_state.dirty?,
+      "dirty stays set; reconcile fires on next post-commit checkout"
+  end
+
+  def test_ensure_state_clean_returns_true_when_reconciled
+    @real.pg_settings_rows = [["app.user_id", "42"]]
+    @wrapped.guc_state.mark_dirty!
+    assert @wrapped.ensure_state_clean!
+  end
+
+  def test_ensure_state_clean_returns_false_when_clean
+    refute @wrapped.ensure_state_clean!
+  end
+
+  def test_ensure_state_clean_returns_false_in_transaction
+    @wrapped.exec("BEGIN")
+    @wrapped.guc_state.mark_dirty!
+    refute @wrapped.ensure_state_clean!
+  end
+
+  def test_pg_settings_filtered_through_unsafe_classifier
+    # Server reports a mix of safe + unsafe GUCs; only the unsafe
+    # subset lands in the state map.
+    @real.pg_settings_rows = [
+      ["app.user_id", "42"],
+      ["application_name", "myapp"],   # safe — must NOT enter map
+      ["statement_timeout", "5000"],   # safe — must NOT enter map
+      ["timezone", "UTC"],             # unsafe (output formatting)
+    ]
+    @wrapped.guc_state.mark_dirty!
+    @wrapped.exec("SELECT 1")
+    keys = @wrapped.guc_state.values.keys
+    assert_includes keys, "app.user_id"
+    assert_includes keys, "timezone"
+    refute_includes keys, "application_name"
+    refute_includes keys, "statement_timeout"
+  end
+end
+
+class TestPostCallVerify < Minitest::Test
+  # Concern 6: `SELECT funcname(...)` schedules an async verify.
+  # The wrapper marks dirty synchronously so the next user-thread
+  # query verifies-on-checkout if the async thread races behind.
+
+  def setup
+    GoldLapel::NativeCache.reset!
+    @cache = GoldLapel::NativeCache.new
+    @cache.instance_variable_set(:@invalidation_connected, true)
+    @real = VerifyTestStubConn.new
+    @wrapped = GoldLapel::CachedConnection.new(@real, @cache)
+  end
+
+  def teardown
+    @wrapped.close rescue nil
+    GoldLapel::NativeCache.reset!
+  end
+
+  # Wait for any in-flight verify thread to finish. Tests that
+  # assert post-state must call this so the assertion sees the
+  # async update, not the racy mid-flight value.
+  def join_verify_thread
+    t = @wrapped.instance_variable_get(:@verify_thread)
+    t.join(2) if t&.alive?
+  end
+
+  def test_function_call_schedules_verify
+    @real.pg_settings_rows = [["app.user_id", "42"]]
+    @wrapped.exec("SELECT some_function(1, 2)")
+    join_verify_thread
+    assert @real.exec_log.any? { |s| s.is_a?(String) && s.include?("pg_settings") },
+      "top-level function call must trigger pg_settings verify"
+  end
+
+  def test_function_call_marks_dirty_synchronously
+    # `schedule_post_call_verify` sets dirty BEFORE spawning the
+    # Thread, so the user's hot path returns with dirty=true even
+    # if the background reconcile hasn't started yet. To observe
+    # the pre-thread state we have to hold the connection mutex
+    # so the verifier thread blocks on it.
+    real2 = VerifyTestStubConn.new
+    wrapped2 = GoldLapel::CachedConnection.new(real2, @cache)
+    mu = wrapped2.instance_variable_get(:@real_mutex)
+    mu.lock
+    begin
+      # `SELECT trickle_func()` is a fresh SQL string so the
+      # cache_key (sh=0, SQL=...) doesn't collide with any other
+      # test's cache entry.
+      wrapped2.exec("SELECT trickle_func_#{rand(1_000_000)}()")
+      # Verify thread is blocked on @real_mutex; dirty is already
+      # set by `mark_dirty!` in `schedule_post_call_verify`.
+      assert wrapped2.guc_state.dirty?,
+        "function-call must mark dirty before async verify runs"
+    ensure
+      mu.unlock
+    end
+    t = wrapped2.instance_variable_get(:@verify_thread)
+    t.join(2) if t&.alive?
+    wrapped2.close
+  end
+
+  def test_function_call_clears_dirty_on_success
+    @real.pg_settings_rows = [["app.user_id", "42"]]
+    @wrapped.exec("SELECT some_function()")
+    join_verify_thread
+    refute @wrapped.guc_state.dirty?, "successful verify clears dirty"
+  end
+
+  def test_function_call_state_hash_updated
+    @real.pg_settings_rows = [["app.user_id", "42"]]
+    h0 = @wrapped.guc_state.state_hash
+    @wrapped.exec("SELECT some_function()")
+    join_verify_thread
+    refute_equal h0, @wrapped.guc_state.state_hash
+    assert_equal "42", @wrapped.guc_state.values["app.user_id"]
+  end
+
+  def test_failure_marks_dirty_for_retry
+    @real.raise_on_pg_settings = true
+    @wrapped.exec("SELECT some_function()")
+    join_verify_thread
+    assert @wrapped.guc_state.dirty?,
+      "verify failure must leave dirty set for next-checkout retry"
+  end
+
+  def test_user_query_does_not_raise_on_verify_failure
+    @real.raise_on_pg_settings = true
+    # Must not raise — verify failure is silent.
+    @wrapped.exec("SELECT some_function()")
+    join_verify_thread
+  end
+
+  def test_set_config_inline_does_not_schedule_verify
+    # `set_config` is parsed inline and applied to the state hash
+    # exactly. Scheduling a redundant verify would waste a round-trip
+    # and confuse the tests; the parser short-circuit excludes it.
+    @real.pg_settings_rows = [["app.user_id", "42"]]
+    @wrapped.exec("SELECT set_config('app.user_id', '42', false)")
+    join_verify_thread
+    refute @real.exec_log.any? { |s| s.is_a?(String) && s.include?("pg_settings") },
+      "set_config function form must skip post-call verify (inline applied)"
+  end
+
+  def test_plain_select_does_not_schedule_verify
+    # `SELECT col FROM table` is not a top-level function call.
+    @wrapped.exec("SELECT * FROM accounts")
+    join_verify_thread
+    refute @real.exec_log.any? { |s| s.is_a?(String) && s.include?("pg_settings") },
+      "plain SELECTs must not pay a verify round-trip"
+  end
+
+  def test_select_constant_does_not_schedule_verify
+    @wrapped.exec("SELECT 1")
+    join_verify_thread
+    refute @real.exec_log.any? { |s| s.is_a?(String) && s.include?("pg_settings") }
+  end
+
+  def test_cache_hit_does_not_schedule_verify
+    # Even though the SQL is a function call, if it's served from
+    # cache the function body never executed — so there's nothing
+    # to reconcile.
+    @cache.put("SELECT count_things()", nil, [["1"]], ["c"], 0)
+    pre = @real.exec_log.length
+    @wrapped.exec("SELECT count_things()")
+    join_verify_thread
+    post = @real.exec_log.length
+    assert_equal pre, post,
+      "cache hit must not delegate or schedule verify"
+  end
+
+  def test_function_call_in_transaction_marks_dirty_no_verify_thread
+    # Mid-tx verify is unsafe (would either share tx state or
+    # block on connection mutex). Mark dirty so the next post-
+    # commit checkout reconciles instead.
+    @wrapped.exec("BEGIN")
+    @wrapped.exec("SELECT some_function()")
+    t = @wrapped.instance_variable_get(:@verify_thread)
+    assert t.nil? || !t.alive?, "verify thread must not spawn mid-tx"
+    assert @wrapped.guc_state.dirty?,
+      "function call mid-tx still marks dirty for post-commit checkout"
+  end
+
+  def test_close_joins_in_flight_verify
+    # Connection close must not leak an in-flight verify Thread.
+    @real.pg_settings_rows = [["app.user_id", "42"]]
+    @wrapped.exec("SELECT some_function()")
+    @wrapped.close
+    t = @wrapped.instance_variable_get(:@verify_thread)
+    assert t.nil? || !t.alive?,
+      "verify thread must be joined or killed by close()"
+  end
+
+  def test_pg_catalog_qualified_funcall_recognised
+    @real.pg_settings_rows = []
+    @wrapped.exec("SELECT pg_catalog.now()")
+    join_verify_thread
+    assert @real.exec_log.any? { |s| s.is_a?(String) && s.include?("pg_settings") },
+      "schema-qualified function call must trigger verify"
+  end
+
+  def test_concurrent_verifies_dont_double_spawn
+    # Two function calls in close succession must not spawn two
+    # verifier threads — `@verify_thread` is reused if alive.
+    @real.pg_settings_rows = [["app.user_id", "42"]]
+    @wrapped.exec("SELECT first_func()")
+    t1 = @wrapped.instance_variable_get(:@verify_thread)
+    @wrapped.exec("SELECT second_func()")
+    t2 = @wrapped.instance_variable_get(:@verify_thread)
+    # Either same thread (still alive) or t1 finished and t2
+    # spawned. Never two alive simultaneously.
+    if t1 && t1.alive? && t2 && t2.alive?
+      assert_equal t1.object_id, t2.object_id,
+        "two concurrent function calls must reuse the in-flight verifier"
+    end
+    join_verify_thread
+  end
+end
+
+class TestDiscardOnRelease < Minitest::Test
+  # Concern 4 building block: the wrapper exposes
+  # `discard_all_on_release!` for the railtie's pool checkin hook.
+  # Issues DISCARD ALL on the wire and resets the in-process state
+  # to the empty baseline.
+
+  def setup
+    GoldLapel::NativeCache.reset!
+    @cache = GoldLapel::NativeCache.new
+    @cache.instance_variable_set(:@invalidation_connected, true)
+    @real = VerifyTestStubConn.new
+    @wrapped = GoldLapel::CachedConnection.new(@real, @cache)
+  end
+
+  def teardown
+    @wrapped.close rescue nil
+    GoldLapel::NativeCache.reset!
+  end
+
+  def test_discard_all_on_release_clears_state
+    @wrapped.exec("SET app.user_id = '42'")
+    refute_equal 0, @wrapped.guc_state.state_hash
+    assert @wrapped.discard_all_on_release!
+    assert_equal 0, @wrapped.guc_state.state_hash
+  end
+
+  def test_discard_all_on_release_sends_discard_all_on_wire
+    @wrapped.discard_all_on_release!
+    assert_includes @real.exec_log, "DISCARD ALL"
+  end
+
+  def test_discard_all_on_release_clears_dirty
+    @wrapped.guc_state.mark_dirty!
+    @wrapped.discard_all_on_release!
+    refute @wrapped.guc_state.dirty?
+  end
+
+  def test_discard_all_on_release_skipped_in_transaction
+    @wrapped.exec("BEGIN")
+    @wrapped.exec("SET app.user_id = '42'")
+    log_before = @real.exec_log.length
+    refute @wrapped.discard_all_on_release!,
+      "must not DISCARD inside a transaction (would abort it)"
+    discard_calls = @real.exec_log[log_before..].count { |s| s == "DISCARD ALL" }
+    assert_equal 0, discard_calls
+  end
+
+  def test_discard_all_on_release_swallows_connection_error
+    # If the wire DISCARD fails (connection torn down), don't
+    # raise — the next checkout will get a fresh connection.
+    @real.define_singleton_method(:exec) do |sql, &blk|
+      raise StandardError, "broken pipe" if sql == "DISCARD ALL"
+      VerifyTestStubConn::StubResult.new([["1"]], ["c"])
+    end
+    refute @wrapped.discard_all_on_release!
+  end
+
+  def test_discard_all_on_release_no_op_after_close
+    @wrapped.close
+    refute @wrapped.discard_all_on_release!
+  end
 end
