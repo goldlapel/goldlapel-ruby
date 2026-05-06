@@ -32,10 +32,24 @@
 
 module GoldLapel
   module GucState
-    # GUC names whose value can change query results without changing
-    # the SQL text. Matched case-insensitively. Any GUC with a `.` in
-    # the name is also treated as unsafe (namespaced GUCs are the
-    # canonical custom-RLS pattern).
+    # GUC names whose value can change query results — or the bytes
+    # PG returns for the same row — without changing the SQL text.
+    # Matched case-insensitively. Any GUC with a `.` in the name is
+    # also treated as unsafe (namespaced GUCs are the canonical
+    # custom-RLS pattern).
+    #
+    # The list covers two categories:
+    #
+    # 1. Security-relevant — RLS / role / search_path settings whose
+    #    value gates which rows the user is allowed to see.
+    # 2. Output-formatting — datetime / locale / bytea encoding
+    #    settings that change the bytes PG serialises for a value
+    #    even when the underlying row is identical. The wrapper
+    #    caches raw bytes; serving connection A's UTC-formatted
+    #    timestamp to connection B (set to America/New_York) would
+    #    return the wrong wall-clock string. Treating these as state-
+    #    affecting fragments the cache by formatting context, which
+    #    is the correct behaviour.
     UNSAFE_GUC_SHORT_LIST = %w[
       search_path
       role
@@ -44,6 +58,14 @@ module GoldLapel
       default_transaction_read_only
       transaction_isolation
       row_security
+      datestyle
+      intervalstyle
+      timezone
+      bytea_output
+      lc_messages
+      lc_monetary
+      lc_numeric
+      lc_time
     ].freeze
 
     # Classify a GUC name as state-affecting (`true`) or harmless
@@ -99,7 +121,8 @@ module GoldLapel
       out
     end
 
-    # Parse a `SET` / `RESET` command out of a single SQL statement.
+    # Parse a `SET` / `RESET` / `DISCARD` / `SELECT set_config(...)`
+    # command out of a single SQL statement.
     #
     # Recognises:
     # * `SET name = value`, `SET name TO value`
@@ -107,21 +130,56 @@ module GoldLapel
     # * `SET LOCAL name = value`, `SET LOCAL name TO value`
     # * `RESET name`
     # * `RESET ALL`
+    # * `DISCARD ALL` — full session reset (equivalent to RESET ALL
+    #   for the unsafe-GUC state hash; PG also drops temp tables,
+    #   prepared statements, advisory locks, etc., none of which
+    #   affect the wrapper's cache-key safety model).
+    # * `DISCARD PLANS` — drops PG's prepared-statement plan cache.
+    #   Returned as `:discard_plans` so a future prepared-statement
+    #   cache layer can hook the signal; `ConnectionGucState`
+    #   currently treats it as a no-op for the GUC state map.
+    # * `DISCARD SEQUENCES` / `DISCARD TEMP` / `DISCARD TEMPORARY` —
+    #   no-ops for the state hash; classified for completeness so
+    #   callers can distinguish "saw a DISCARD we don't care about"
+    #   from "saw something that wasn't a DISCARD at all."
+    # * `SELECT set_config('app.user_id', '42', false)` — Supabase /
+    #   PostgREST canonical pattern for setting per-request GUCs from
+    #   a JWT. Function form of SET; routed through the same state-
+    #   hash mutation as a regular SET (or no-op for is_local=true).
+    #   Also recognises the `pg_catalog.set_config` schema-qualified
+    #   form.
     #
     # Returns nil for anything else (including `SET TIME ZONE ...` —
-    # timezone is harmless and the unusual two-word GUC name doesn't
-    # fit the pattern; treating it as not-a-SET is correct because it
-    # doesn't affect cache safety).
+    # the legacy two-word `SET TIME ZONE` form. The bare GUC
+    # `timezone` is unsafe (output formatting), but `SET TIME ZONE`
+    # uses an unusual two-word "name" that this parser doesn't
+    # recognise. Currently classified as not-a-SET — see
+    # `parse_set_time_zone` for the dedicated path that brings it
+    # back into the unsafe map. Conservative for now: a missed `SET
+    # TIME ZONE` only fragments cache slightly less than the SET
+    # equivalent would; the dedicated form mutates state hash via
+    # the standard `:set` shape with name `"timezone"`.
     #
     # Returns a Hash on success:
-    #   { kind: :set,        name: <lowercased>, value: <stripped> }
-    #   { kind: :set_local,  name: <lowercased>, value: <stripped> }
-    #   { kind: :reset,      name: <lowercased> }
+    #   { kind: :set,             name: <lowercased>, value: <stripped> }
+    #   { kind: :set_local,       name: <lowercased>, value: <stripped> }
+    #   { kind: :reset,           name: <lowercased> }
     #   { kind: :reset_all }
+    #   { kind: :discard_all }
+    #   { kind: :discard_plans }
+    #   { kind: :discard_sequences }
+    #   { kind: :discard_temp }
     def self.parse_set_command(sql)
       s = sql.strip
       s = s.chomp(";").rstrip
       return nil if s.empty?
+
+      # Function-form `SELECT set_config(name, value, is_local)` —
+      # parse before the generic SET branch so it routes through the
+      # right shape regardless of whitespace / casing inside the
+      # SELECT body.
+      sc = parse_set_config_call(s)
+      return sc if sc
 
       tokens = s.split(/\s+/)
       head = tokens.shift
@@ -136,6 +194,38 @@ module GoldLapel
         name = normalize_guc_name(target)
         return nil if name.nil?
         return { kind: :reset, name: name }
+      end
+
+      if head.casecmp("DISCARD").zero?
+        target = tokens.shift
+        return nil if target.nil?
+        return nil unless tokens.empty?
+        upper = target.upcase
+        case upper
+        when "ALL"        then return { kind: :discard_all }
+        when "PLANS"      then return { kind: :discard_plans }
+        when "SEQUENCES"  then return { kind: :discard_sequences }
+        when "TEMP", "TEMPORARY" then return { kind: :discard_temp }
+        else
+          return nil
+        end
+      end
+
+      # SET TIME ZONE 'UTC' — legacy two-word PG form. The bare GUC
+      # `timezone` is unsafe (output formatting affects cached bytes),
+      # so this needs to mutate the state hash too. Pre-empt the
+      # generic SET branch since the next token is "TIME" not a GUC
+      # name.
+      if head.casecmp("SET").zero? &&
+         tokens.length >= 2 &&
+         tokens[0].casecmp("TIME").zero? &&
+         tokens[1].casecmp("ZONE").zero?
+        # `SET TIME ZONE <value>`
+        value_tokens = tokens[2..] || []
+        joined = value_tokens.join(" ").strip
+        return nil if joined.empty?
+        value = strip_value_quotes(joined)
+        return { kind: :set, name: "timezone", value: value }
       end
 
       return nil unless head.casecmp("SET").zero?
@@ -197,6 +287,75 @@ module GoldLapel
       end
     end
 
+    # `SELECT set_config('app.user_id', '42', false)` — function-form
+    # SET. Used heavily by Supabase / PostgREST to apply per-request
+    # GUCs from a JWT claim. Args: (setting_name, new_value,
+    # is_local). When is_local is `true`, the setting reverts at end
+    # of transaction — same semantics as `SET LOCAL` and the same
+    # cache implications (none, because the wrapper bypasses cache
+    # inside transactions).
+    #
+    # Recognises:
+    # * `SELECT set_config(name, value, is_local)`
+    # * `SELECT pg_catalog.set_config(name, value, is_local)`
+    # * Optional outer parens / trailing semicolon already stripped
+    #   by the caller.
+    #
+    # Returns nil for any malformed call. The match is intentionally
+    # narrow — it only catches the literal-arg form. Indirect forms
+    # (`set_config(name, current_setting('x'), false)` etc.) cannot
+    # be evaluated client-side without a round-trip and fall back to
+    # post-call verify (concern 6).
+    SET_CONFIG_RE = /
+      \A\s*SELECT\s+
+      (?:pg_catalog\s*\.\s*)?
+      set_config\s*\(\s*
+      (?<name>'(?:[^']|'')*'|"(?:[^"]|"")*")
+      \s*,\s*
+      (?<value>'(?:[^']|'')*'|"(?:[^"]|"")*"|NULL)
+      \s*,\s*
+      (?<is_local>TRUE|FALSE|'t'|'f'|'true'|'false'|0|1|'0'|'1')
+      \s*\)\s*\z
+    /xi
+
+    def self.parse_set_config_call(sql)
+      m = SET_CONFIG_RE.match(sql)
+      return nil unless m
+
+      raw_name = m[:name]
+      raw_value = m[:value]
+      is_local_token = m[:is_local].downcase
+
+      # PG-style doubled-quote escapes: `''` inside `'...'`, `""`
+      # inside `"..."`. Mirror the strip used elsewhere in this
+      # module.
+      name_inner = raw_name[1..-2]
+      name_inner = name_inner.gsub(raw_name[0] * 2, raw_name[0])
+      name = normalize_guc_name(name_inner)
+      return nil if name.nil?
+
+      if raw_value.upcase == "NULL"
+        # `set_config(name, NULL, ...)` — PG treats this as RESET.
+        is_local =
+          ["true", "'t'", "'true'", "1", "'1'"].include?(is_local_token)
+        # SET LOCAL NULL is still a no-op for cache purposes.
+        return nil if is_local
+        return { kind: :reset, name: name }
+      end
+
+      value_inner = raw_value[1..-2]
+      value_inner = value_inner.gsub(raw_value[0] * 2, raw_value[0])
+
+      is_local =
+        ["true", "'t'", "'true'", "1", "'1'"].include?(is_local_token)
+
+      if is_local
+        { kind: :set_local, name: name, value: value_inner }
+      else
+        { kind: :set, name: name, value: value_inner }
+      end
+    end
+
     # Lowercase the GUC name and strip surrounding double quotes (PG
     # treats `"app.user_id"` and `app.user_id` as the same identifier
     # when it's a configuration parameter; double-quoted form just
@@ -235,11 +394,62 @@ module GoldLapel
         # state_hash matches "no GUCs set" cache slots from peer
         # connections, exactly as we want.
         @state_hash = 0
+        # Dirty flag — set when the wrapper observes a wire pattern
+        # that *might* have mutated server-side GUC state in a way
+        # the parser couldn't fully decode (top-level function call,
+        # an async post-call verify failure, etc.). The verify-on-
+        # checkout path consults this flag and re-reads pg_settings
+        # if true, then clears it.
+        @dirty = false
       end
 
       # Current state hash. `0` for empty state.
       def state_hash
         @state_hash
+      end
+
+      # Whether the connection's state map is potentially out-of-
+      # sync with the server. See `mark_dirty!` and the verify-on-
+      # checkout path in `CachedConnection`.
+      def dirty?
+        @dirty
+      end
+
+      # Mark the state map potentially stale. Cheap; setters are
+      # idempotent. Called by the wrapper when it observes a top-
+      # level function call (concern 6) or when an async post-call
+      # verify fails.
+      def mark_dirty!
+        @dirty = true
+      end
+
+      # Clear the dirty flag. Called by the wrapper after a
+      # successful pg_settings reconciliation.
+      def mark_clean!
+        @dirty = false
+      end
+
+      # Replace the unsafe-GUC map wholesale with values
+      # reconstructed from a `pg_settings` query. Filters through
+      # the same `unsafe_guc?` classifier as wire-observed SETs so
+      # the resulting state hash matches what an equivalent SET
+      # sequence would have produced. Used by the verify-on-
+      # checkout fallback (concern 5) and the async post-call
+      # verify (concern 6) when those paths reconcile state with
+      # the server.
+      #
+      # Always clears `dirty?` afterward — whether the rebuild
+      # changed the hash or not, the map now reflects ground truth.
+      def replace_from_settings(settings)
+        @values = {}
+        settings.each do |name, value|
+          next if name.nil? || value.nil?
+          lower = name.to_s.downcase
+          next unless GucState.unsafe_guc?(lower)
+          @values[lower] = value.to_s
+        end
+        recompute_hash
+        mark_clean!
       end
 
       # Read-only view of the unsafe-GUC map (lowercased name → raw
@@ -249,9 +459,11 @@ module GoldLapel
         @values.dup
       end
 
-      # Apply a parsed `SET` / `RESET` command. No-op for `:set_local`
+      # Apply a parsed `SET` / `RESET` / `DISCARD` /
+      # `SELECT set_config(...)` command. No-op for `:set_local`
       # (transient — cache is bypassed inside transactions anyway),
-      # no-op for safe GUC names.
+      # no-op for safe GUC names, no-op for DISCARD shapes that
+      # don't touch the GUC state map (PLANS / SEQUENCES / TEMP).
       def apply(cmd)
         return if cmd.nil?
         case cmd[:kind]
@@ -269,11 +481,22 @@ module GoldLapel
           if GucState.unsafe_guc?(cmd[:name]) && @values.delete(cmd[:name])
             recompute_hash
           end
-        when :reset_all
+        when :reset_all, :discard_all
+          # `DISCARD ALL` is a strict superset of `RESET ALL`: it
+          # also drops temp tables, prepared statements, advisory
+          # locks, listen channels, and the plan cache — none of
+          # which affect the wrapper's cache-key safety model. From
+          # the GUC-state perspective the two are equivalent: clear
+          # the unsafe-GUC map and zero the hash.
           unless @values.empty?
             @values.clear
             recompute_hash
           end
+        when :discard_plans, :discard_sequences, :discard_temp
+          # No-op for the GUC state map. Recognised so callers can
+          # distinguish "this was a DISCARD we intentionally don't
+          # track" from "this looked like junk." A future prepared-
+          # statement cache layer would hook `:discard_plans` here.
         end
       end
 
