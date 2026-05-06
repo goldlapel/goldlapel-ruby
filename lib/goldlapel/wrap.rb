@@ -2,6 +2,7 @@
 
 require_relative "cache"
 require_relative "guc_state"
+require_relative "aggressive_verify"
 
 module GoldLapel
   # Cheap pre-check used by `update_transaction_state` to avoid running
@@ -38,7 +39,13 @@ module GoldLapel
   PG_SETTINGS_VERIFY_SQL =
     "SELECT name, setting FROM pg_settings WHERE source = 'session'"
 
-  def self.wrap(conn, invalidation_port: nil, disable_native_cache: false)
+  def self.wrap(
+    conn,
+    invalidation_port: nil,
+    disable_native_cache: false,
+    aggressive_verify: :auto,
+    upstream: nil
+  )
     cache = NativeCache.instance
     # Set the flag before the invalidation thread connects so the very
     # first `wrapper_connected` snapshot carries the correct
@@ -47,7 +54,29 @@ module GoldLapel
     cache.disable_native_cache = disable_native_cache
     invalidation_port ||= detect_invalidation_port
     cache.connect_invalidation(invalidation_port) unless cache.connected?
-    CachedConnection.new(conn, cache)
+
+    # Smart-auto detection (concern 6 — trigger-internal SETs). On the
+    # first connection per upstream, run a single `pg_trigger` classifier
+    # query to decide whether any user-defined trigger function body
+    # mutates session state. The result is cached process-lifetime; later
+    # connections to the same upstream reuse it.
+    #
+    # `upstream` defaults to nil (callers that don't have an upstream
+    # URL handy — bare `GoldLapel.wrap(conn)` test helpers — keep
+    # working with detection skipped). When the override is :on or :off
+    # we skip detection entirely; the explicit kwarg already determined
+    # the outcome and the round-trip would just be wasted.
+    if upstream && (aggressive_verify == :auto || aggressive_verify.nil?) &&
+       !AggressiveVerify.cached?(upstream)
+      AggressiveVerify.detect!(conn, upstream)
+    end
+
+    CachedConnection.new(
+      conn,
+      cache,
+      aggressive_verify: aggressive_verify,
+      upstream: upstream,
+    )
   end
 
   def self.detect_invalidation_port
@@ -65,7 +94,7 @@ module GoldLapel
     # Exposed for tests and rare adapters. Don't mutate from outside.
     attr_reader :guc_state
 
-    def initialize(real_conn, cache)
+    def initialize(real_conn, cache, aggressive_verify: :auto, upstream: nil)
       @real = real_conn
       @cache = cache
       @in_transaction = false
@@ -86,6 +115,13 @@ module GoldLapel
       # outlives the underlying pg connection.
       @verify_thread = nil
       @closed = false
+      # Aggressive-verify (post-DML async verify) override + upstream
+      # URL key. The effective on/off is resolved per-query via
+      # `AggressiveVerify.effective?` so a license-payload update or a
+      # late-arriving smart-auto detection takes effect without
+      # rebuilding the wrapper.
+      @aggressive_verify_override = aggressive_verify
+      @aggressive_verify_upstream = upstream
     end
 
     def exec(sql, &block)
@@ -186,6 +222,15 @@ module GoldLapel
       true
     end
 
+    # Resolved on/off for post-DML async verify. Public so tests can
+    # inspect; production code uses it only from `handle_query`.
+    def aggressive_verify_effective?
+      AggressiveVerify.effective?(
+        @aggressive_verify_upstream,
+        @aggressive_verify_override,
+      )
+    end
+
     def method_missing(name, *args, **kwargs, &block)
       @real.send(name, *args, **kwargs, &block)
     end
@@ -284,7 +329,16 @@ module GoldLapel
       tx_changed = update_transaction_state(sql)
       if tx_changed
         result = delegate_with_pending(method, sql, params, result_format, pending_guc, &block)
-        schedule_post_call_verify if should_post_verify
+        wants_verify = should_post_verify || (wrote_something && aggressive_verify_effective?)
+        if wants_verify
+          if @in_transaction
+            # Multi-stmt body left us still in a tx (`BEGIN; INSERT`):
+            # mark dirty so the next post-commit checkout reconciles.
+            @guc_state.mark_dirty!
+          else
+            schedule_post_call_verify
+          end
+        end
         return result
       end
 
@@ -293,7 +347,22 @@ module GoldLapel
       # to the underlying connection so the server actually runs it.
       if wrote_something
         result = delegate_with_pending(method, sql, params, result_format, pending_guc, &block)
-        schedule_post_call_verify if should_post_verify
+        # Aggressive-verify (concern 6 mitigation for trigger-internal
+        # SETs): when the flag is on, every confirmed DML write
+        # schedules an async pg_settings reconcile. Triggers fire
+        # server-side and may SET session GUCs the wire layer never
+        # saw; the verify catches that drift.
+        wants_verify = should_post_verify || aggressive_verify_effective?
+        if wants_verify
+          if @in_transaction
+            # Mid-tx — verify must run post-commit. Mark dirty so the
+            # next checkout (or the next out-of-tx user query) does
+            # the reconcile via the verify-on-checkout fallback path.
+            @guc_state.mark_dirty!
+          else
+            schedule_post_call_verify
+          end
+        end
         return result
       end
 
