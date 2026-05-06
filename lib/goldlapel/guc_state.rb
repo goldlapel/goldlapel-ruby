@@ -149,16 +149,13 @@ module GoldLapel
     #   Also recognises the `pg_catalog.set_config` schema-qualified
     #   form.
     #
-    # Returns nil for anything else (including `SET TIME ZONE ...` —
-    # the legacy two-word `SET TIME ZONE` form. The bare GUC
-    # `timezone` is unsafe (output formatting), but `SET TIME ZONE`
-    # uses an unusual two-word "name" that this parser doesn't
-    # recognise. Currently classified as not-a-SET — see
-    # `parse_set_time_zone` for the dedicated path that brings it
-    # back into the unsafe map. Conservative for now: a missed `SET
-    # TIME ZONE` only fragments cache slightly less than the SET
-    # equivalent would; the dedicated form mutates state hash via
-    # the standard `:set` shape with name `"timezone"`.
+    # The legacy two-word `SET TIME ZONE 'UTC'` form gets a dedicated
+    # branch — `timezone` is unsafe (output formatting affects cached
+    # bytes), so we route the two-word form through the same `:set`
+    # shape with name `"timezone"`. The bare `SET timezone = 'UTC'`
+    # form falls through the regular SET branch.
+    #
+    # Returns nil for anything else.
     #
     # Returns a Hash on success:
     #   { kind: :set,             name: <lowercased>, value: <stripped> }
@@ -211,24 +208,32 @@ module GoldLapel
         end
       end
 
-      # SET TIME ZONE 'UTC' — legacy two-word PG form. The bare GUC
-      # `timezone` is unsafe (output formatting affects cached bytes),
-      # so this needs to mutate the state hash too. Pre-empt the
-      # generic SET branch since the next token is "TIME" not a GUC
-      # name.
-      if head.casecmp("SET").zero? &&
-         tokens.length >= 2 &&
-         tokens[0].casecmp("TIME").zero? &&
-         tokens[1].casecmp("ZONE").zero?
-        # `SET TIME ZONE <value>`
-        value_tokens = tokens[2..] || []
+      return nil unless head.casecmp("SET").zero?
+
+      # SET [LOCAL | SESSION] TIME ZONE <value> — legacy two-word PG
+      # form. The bare GUC `timezone` is unsafe (output formatting
+      # affects cached bytes), so this needs to mutate the state
+      # hash too. Pre-empt the generic SET branch since the next
+      # tokens are "TIME ZONE" not a GUC `name = value` pair.
+      tz_offset = 0
+      tz_is_local = false
+      if tokens.length >= 1 && tokens[0].casecmp("LOCAL").zero?
+        tz_offset = 1
+        tz_is_local = true
+      elsif tokens.length >= 1 && tokens[0].casecmp("SESSION").zero?
+        tz_offset = 1
+      end
+      if tokens.length >= tz_offset + 2 &&
+         tokens[tz_offset].casecmp("TIME").zero? &&
+         tokens[tz_offset + 1].casecmp("ZONE").zero?
+        value_tokens = tokens[(tz_offset + 2)..] || []
         joined = value_tokens.join(" ").strip
         return nil if joined.empty?
         value = strip_value_quotes(joined)
-        return { kind: :set, name: "timezone", value: value }
+        return tz_is_local ?
+          { kind: :set_local, name: "timezone", value: value } :
+          { kind: :set, name: "timezone", value: value }
       end
-
-      return nil unless head.casecmp("SET").zero?
 
       # Optional `LOCAL` / `SESSION` modifier. PG's grammar permits
       # both; `SESSION` is the default and behaves the same as bare

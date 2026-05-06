@@ -182,6 +182,18 @@ class TestParseSetCommand < Minitest::Test
     assert_equal({ kind: :set, name: "timezone", value: "UTC" },
                  parse("SET TIME ZONE 'UTC';"))
   end
+
+  def test_set_session_time_zone
+    assert_equal({ kind: :set, name: "timezone", value: "UTC" },
+                 parse("SET SESSION TIME ZONE 'UTC'"))
+  end
+
+  def test_set_local_time_zone
+    # `SET LOCAL TIME ZONE` — transient (tx-scoped). Reverts at
+    # COMMIT/ROLLBACK; `:set_local` is a no-op for the state hash.
+    assert_equal({ kind: :set_local, name: "timezone", value: "UTC" },
+                 parse("SET LOCAL TIME ZONE 'UTC'"))
+  end
 end
 
 # ---------------------------------------------------------------------
