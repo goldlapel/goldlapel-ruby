@@ -1318,3 +1318,290 @@ class TestDiscardOnRelease < Minitest::Test
     refute @wrapped.discard_all_on_release!
   end
 end
+
+# ---------------------------------------------------------------------
+# Wave 2: SET-actually-applied. State-hash mutations are deferred
+# until the server confirms the statement succeeded. A SET that
+# raises on the wire must NOT change the wrapper's state hash;
+# a SET inside `BEGIN ... ROLLBACK` must revert; a DISCARD ALL that
+# errors mid-transaction must NOT clear the wrapper's state map.
+# ---------------------------------------------------------------------
+
+# Stub real_conn that fails on demand. Drives SET-error and tx-abort
+# scenarios without needing real PG.
+class FailableStubConn
+  attr_reader :exec_log
+  attr_accessor :fail_on_match  # Regexp matched against sql; matched ⇒ raise
+
+  StubResult = Struct.new(:rows, :columns) do
+    def values; rows; end
+    def fields; columns; end
+    def clear; end
+  end
+
+  def initialize
+    @exec_log = []
+    @fail_on_match = nil
+  end
+
+  def exec(sql, &block)
+    @exec_log << sql
+    if @fail_on_match && sql.is_a?(String) && @fail_on_match.match?(sql)
+      raise StandardError, "synthetic server error: #{sql}"
+    end
+    r = StubResult.new([["1"]], ["c"])
+    block&.call(r)
+    r
+  end
+  alias_method :query, :exec
+
+  def async_exec(sql, &block) = exec(sql, &block)
+  def exec_params(sql, params = [], _rf = 0, &block) = exec(sql, &block)
+  def async_exec_params(sql, params = [], _rf = 0, &block) = exec(sql, &block)
+  def close; end
+  def finished?; false; end
+end
+
+class TestSetActuallyApplied < Minitest::Test
+  def setup
+    GoldLapel::NativeCache.reset!
+    @cache = GoldLapel::NativeCache.new
+    @cache.instance_variable_set(:@invalidation_connected, true)
+    @real = FailableStubConn.new
+    @wrapped = GoldLapel::CachedConnection.new(@real, @cache)
+  end
+
+  def teardown
+    @wrapped.close rescue nil
+    GoldLapel::NativeCache.reset!
+  end
+
+  # ---- single-statement SET error ----
+
+  def test_failed_set_does_not_mutate_state_hash
+    h0 = @wrapped.guc_state.state_hash
+    @real.fail_on_match = /SET app\.user_id/
+    assert_raises(StandardError) do
+      @wrapped.exec("SET app.user_id = '42'")
+    end
+    assert_equal h0, @wrapped.guc_state.state_hash,
+      "state hash must not change when the wire SET errored"
+  end
+
+  def test_successful_set_mutates_state_hash
+    h0 = @wrapped.guc_state.state_hash
+    @wrapped.exec("SET app.user_id = '42'")
+    refute_equal h0, @wrapped.guc_state.state_hash,
+      "successful SET commits the pending mutation"
+  end
+
+  def test_failed_set_then_successful_set_keeps_only_successful_value
+    @real.fail_on_match = /'bad'/
+    assert_raises(StandardError) do
+      @wrapped.exec("SET app.user_id = 'bad'")
+    end
+    assert_equal({}, @wrapped.guc_state.values,
+      "failed SET must leave unsafe-GUC map empty")
+
+    @real.fail_on_match = nil
+    @wrapped.exec("SET app.user_id = 'good'")
+    assert_equal({ "app.user_id" => "good" }, @wrapped.guc_state.values)
+  end
+
+  # ---- multi-statement bodies ----
+
+  def test_multi_statement_with_error_drops_all_pending_sets
+    # PG simple-Q multi-statement implicit-tx semantics: any error in
+    # the batch rolls back the entire batch server-side. The wrapper
+    # mirrors that by dropping ALL pending mutations on error.
+    @real.fail_on_match = /SELECT 1\s*\/\s*0/
+    assert_raises(StandardError) do
+      @wrapped.exec("SET app.user_id = '42'; SET app.tenant = 'x'; SELECT 1/0")
+    end
+    assert_equal 0, @wrapped.guc_state.state_hash,
+      "all SETs in an erroring multi-statement batch must be dropped"
+  end
+
+  def test_multi_statement_all_succeed_applies_all_sets
+    @wrapped.exec("SET app.user_id = '42'; SET app.tenant = 'x'")
+    assert_equal({ "app.user_id" => "42", "app.tenant" => "x" },
+                 @wrapped.guc_state.values)
+  end
+
+  # ---- BEGIN / COMMIT lifecycle ----
+
+  def test_set_inside_committed_tx_persists
+    # Snapshot taken at BEGIN; COMMIT discards snapshot; SET sticks.
+    @wrapped.exec("BEGIN")
+    @wrapped.exec("SET app.user_id = '42'")
+    @wrapped.exec("COMMIT")
+    assert_equal({ "app.user_id" => "42" }, @wrapped.guc_state.values,
+      "SET inside a successful BEGIN..COMMIT must persist")
+  end
+
+  def test_set_inside_rolled_back_tx_reverts
+    # Snapshot taken at BEGIN; ROLLBACK pops + restores.
+    @wrapped.exec("BEGIN")
+    @wrapped.exec("SET app.user_id = '42'")
+    refute_equal 0, @wrapped.guc_state.state_hash,
+      "SET applied inside open tx (snapshot will revert at ROLLBACK)"
+    @wrapped.exec("ROLLBACK")
+    assert_equal 0, @wrapped.guc_state.state_hash,
+      "SET inside BEGIN..ROLLBACK must revert via snapshot stack"
+    assert_equal({}, @wrapped.guc_state.values)
+  end
+
+  def test_rollback_only_reverts_changes_made_inside_tx
+    # Pre-tx SET stays; intra-tx SET reverts.
+    @wrapped.exec("SET app.outer = 'kept'")
+    pre_tx_hash = @wrapped.guc_state.state_hash
+
+    @wrapped.exec("BEGIN")
+    @wrapped.exec("SET app.inner = 'reverted'")
+    @wrapped.exec("ROLLBACK")
+
+    assert_equal pre_tx_hash, @wrapped.guc_state.state_hash
+    assert_equal({ "app.outer" => "kept" }, @wrapped.guc_state.values)
+  end
+
+  def test_multi_statement_begin_set_rollback_in_one_query
+    # All-in-one body: BEGIN, SET, ROLLBACK as a single Q message. The
+    # snapshot+restore must walk the pending list in order so the
+    # intra-tx SET ends up reverted.
+    @wrapped.exec("BEGIN; SET app.user_id = '42'; ROLLBACK")
+    assert_equal 0, @wrapped.guc_state.state_hash
+    assert_equal({}, @wrapped.guc_state.values)
+  end
+
+  def test_multi_statement_begin_set_commit_in_one_query
+    @wrapped.exec("BEGIN; SET app.user_id = '42'; COMMIT")
+    assert_equal({ "app.user_id" => "42" }, @wrapped.guc_state.values)
+  end
+
+  # ---- DISCARD ALL inside tx (server errors) ----
+
+  def test_discard_all_in_aborted_tx_does_not_clear_state
+    # PG: `DISCARD ALL cannot run inside a transaction block`.
+    # Wrapper must NOT clear its state map when the server rejects
+    # the statement.
+    @wrapped.exec("SET app.user_id = '42'")
+    @wrapped.exec("BEGIN")
+    @real.fail_on_match = /DISCARD ALL/
+    assert_raises(StandardError) do
+      @wrapped.exec("DISCARD ALL")
+    end
+    # SET state survives the failed DISCARD. (BEGIN's snapshot is
+    # still on the stack — the user must ROLLBACK to escape, which
+    # would restore the pre-BEGIN state map. Since no SET ran inside
+    # the tx, that pre-BEGIN state still has app.user_id = '42'.)
+    assert_equal({ "app.user_id" => "42" }, @wrapped.guc_state.values)
+  end
+
+  # ---- async parity (CachedConnection is shared) ----
+
+  def test_async_exec_failed_set_does_not_mutate_state_hash
+    h0 = @wrapped.guc_state.state_hash
+    @real.fail_on_match = /SET app/
+    assert_raises(StandardError) do
+      @wrapped.async_exec("SET app.user_id = '42'")
+    end
+    assert_equal h0, @wrapped.guc_state.state_hash
+  end
+
+  def test_exec_params_failed_set_does_not_mutate_state_hash
+    h0 = @wrapped.guc_state.state_hash
+    @real.fail_on_match = /SET app/
+    assert_raises(StandardError) do
+      @wrapped.exec_params("SET app.user_id = '42'", [])
+    end
+    assert_equal h0, @wrapped.guc_state.state_hash
+  end
+
+  # ---- snapshot-stack hygiene ----
+
+  def test_snapshot_depth_zero_at_baseline
+    assert_equal 0, @wrapped.guc_state.snapshot_depth
+  end
+
+  def test_snapshot_depth_grows_on_begin_and_shrinks_on_commit
+    @wrapped.exec("BEGIN")
+    assert_equal 1, @wrapped.guc_state.snapshot_depth
+    @wrapped.exec("COMMIT")
+    assert_equal 0, @wrapped.guc_state.snapshot_depth
+  end
+
+  def test_snapshot_depth_shrinks_on_rollback
+    @wrapped.exec("BEGIN")
+    assert_equal 1, @wrapped.guc_state.snapshot_depth
+    @wrapped.exec("ROLLBACK")
+    assert_equal 0, @wrapped.guc_state.snapshot_depth
+  end
+
+  def test_failed_begin_does_not_grow_snapshot
+    @real.fail_on_match = /BEGIN/
+    assert_raises(StandardError) do
+      @wrapped.exec("BEGIN")
+    end
+    assert_equal 0, @wrapped.guc_state.snapshot_depth,
+      "failed BEGIN must not push a snapshot frame"
+  end
+
+  # ---- projected_hash_after used by cache GET in read path ----
+
+  def test_projected_hash_after_does_not_mutate_state
+    @wrapped.exec("SET app.user_id = '42'")
+    h_before = @wrapped.guc_state.state_hash
+    pending = GoldLapel::GucState.parse_pending(
+      "SET app.user_id = '999'; SELECT 1"
+    )
+    @wrapped.guc_state.projected_hash_after(pending)
+    assert_equal h_before, @wrapped.guc_state.state_hash,
+      "projected_hash_after must NOT mutate the live state map"
+    assert_equal({ "app.user_id" => "42" }, @wrapped.guc_state.values)
+  end
+
+  def test_projected_hash_after_matches_actual_apply
+    @wrapped.exec("SET app.outer = 'a'")
+    pending = GoldLapel::GucState.parse_pending(
+      "SET app.user_id = '42'; SET app.tenant = 'x'"
+    )
+    projected = @wrapped.guc_state.projected_hash_after(pending)
+    @wrapped.guc_state.apply_pending(pending)
+    assert_equal projected, @wrapped.guc_state.state_hash
+  end
+
+  def test_rollback_to_savepoint_does_not_pop_snapshot
+    # `ROLLBACK TO SAVEPOINT foo` is an intra-tx marker — it must NOT
+    # be classified as a tx-end (which would pop the snapshot frame
+    # taken at the outer BEGIN and leave the state map wrongly
+    # restored).
+    @wrapped.exec("BEGIN")
+    @wrapped.exec("SET app.user_id = '42'")
+    depth = @wrapped.guc_state.snapshot_depth
+    @wrapped.exec("SAVEPOINT s1")
+    @wrapped.exec("ROLLBACK TO SAVEPOINT s1")
+    assert_equal depth, @wrapped.guc_state.snapshot_depth,
+      "ROLLBACK TO SAVEPOINT must not pop the outer-tx snapshot"
+    # The intra-savepoint SET is still in the wrapper's view (we
+    # don't track savepoint-scoped state); the outer-tx snapshot
+    # remains untouched.
+    assert_equal({ "app.user_id" => "42" }, @wrapped.guc_state.values)
+    # Clean up: the real ROLLBACK should still revert.
+    @wrapped.exec("ROLLBACK")
+    assert_equal 0, @wrapped.guc_state.snapshot_depth
+    assert_equal({}, @wrapped.guc_state.values)
+  end
+
+  def test_projected_hash_after_handles_stray_rollback
+    # A pending list that contains :rollback without preceding :begin
+    # must NOT pop a real snapshot frame off the live stack.
+    @wrapped.exec("BEGIN")
+    depth_before = @wrapped.guc_state.snapshot_depth
+    pending = GoldLapel::GucState.parse_pending("ROLLBACK")
+    @wrapped.guc_state.projected_hash_after(pending)
+    assert_equal depth_before, @wrapped.guc_state.snapshot_depth,
+      "projection must not pop the live snapshot stack"
+  ensure
+    @wrapped.exec("ROLLBACK") rescue nil
+  end
+end

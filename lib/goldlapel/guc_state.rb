@@ -386,6 +386,72 @@ module GoldLapel
       v
     end
 
+    # Tx-control commands recognised by `parse_pending`. These are
+    # NOT mutations of the GUC state map themselves — they manage the
+    # snapshot stack used to revert SETs on ROLLBACK. Routed through
+    # the same pending-list mechanism so the wrapper applies BEGIN /
+    # COMMIT / ROLLBACK in the exact order the server saw them
+    # alongside any SET / RESET / DISCARD in a multi-statement body.
+    #
+    # `TX_ROLLBACK_RE` excludes `ROLLBACK TO [SAVEPOINT] name` — that
+    # variant pops the savepoint, NOT the transaction itself, so it
+    # would be wrong to pop a snapshot frame off the GUC stack.
+    # Matching `ROLLBACK` followed by `TO` rules out the savepoint
+    # form while still catching bare `ROLLBACK`, `ROLLBACK WORK`,
+    # `ROLLBACK TRANSACTION`, and the AND CHAIN variants.
+    TX_BEGIN_RE = /\A\s*(BEGIN|START\s+TRANSACTION)\b/i
+    TX_COMMIT_RE = /\A\s*(COMMIT|END)\b/i
+    TX_ROLLBACK_RE = /\A\s*ROLLBACK\b(?!\s+TO\b)/i
+
+    # Parse a SQL string into the ordered list of pending mutations
+    # the wrapper would apply if the server confirms the statement
+    # succeeded. Wave 2 of the SET-actually-applied refactor: the
+    # caller dispatches the SQL, then on success `apply_pending`s the
+    # returned list — on error, drops it. Decouples the wrapper's
+    # observed wire intent from the server's observed wire effect.
+    #
+    # The list mixes GUC-state commands (`:set` / `:reset` / etc.)
+    # with tx-control markers (`:begin` / `:commit` / `:rollback`)
+    # so a multi-statement body like `BEGIN; SET app.x = 'y';
+    # ROLLBACK` produces an interleaved sequence and `apply_pending`
+    # can snapshot/restore around the SETs in the same pass.
+    #
+    # Multi-statement bodies are split on top-level `;` (string-
+    # literal aware via `split_statements`). Tx-control segments are
+    # detected by their leading keyword; the rest are routed through
+    # `parse_set_command`. Segments that are neither (regular
+    # SELECTs, INSERTs, etc.) drop out of the list — only mutating
+    # commands that affect the wrapper's GUC state hash or its
+    # snapshot stack survive.
+    def self.parse_pending(sql)
+      return [] if sql.nil? || sql.empty?
+      segments =
+        if sql.is_a?(String) && sql.include?(";")
+          split_statements(sql)
+        else
+          [sql]
+        end
+      out = []
+      segments.each do |seg|
+        next if seg.nil? || seg.empty?
+        if TX_BEGIN_RE.match?(seg)
+          out << { kind: :begin }
+          next
+        end
+        if TX_COMMIT_RE.match?(seg)
+          out << { kind: :commit }
+          next
+        end
+        if TX_ROLLBACK_RE.match?(seg)
+          out << { kind: :rollback }
+          next
+        end
+        cmd = parse_set_command(seg)
+        out << cmd if cmd
+      end
+      out
+    end
+
     # Per-connection GUC state. Stores values for unsafe GUCs only;
     # harmless GUCs (timezone, application_name, planner cost knobs,
     # etc.) never enter the map and never affect the hash.
@@ -406,6 +472,12 @@ module GoldLapel
         # checkout path consults this flag and re-reads pg_settings
         # if true, then clears it.
         @dirty = false
+        # Snapshot stack for tx-scoped revert. `BEGIN` pushes a
+        # frozen copy of `@values` + `@state_hash`; `ROLLBACK` pops
+        # and restores; `COMMIT` pops and discards. Keyed off the
+        # pending-list mechanism in `apply_pending` — the wrapper
+        # never touches this stack directly.
+        @snapshots = []
       end
 
       # Current state hash. `0` for empty state.
@@ -465,10 +537,12 @@ module GoldLapel
       end
 
       # Apply a parsed `SET` / `RESET` / `DISCARD` /
-      # `SELECT set_config(...)` command. No-op for `:set_local`
-      # (transient — cache is bypassed inside transactions anyway),
-      # no-op for safe GUC names, no-op for DISCARD shapes that
-      # don't touch the GUC state map (PLANS / SEQUENCES / TEMP).
+      # `SELECT set_config(...)` command, or a tx-control marker
+      # (`:begin` / `:commit` / `:rollback`) emitted by
+      # `GucState.parse_pending`. No-op for `:set_local` (transient —
+      # cache is bypassed inside transactions anyway), no-op for
+      # safe GUC names, no-op for DISCARD shapes that don't touch
+      # the GUC state map (PLANS / SEQUENCES / TEMP).
       def apply(cmd)
         return if cmd.nil?
         case cmd[:kind]
@@ -502,7 +576,113 @@ module GoldLapel
           # distinguish "this was a DISCARD we intentionally don't
           # track" from "this looked like junk." A future prepared-
           # statement cache layer would hook `:discard_plans` here.
+        when :begin
+          snapshot!
+        when :commit
+          discard_snapshot!
+        when :rollback
+          restore_snapshot!
         end
+      end
+
+      # Apply a list of pending commands in order. Returned by
+      # `GucState.parse_pending` and held by the wrapper across the
+      # delegate call: applied on success, dropped on error. Returns
+      # true if the state hash changed.
+      def apply_pending(commands)
+        return false if commands.nil? || commands.empty?
+        before = @state_hash
+        commands.each { |cmd| apply(cmd) }
+        @state_hash != before
+      end
+
+      # Compute the state hash that *would* result from applying
+      # `commands`, without mutating `self`. Used by the wrapper for
+      # cache GET / PUT keys in the cache-miss path: GET and PUT
+      # both want the post-statement hash so a `SET app.x; SELECT ...`
+      # body keys cache slots by the post-SET state, matching what
+      # the SELECT actually saw on the server. The eager-mutation
+      # design got this for free; the deferred design has to project.
+      #
+      # Implementation: replay onto a sandbox copy of `@values` +
+      # `@state_hash` + `@snapshots`. Sandbox keeps the live state
+      # untouched even when the pending list contains a stray
+      # `:rollback` (no preceding `:begin`) that would otherwise pop
+      # a real snapshot frame.
+      def projected_hash_after(commands)
+        return @state_hash if commands.nil? || commands.empty?
+        sandbox_values = @values.dup
+        sandbox_hash = @state_hash
+        sandbox_snapshots = @snapshots.map { |snap| [snap[0].dup, snap[1]] }
+        commands.each do |cmd|
+          next if cmd.nil?
+          case cmd[:kind]
+          when :set
+            if GucState.unsafe_guc?(cmd[:name])
+              sandbox_values[cmd[:name]] = cmd[:value]
+              sandbox_hash = sandbox_values.empty? ? 0 : sandbox_values.sort.hash
+            end
+          when :reset
+            if GucState.unsafe_guc?(cmd[:name]) && sandbox_values.delete(cmd[:name])
+              sandbox_hash = sandbox_values.empty? ? 0 : sandbox_values.sort.hash
+            end
+          when :reset_all, :discard_all
+            unless sandbox_values.empty?
+              sandbox_values.clear
+              sandbox_hash = 0
+            end
+          when :begin
+            sandbox_snapshots << [sandbox_values.dup, sandbox_hash]
+          when :commit
+            sandbox_snapshots.pop
+          when :rollback
+            snap = sandbox_snapshots.pop
+            unless snap.nil?
+              sandbox_values, sandbox_hash = snap[0].dup, snap[1]
+            end
+          # :set_local / :discard_plans / :discard_sequences /
+          # :discard_temp — all no-ops for the state hash, mirror
+          # `apply`.
+          end
+        end
+        sandbox_hash
+      end
+
+      # Push a frozen copy of the current GUC state onto the
+      # snapshot stack. Called by `apply` when it sees a `:begin`
+      # marker (i.e., the SQL contained `BEGIN` / `START TRANSACTION`
+      # and the server confirmed it). Restored by
+      # `restore_snapshot!` on a subsequent successful ROLLBACK.
+      def snapshot!
+        @snapshots << [@values.dup, @state_hash]
+      end
+
+      # Pop the top snapshot and discard it — the changes made
+      # inside the surrounding transaction stick. Called by `apply`
+      # for a `:commit` marker. No-op when the stack is empty (a
+      # COMMIT outside any tx is a server-side no-op too — PG
+      # returns a WARNING, not an error).
+      def discard_snapshot!
+        @snapshots.pop
+      end
+
+      # Pop the top snapshot and restore it — the changes made
+      # inside the surrounding transaction are reverted. Called by
+      # `apply` for a `:rollback` marker. No-op when the stack is
+      # empty (defensive: a stray ROLLBACK outside any tx is a
+      # server-side WARNING; the wrapper's GUC state map is already
+      # what it should be).
+      def restore_snapshot!
+        snap = @snapshots.pop
+        return if snap.nil?
+        @values, @state_hash = snap
+      end
+
+      # Test/inspection helper — number of nested transaction
+      # snapshots currently held. Production code should never
+      # consult this; tests do.
+      def snapshot_depth
+        @snapshots.length
       end
 
       # Convenience: parse a SQL string and apply every recognised

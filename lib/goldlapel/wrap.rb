@@ -206,12 +206,24 @@ module GoldLapel
       # (`dirty?` short-circuits at zero cost).
       ensure_state_clean! if @guc_state.dirty?
 
-      # Observe SET / RESET on every query so the per-connection
-      # unsafe-GUC state stays current. Runs first — even DDL/writes
-      # and the in-transaction bypass paths must update state if the
-      # SQL body contains a `SET app.x = ...`. Update is in-place;
-      # reads of `@guc_state.state_hash` are O(1).
-      @guc_state.observe_sql(sql) if sql.is_a?(String)
+      # Parse pending GUC mutations (and tx-control markers that
+      # manage the snapshot stack) WITHOUT applying. Wave 2 of the
+      # SET-actually-applied refactor: the wrapper held an optimistic
+      # state hash that diverged from server reality whenever a SET
+      # errored. Now we hold the parsed mutations on the side and
+      # commit them only after `delegate` confirms the server ran the
+      # statement successfully — `apply_pending` on success, drop on
+      # error.
+      #
+      # Cache hits short-circuit `delegate` entirely; for those the
+      # SQL was a SELECT (cache holds nothing else), so the parsed
+      # list is empty and the apply/drop choice is moot.
+      pending_guc =
+        if sql.is_a?(String)
+          GucState.parse_pending(sql)
+        else
+          []
+        end
 
       # Top-level function call (concern 6) — schedule async post-
       # call verify after the user's query returns. Function bodies
@@ -261,9 +273,17 @@ module GoldLapel
       # cache forever until the next process restart. Same gap covers
       # bodies that *start* with a non-tx token but contain BEGIN/COMMIT
       # later (e.g. `SET app.x = 'y'; BEGIN; INSERT ...`).
+      #
+      # Wave 1 kept this eager (pre-delegate). The Wave 2 deferred-
+      # mutation refactor leaves it eager too: `@in_transaction` is
+      # used by THIS query's dispatch routing, and the cache-bypass
+      # fail-safe makes optimistic-true/eventually-false harmless
+      # (you'd just bypass cache for queries that wouldn't have hit
+      # anyway). Reverting `@in_transaction` on a delegate raise would
+      # add complexity for no observable benefit.
       tx_changed = update_transaction_state(sql)
       if tx_changed
-        result = delegate(method, sql, params, result_format, &block)
+        result = delegate_with_pending(method, sql, params, result_format, pending_guc, &block)
         schedule_post_call_verify if should_post_verify
         return result
       end
@@ -272,14 +292,14 @@ module GoldLapel
       # statement body), it must NOT be served from cache — dispatch
       # to the underlying connection so the server actually runs it.
       if wrote_something
-        result = delegate(method, sql, params, result_format, &block)
+        result = delegate_with_pending(method, sql, params, result_format, pending_guc, &block)
         schedule_post_call_verify if should_post_verify
         return result
       end
 
       # Inside transaction: bypass cache
       if @in_transaction
-        result = delegate(method, sql, params, result_format, &block)
+        result = delegate_with_pending(method, sql, params, result_format, pending_guc, &block)
         # Don't schedule verify mid-transaction — the verify body
         # must run outside any transaction (its own pg_settings
         # query is cheap, but spawning it while a tx is still open
@@ -294,13 +314,23 @@ module GoldLapel
       # Read path: check L1 cache. Pass the per-connection state hash
       # so cache slots never cross connections with different unsafe
       # GUC state.
-      sh = @guc_state.state_hash
+      #
+      # Project pending GUC mutations onto the live state hash so a
+      # multi-statement `SET app.x; SELECT ...` keys the cache lookup
+      # by the post-SET state — matching what the SELECT actually
+      # saw on the server. Eager-mutation Wave 1 got this for free
+      # because `observe_sql` already ran. Deferred Wave 2 has to
+      # project; the sandbox in `projected_hash_after` is empty-
+      # values-Hash#dup cheap.
+      sh = @guc_state.projected_hash_after(pending_guc)
       entry = @cache.get(sql, params, sh)
       if entry
         result = CachedResult.new(entry[:values], entry[:fields])
         # No real query went on the wire — don't schedule verify
         # for cache hits. The function call's body never executed,
-        # so there's nothing to reconcile.
+        # so there's nothing to reconcile. Likewise nothing to
+        # commit from `pending_guc` — a cache hit serves a SELECT
+        # we previously cached, which has no SET segments.
         if block
           block.call(result)
           return result
@@ -309,7 +339,7 @@ module GoldLapel
       end
 
       # Cache miss: execute WITHOUT block so we can cache before PG clears the result
-      result = delegate(method, sql, params, result_format)
+      result = delegate_with_pending(method, sql, params, result_format, pending_guc)
 
       # Cache the result if it carries column schema. SET / RESET /
       # LISTEN / UNLISTEN / NOTIFY / SAVEPOINT all return a result with
@@ -318,6 +348,15 @@ module GoldLapel
       # signal: any real SELECT (even one with zero rows) has a non-
       # empty field list. Skipping the put avoids bloating the cache
       # with no-row entries that never serve real data.
+      #
+      # `sh` was sampled before delegate ran; now that pending GUC
+      # mutations have been committed (delegate succeeded), re-sample
+      # so the cached result is keyed at the post-statement state
+      # hash. Matters when a multi-statement body interleaves
+      # `SET app.x; SELECT ...` — the SELECT's bytes were produced
+      # under the new state, and a cache lookup at that state should
+      # hit.
+      sh = @guc_state.state_hash
       if result && result.respond_to?(:values) && result.respond_to?(:fields) &&
          !result.fields.empty?
         @cache.put(sql, params, result.values, result.fields, sh)
@@ -330,6 +369,22 @@ module GoldLapel
       end
 
       schedule_post_call_verify if should_post_verify
+      result
+    end
+
+    # Dispatch to the underlying connection and, on success, commit
+    # the queue of pending GUC mutations parsed from `sql`. On any
+    # exception, drop the pending list and re-raise — the wrapper's
+    # state hash stays in sync with the server.
+    #
+    # Wave 2 invariant: `@guc_state` mutations are gated by server
+    # confirmation. A SET that errors leaves the state hash
+    # untouched; a SET inside `BEGIN ... ROLLBACK` is reverted via
+    # the snapshot stack `apply_pending` walks (a `:rollback` marker
+    # pops the snapshot taken at `:begin`).
+    def delegate_with_pending(method, sql, params, result_format, pending_guc, &block)
+      result = delegate(method, sql, params, result_format, &block)
+      @guc_state.apply_pending(pending_guc) if pending_guc && !pending_guc.empty?
       result
     end
 
