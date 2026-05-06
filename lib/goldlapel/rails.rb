@@ -90,8 +90,22 @@ module GoldLapel
           # only flag that belongs on `wrap` (L1 lives in the
           # wrapper); the rest go to the proxy spawn.
           @goldlapel_disable_native_cache = gl_config[:disable_native_cache] ? true : false
+          # Aggressive-verify (concern 6 mitigation) — :auto runs a
+          # one-time pg_trigger classifier on first wrap; :on/:off
+          # force the behaviour. `||` is not safe here because
+          # `false` is a valid value (alias for :off); use `key?`
+          # so a deliberate `false` survives.
+          @goldlapel_aggressive_verify =
+            if gl_config.is_a?(Hash) && gl_config.key?(:aggressive_verify)
+              gl_config[:aggressive_verify]
+            else
+              :auto
+            end
+          # `nil` from YAML resolves back to :auto.
+          @goldlapel_aggressive_verify = :auto if @goldlapel_aggressive_verify.nil?
 
           upstream = GoldLapel::Rails.build_upstream_url(@connection_parameters)
+          @goldlapel_upstream = upstream
 
           begin
             # Rails manages its own pg connections; only spawn the proxy here.
@@ -139,6 +153,8 @@ module GoldLapel
               @raw_connection,
               invalidation_port: @goldlapel_invalidation_port,
               disable_native_cache: @goldlapel_disable_native_cache,
+              aggressive_verify: @goldlapel_aggressive_verify,
+              upstream: @goldlapel_upstream,
             )
           rescue => e
             ::Rails.logger.warn("[Gold Lapel] L1 cache wrap failed: #{e.message} — using unwrapped connection")

@@ -38,7 +38,8 @@ module GoldLapel
       disable_proxy_cache: false,
       disable_matviews: false,
       disable_sqloptimize: false,
-      disable_auto_indexes: false
+      disable_auto_indexes: false,
+      aggressive_verify: :auto
     )
       @upstream = upstream
       @proxy_port = proxy_port
@@ -60,6 +61,7 @@ module GoldLapel
       @disable_matviews = disable_matviews ? true : false
       @disable_sqloptimize = disable_sqloptimize ? true : false
       @disable_auto_indexes = disable_auto_indexes ? true : false
+      @aggressive_verify = aggressive_verify
       @proxy = nil
       @internal_conn = nil
       @wrapped_conn = nil
@@ -146,6 +148,8 @@ module GoldLapel
           raw,
           invalidation_port: @proxy.invalidation_port,
           disable_native_cache: @disable_native_cache,
+          aggressive_verify: @aggressive_verify,
+          upstream: @upstream,
         )
         @internal_conn = @wrapped_conn
         @proxy.wrapped_conn = @wrapped_conn

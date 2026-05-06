@@ -72,7 +72,8 @@ module GoldLapel
     disable_proxy_cache: false,
     disable_matviews: false,
     disable_sqloptimize: false,
-    disable_auto_indexes: false
+    disable_auto_indexes: false,
+    aggressive_verify: :auto
   )
     Instance.new(
       upstream,
@@ -95,6 +96,7 @@ module GoldLapel
       disable_matviews: disable_matviews,
       disable_sqloptimize: disable_sqloptimize,
       disable_auto_indexes: disable_auto_indexes,
+      aggressive_verify: aggressive_verify,
     )
   end
 
@@ -117,7 +119,8 @@ module GoldLapel
     disable_proxy_cache: false,
     disable_matviews: false,
     disable_sqloptimize: false,
-    disable_auto_indexes: false
+    disable_auto_indexes: false,
+    aggressive_verify: :auto
   )
     # Legacy/advanced: construct without eagerly spawning or connecting.
     Instance.new(
@@ -141,6 +144,7 @@ module GoldLapel
       disable_matviews: disable_matviews,
       disable_sqloptimize: disable_sqloptimize,
       disable_auto_indexes: disable_auto_indexes,
+      aggressive_verify: aggressive_verify,
     )
   end
 

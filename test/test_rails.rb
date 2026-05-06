@@ -53,11 +53,19 @@ module RailsTestGoldLapelStub
     GoldLapel.define_singleton_method(:start_proxy) do |upstream, **kwargs|
       @start_calls << { upstream: upstream, **kwargs }
     end
-    GoldLapel.define_singleton_method(:wrap) do |conn, invalidation_port: nil, disable_native_cache: false|
+    GoldLapel.define_singleton_method(:wrap) do |
+      conn,
+      invalidation_port: nil,
+      disable_native_cache: false,
+      aggressive_verify: :auto,
+      upstream: nil
+    |
       @wrap_calls << {
         conn: conn,
         invalidation_port: invalidation_port,
         disable_native_cache: disable_native_cache,
+        aggressive_verify: aggressive_verify,
+        upstream: upstream,
       }
       GoldLapel::WrappedConnection.new(conn, invalidation_port)
     end
@@ -785,11 +793,19 @@ class TestL1CacheWrapping < Minitest::Test
   end
 
   def test_graceful_fallback_on_wrap_failure
-    RailsTestGoldLapelStub.override_wrap do |conn, invalidation_port: nil, disable_native_cache: false|
+    RailsTestGoldLapelStub.override_wrap do |
+      conn,
+      invalidation_port: nil,
+      disable_native_cache: false,
+      aggressive_verify: :auto,
+      upstream: nil
+    |
       @wrap_calls << {
         conn: conn,
         invalidation_port: invalidation_port,
         disable_native_cache: disable_native_cache,
+        aggressive_verify: aggressive_verify,
+        upstream: upstream,
       }
       raise RuntimeError, "wrap exploded"
     end
