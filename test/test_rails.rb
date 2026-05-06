@@ -812,3 +812,119 @@ class TestL1CacheWrapping < Minitest::Test
     assert Rails.logger.warnings.any? { |w| w.include?("L1 cache wrap failed") }
   end
 end
+
+# ---------------------------------------------------------------------------
+# Pool checkin DISCARD ALL hook (RLS hardening — concern 4)
+#
+# AR's `ConnectionPool#checkin` calls `expire` on the adapter. Our prepend
+# fires `discard_all_on_release!` on the wrapped connection so the unsafe-
+# GUC state and any server-side session GUCs are reset before the next
+# request checks the connection back out.
+# ---------------------------------------------------------------------------
+
+# A fake raw connection that records discard calls and exposes the
+# `discard_all_on_release!` API the railtie hook expects.
+class FakeWrappedConn
+  attr_reader :discard_calls
+
+  def initialize
+    @discard_calls = 0
+  end
+
+  def discard_all_on_release!
+    @discard_calls += 1
+    true
+  end
+end
+
+# Adapter double that does NOT use `wrap` — exposes the hook directly so
+# we can assert behaviour without spinning up the full proxy. The
+# `super_expire` flag captures that AR's underlying `expire` was called
+# afterward (we don't actually have an AR superclass here, so we mock
+# it as a no-op via the parent module).
+module FakeAdapterParent
+  def expire
+    @parent_expire_called = (@parent_expire_called || 0) + 1
+    nil
+  end
+end
+
+class FakeAdapterWithExpire
+  include FakeAdapterParent
+  prepend GoldLapel::Rails::PostgreSQLExtension
+
+  attr_accessor :raw_connection
+  attr_reader :parent_expire_called
+
+  def initialize(raw)
+    @raw_connection = raw
+    @parent_expire_called = 0
+  end
+end
+
+class TestPoolCheckinDiscardHook < Minitest::Test
+  def setup
+    Rails.logger.instance_variable_set(:@warnings, [])
+  end
+
+  def test_expire_calls_discard_all_on_release
+    raw = FakeWrappedConn.new
+    adapter = FakeAdapterWithExpire.new(raw)
+    adapter.expire
+    assert_equal 1, raw.discard_calls,
+      "AR pool checkin must invoke wrapper's DISCARD ALL hook"
+  end
+
+  def test_expire_calls_super
+    # The railtie's expire override must always chain to AR's
+    # underlying expire — otherwise the pool's own checkin
+    # bookkeeping breaks.
+    raw = FakeWrappedConn.new
+    adapter = FakeAdapterWithExpire.new(raw)
+    adapter.expire
+    assert_equal 1, adapter.parent_expire_called
+  end
+
+  def test_expire_skips_discard_for_non_wrapped_conn
+    # Fallback path — `wrap` failed at connect time, raw_connection
+    # is a plain pg conn that doesn't implement
+    # `discard_all_on_release!`. Hook must be a no-op there, not
+    # raise NoMethodError into AR's pool checkin.
+    raw = FakePgConnection.new
+    adapter = FakeAdapterWithExpire.new(raw)
+    adapter.expire  # must not raise
+    assert_equal 1, adapter.parent_expire_called
+  end
+
+  def test_expire_swallows_errors_from_discard_hook
+    # If the wrapper's DISCARD raises (broken pipe / closed conn),
+    # don't propagate into AR's pool. Log a warning and chain to
+    # super so the pool's bookkeeping still runs.
+    raw = Class.new do
+      def discard_all_on_release!
+        raise RuntimeError, "broken pipe"
+      end
+    end.new
+    adapter = FakeAdapterWithExpire.new(raw)
+    adapter.expire  # must not raise
+    assert_equal 1, adapter.parent_expire_called
+    assert Rails.logger.warnings.any? { |w| w.include?("DISCARD ALL on pool checkin failed") }
+  end
+
+  def test_expire_with_nil_raw_connection
+    # An adapter that never opened a connection (or had it
+    # disconnected) has nil raw_connection. Hook must tolerate
+    # that — `nil.respond_to?(...)` returns false.
+    adapter = FakeAdapterWithExpire.new(nil)
+    adapter.expire
+    assert_equal 1, adapter.parent_expire_called
+  end
+
+  def test_expire_called_repeatedly_is_safe
+    raw = FakeWrappedConn.new
+    adapter = FakeAdapterWithExpire.new(raw)
+    3.times { adapter.expire }
+    assert_equal 3, raw.discard_calls
+    assert_equal 3, adapter.parent_expire_called
+  end
+end

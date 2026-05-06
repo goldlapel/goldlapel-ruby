@@ -1192,6 +1192,40 @@ class TestPostCallVerify < Minitest::Test
       "schema-qualified function call must trigger verify"
   end
 
+  def test_multi_statement_with_funcall_schedules_verify
+    # `SET app.user_id = '42'; SELECT my_func()` — the set is
+    # inline-applied, the funcall still triggers verify.
+    @real.pg_settings_rows = [["app.user_id", "42"]]
+    @wrapped.exec("SET app.user_id = '42'; SELECT my_func()")
+    join_verify_thread
+    assert @real.exec_log.any? { |s| s.is_a?(String) && s.include?("pg_settings") },
+      "embedded funcall in multi-statement body must trigger verify"
+  end
+
+  def test_multi_statement_set_config_then_funcall
+    # `SELECT set_config(...); SELECT other_func()` — the
+    # set_config segment is excluded, but other_func's segment
+    # still matches → verify scheduled.
+    @real.pg_settings_rows = []
+    @wrapped.exec(
+      "SELECT set_config('app.user_id', '42', false); SELECT other_func()"
+    )
+    join_verify_thread
+    assert @real.exec_log.any? { |s| s.is_a?(String) && s.include?("pg_settings") },
+      "non-set_config funcall in multi-statement body must trigger verify"
+  end
+
+  def test_multi_statement_only_set_config_skips_verify
+    # `SELECT set_config(...); SELECT 1` — only set_config is a
+    # funcall (`SELECT 1` has no parens). Verify must not be
+    # scheduled.
+    @real.pg_settings_rows = []
+    @wrapped.exec("SELECT set_config('app.user_id', '42', false); SELECT 1")
+    join_verify_thread
+    refute @real.exec_log.any? { |s| s.is_a?(String) && s.include?("pg_settings") },
+      "pure-set_config multi-statement body must skip verify"
+  end
+
   def test_concurrent_verifies_dont_double_spawn
     # Two function calls in close succession must not spawn two
     # verifier threads — `@verify_thread` is reused if alive.

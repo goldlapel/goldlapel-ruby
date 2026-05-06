@@ -26,6 +26,49 @@ module GoldLapel
     end
 
     module PostgreSQLExtension
+      # Concern 4 (RLS hardening) — AR's connection pool does NOT
+      # auto-issue `DISCARD ALL` on connection checkin. With our
+      # wire-observed unsafe-GUC fingerprint folded into the L1
+      # cache key, that's a problem: a connection checked back in
+      # while still holding `app.user_id = '42'` will, on its next
+      # checkout by a different request, start with stale state
+      # (wrapper sees no SET, returns hash 0; server still has
+      # 42). Cache key for sh=0 may already be populated from a
+      # peer connection — we'd serve those rows to a request whose
+      # actual server-side `app.user_id` is 42.
+      #
+      # AR's `AbstractAdapter#expire` is the documented checkin
+      # hook (called by `ConnectionPool#checkin`). Prepend it to
+      # issue `DISCARD ALL` on the wrapped connection first. If
+      # the wrapper is the goldlapel `CachedConnection` we delegate
+      # to its `discard_all_on_release!` (which also resets the in-
+      # process state map); otherwise we no-op (fallback path
+      # where `wrap` failed and the adapter is talking to raw pg).
+      #
+      # The hook is also a no-op mid-transaction: AR pool checkin
+      # should never happen inside a tx, but if it does (buggy app
+      # code calling `release_connection` while holding a tx), we
+      # don't want to abort the user's work.
+      def expire
+        begin
+          conn = @raw_connection
+          if conn.respond_to?(:discard_all_on_release!)
+            conn.discard_all_on_release!
+          end
+        rescue StandardError => e
+          # Pool checkin is critical-path; never raise into AR's
+          # pool from our state-reset hook. Log and continue —
+          # next checkout will get a fresh connection if this one
+          # is torn down.
+          if defined?(::Rails) && ::Rails.respond_to?(:logger) && ::Rails.logger
+            ::Rails.logger.warn(
+              "[Gold Lapel] DISCARD ALL on pool checkin failed: #{e.message}"
+            )
+          end
+        end
+        super
+      end
+
       private
 
       def connect

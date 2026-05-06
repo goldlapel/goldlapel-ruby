@@ -220,12 +220,14 @@ module GoldLapel
       # delegate) so we know the user's *intent* even if the query
       # raises; the actual schedule fires post-success in the cache-
       # miss / write paths below.
-      should_post_verify =
-        sql.is_a?(String) && top_level_funcall?(sql) &&
-        # `set_config` was already routed through the parser; no
-        # need to redundantly verify when we know the inline mutation
-        # is exact.
-        !GucState::SET_CONFIG_RE.match?(sql)
+      #
+      # Segment-aware: a multi-statement body like `SET app.x = 'y';
+      # SELECT my_func()` schedules verify on the embedded funcall.
+      # `set_config` segments are skipped (parser already inline-
+      # applied the exact mutation), but ANY other funcall segment
+      # triggers verify. So `SELECT set_config(...); SELECT
+      # other_func()` still schedules a verify for `other_func`.
+      should_post_verify = sql.is_a?(String) && needs_post_call_verify?(sql)
 
       # Write detection + self-invalidation.
       #
@@ -333,9 +335,31 @@ module GoldLapel
 
     # Detect a top-level `SELECT <ident>(...)` — see
     # `TOP_LEVEL_FUNCALL` for the regex rationale. Cheap; no SQL
-    # parsing.
+    # parsing. Segment-aware: multi-statement bodies match if any
+    # segment is a funcall.
     def top_level_funcall?(sql)
-      TOP_LEVEL_FUNCALL.match?(sql)
+      return false unless sql.is_a?(String)
+      return TOP_LEVEL_FUNCALL.match?(sql) unless sql.include?(";")
+      GucState.split_statements(sql).any? { |seg| TOP_LEVEL_FUNCALL.match?(seg) }
+    end
+
+    # True when `sql` contains at least one segment that is a top-
+    # level `SELECT <ident>(...)` AND is not `SELECT set_config(...)`.
+    # `set_config` is excluded because the parser already inline-
+    # applied the exact mutation, so a redundant verify would just
+    # waste a round-trip. Multi-statement bodies are scanned
+    # segment-by-segment so e.g. `SET app.x = 'y'; SELECT my_func()`
+    # still schedules verify on the embedded funcall.
+    def needs_post_call_verify?(sql)
+      segments =
+        if sql.include?(";")
+          GucState.split_statements(sql)
+        else
+          [sql]
+        end
+      segments.any? do |seg|
+        TOP_LEVEL_FUNCALL.match?(seg) && !GucState::SET_CONFIG_RE.match?(seg)
+      end
     end
 
     # Reconcile the state hash with `pg_settings`. Caller has
