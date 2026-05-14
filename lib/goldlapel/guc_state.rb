@@ -461,6 +461,22 @@ module GoldLapel
         # before hashing so two connections that arrived at the same
         # state via different SET orders produce the same hash.
         @values = {}
+        # Monotonic per-connection counter bumped by every confirmed
+        # DML write (INSERT / UPDATE / DELETE / MERGE / TRUNCATE)
+        # when `bump_dml_seq` fires. Mixed into `@state_hash` so each
+        # post-DML cacheable read produces a fresh slot — closing the
+        # trigger-internal-SET gap. A server-side trigger that
+        # `SET app.user_id = ...` is invisible to the wire-side
+        # parser; bumping the counter guarantees the cache can never
+        # hand back a stale pre-DML response keyed on the previous
+        # GUC state.
+        #
+        # Cleared on RESET ALL / DISCARD ALL so a recycled
+        # connection re-converges to a peer-shareable baseline. The
+        # empty-values + zero-dml_seq state still hashes to `0`,
+        # preserving cache-slot sharing for fresh / freshly-reset
+        # connections.
+        @dml_seq = 0
         # `0` for the empty (default) state — a fresh connection's
         # state_hash matches "no GUCs set" cache slots from peer
         # connections, exactly as we want.
@@ -470,13 +486,16 @@ module GoldLapel
         # the parser couldn't fully decode (top-level function call,
         # an async post-call verify failure, etc.). The verify-on-
         # checkout path consults this flag and re-reads pg_settings
-        # if true, then clears it.
+        # if true, then clears it. While dirty, the wrapper bypasses
+        # the L1 cache entirely (both GET and PUT) — a cache lookup
+        # at a hash that doesn't match the server's true session
+        # state could leak rows across security boundaries.
         @dirty = false
         # Snapshot stack for tx-scoped revert. `BEGIN` pushes a
-        # frozen copy of `@values` + `@state_hash`; `ROLLBACK` pops
-        # and restores; `COMMIT` pops and discards. Keyed off the
-        # pending-list mechanism in `apply_pending` — the wrapper
-        # never touches this stack directly.
+        # frozen copy of `@values` + `@state_hash` + `@dml_seq`;
+        # `ROLLBACK` pops and restores; `COMMIT` pops and discards.
+        # Keyed off the pending-list mechanism in `apply_pending` —
+        # the wrapper never touches this stack directly.
         @snapshots = []
       end
 
@@ -506,6 +525,29 @@ module GoldLapel
         @dirty = false
       end
 
+      # Bump the post-DML sequence counter so the next cache-key
+      # computation on this connection produces a fresh slot. Called
+      # from the wrapper after every confirmed INSERT / UPDATE /
+      # DELETE / MERGE / TRUNCATE / DDL write when aggressive verify
+      # is on (the default). The bump means: any subsequent
+      # cacheable read on this connection cannot share a cache slot
+      # with a pre-DML read keyed on the prior state — closing the
+      # trigger-internal-SET correctness gap (a server-side trigger
+      # that did `SET app.user_id = ...` would otherwise be invisible
+      # to the wire-side state observer, but PG always knows its own
+      # session state, so PG itself returns correct rows; the bump
+      # just guarantees the cache can't replay a stale slot).
+      def bump_dml_seq
+        @dml_seq += 1
+        recompute_hash
+      end
+
+      # Read-only accessor for the post-DML sequence counter. Tests
+      # only — production callers should consult `state_hash`.
+      def dml_seq
+        @dml_seq
+      end
+
       # Replace the unsafe-GUC map wholesale with values
       # reconstructed from a `pg_settings` query. Filters through
       # the same `unsafe_guc?` classifier as wire-observed SETs so
@@ -525,6 +567,11 @@ module GoldLapel
           next unless GucState.unsafe_guc?(lower)
           @values[lower] = value.to_s
         end
+        # Reconciled with server truth — drop the post-DML
+        # divergence counter back to baseline. Subsequent cacheable
+        # reads on this connection key off the freshly-observed
+        # state, not the stale pre-reconcile fingerprint.
+        @dml_seq = 0
         recompute_hash
         mark_clean!
       end
@@ -566,9 +613,13 @@ module GoldLapel
           # locks, listen channels, and the plan cache — none of
           # which affect the wrapper's cache-key safety model. From
           # the GUC-state perspective the two are equivalent: clear
-          # the unsafe-GUC map and zero the hash.
-          unless @values.empty?
+          # the unsafe-GUC map AND drop the post-DML counter back to
+          # baseline so a recycled connection re-converges to a
+          # peer-shareable hash.
+          had_state = !@values.empty? || @dml_seq != 0
+          if had_state
             @values.clear
+            @dml_seq = 0
             recompute_hash
           end
         when :discard_plans, :discard_sequences, :discard_temp
@@ -612,33 +663,44 @@ module GoldLapel
       def projected_hash_after(commands)
         return @state_hash if commands.nil? || commands.empty?
         sandbox_values = @values.dup
+        sandbox_dml_seq = @dml_seq
         sandbox_hash = @state_hash
-        sandbox_snapshots = @snapshots.map { |snap| [snap[0].dup, snap[1]] }
+        sandbox_snapshots = @snapshots.map { |snap| [snap[0].dup, snap[1], snap[2] || 0] }
+        recompute = lambda do
+          if sandbox_values.empty? && sandbox_dml_seq == 0
+            sandbox_hash = 0
+          else
+            sandbox_hash = [sandbox_values.sort, sandbox_dml_seq].hash
+          end
+        end
         commands.each do |cmd|
           next if cmd.nil?
           case cmd[:kind]
           when :set
             if GucState.unsafe_guc?(cmd[:name])
               sandbox_values[cmd[:name]] = cmd[:value]
-              sandbox_hash = sandbox_values.empty? ? 0 : sandbox_values.sort.hash
+              recompute.call
             end
           when :reset
             if GucState.unsafe_guc?(cmd[:name]) && sandbox_values.delete(cmd[:name])
-              sandbox_hash = sandbox_values.empty? ? 0 : sandbox_values.sort.hash
+              recompute.call
             end
           when :reset_all, :discard_all
-            unless sandbox_values.empty?
+            if !sandbox_values.empty? || sandbox_dml_seq != 0
               sandbox_values.clear
-              sandbox_hash = 0
+              sandbox_dml_seq = 0
+              recompute.call
             end
           when :begin
-            sandbox_snapshots << [sandbox_values.dup, sandbox_hash]
+            sandbox_snapshots << [sandbox_values.dup, sandbox_hash, sandbox_dml_seq]
           when :commit
             sandbox_snapshots.pop
           when :rollback
             snap = sandbox_snapshots.pop
             unless snap.nil?
-              sandbox_values, sandbox_hash = snap[0].dup, snap[1]
+              sandbox_values = snap[0].dup
+              sandbox_hash = snap[1]
+              sandbox_dml_seq = snap[2] || 0
             end
           # :set_local / :discard_plans / :discard_sequences /
           # :discard_temp — all no-ops for the state hash, mirror
@@ -653,8 +715,10 @@ module GoldLapel
       # marker (i.e., the SQL contained `BEGIN` / `START TRANSACTION`
       # and the server confirmed it). Restored by
       # `restore_snapshot!` on a subsequent successful ROLLBACK.
+      # The `@dml_seq` counter is part of the snapshot so a ROLLBACK
+      # also reverts any in-transaction post-DML bumps.
       def snapshot!
-        @snapshots << [@values.dup, @state_hash]
+        @snapshots << [@values.dup, @state_hash, @dml_seq]
       end
 
       # Pop the top snapshot and discard it — the changes made
@@ -675,7 +739,10 @@ module GoldLapel
       def restore_snapshot!
         snap = @snapshots.pop
         return if snap.nil?
-        @values, @state_hash = snap
+        @values, @state_hash, @dml_seq = snap
+        # Defensive: snapshots pre-dating the dml_seq field would
+        # restore a 2-element array; treat the missing slot as 0.
+        @dml_seq ||= 0
       end
 
       # Test/inspection helper — number of nested transaction
@@ -712,17 +779,24 @@ module GoldLapel
       private
 
       def recompute_hash
-        if @values.empty?
+        # Empty values + zero dml_seq is the canonical "fresh
+        # connection" state — keep the hash exactly 0 so existing
+        # cache slots populated by peer connections at the empty
+        # baseline are reachable by other freshly-opened (or freshly
+        # DISCARDed) connections.
+        if @values.empty? && @dml_seq == 0
           @state_hash = 0
           return
         end
-        # Sort by key so insertion order doesn't affect the output.
-        # Ruby's Array#hash + the canonical pair list gives a stable,
-        # process-local integer that mixes name + value for every
-        # tracked GUC. The hash crosses connections within one
-        # process; cross-process hashes are not required (the proxy
-        # has its own state_hash on its side of the wire).
-        @state_hash = @values.sort.hash
+        # Mix the sorted (name, value) pairs with the post-DML
+        # sequence counter. Sorting makes insertion order
+        # irrelevant; mixing `@dml_seq` means a connection with no
+        # unsafe SETs but a non-zero post-DML bump still gets a
+        # unique slot — preventing trigger-internal-SET replays.
+        # Process-local integer; cross-process hashes are not
+        # required (the proxy has its own state_hash on its side of
+        # the wire).
+        @state_hash = [@values.sort, @dml_seq].hash
       end
     end
   end
