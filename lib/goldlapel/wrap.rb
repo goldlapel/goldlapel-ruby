@@ -2,9 +2,66 @@
 
 require_relative "cache"
 require_relative "guc_state"
-require_relative "aggressive_verify"
 
 module GoldLapel
+  # Aggressive verify (post-DML cache-key isolation) is always-on by
+  # default. Every confirmed DML write bumps the per-connection
+  # `dml_seq` counter, which mixes into the L1 cache state hash so a
+  # subsequent cacheable read on the same connection cannot share a
+  # slot with a pre-DML read — closing the trigger-internal-SET
+  # correctness gap. The tax is a counter increment; no extra wire
+  # query.
+  #
+  # Callers can opt out with `aggressive_verify: :off` (or `false`)
+  # if they're certain no server-side trigger ever issues `SET` /
+  # `set_config` / `RESET` / `DISCARD` against a session GUC. The
+  # off path emits a one-shot security warning to stderr — the
+  # documented footgun is documented loudly.
+  AGGRESSIVE_VERIFY_OFF_WARNING =
+    "[Gold Lapel] aggressive_verify: :off — disabling per-DML " \
+    "cache-key isolation. Server-side triggers that internally " \
+    "SET / set_config session GUCs can cause cached responses to " \
+    "be served against stale RLS state. Only safe if your schema " \
+    "is known to have no SET-mutating triggers."
+
+  @aggressive_verify_off_warned = false
+  @aggressive_verify_warn_mutex = Mutex.new
+
+  # One-shot per-process opt-out warning. Subsequent connections
+  # passing `:off` reuse the already-warned flag — no log spam.
+  def self._warn_aggressive_verify_off
+    @aggressive_verify_warn_mutex.synchronize do
+      return if @aggressive_verify_off_warned
+      @aggressive_verify_off_warned = true
+    end
+    warn AGGRESSIVE_VERIFY_OFF_WARNING
+  end
+
+  # Test-only — clear the one-shot flag between cases so warning
+  # behaviour can be re-asserted.
+  def self._reset_aggressive_verify_warning!
+    @aggressive_verify_warn_mutex.synchronize do
+      @aggressive_verify_off_warned = false
+    end
+  end
+
+  # Resolve the `aggressive_verify:` kwarg to a boolean. `:auto`
+  # (default), `:on`, `true`, `nil` → on. `:off` / `false` → off,
+  # plus one-shot stderr warning. Anything else raises.
+  def self._resolve_aggressive_verify(value)
+    case value
+    when nil, :auto, :on, true
+      true
+    when :off, false
+      _warn_aggressive_verify_off
+      false
+    else
+      raise ArgumentError,
+        "aggressive_verify must be :auto, :on, :off, true, or false " \
+        "(got #{value.inspect})"
+    end
+  end
+
   # Cheap pre-check used by `update_transaction_state` to avoid running
   # the statement splitter on multi-statement bodies that contain no tx-
   # control keyword. Matches BEGIN / START / COMMIT / ROLLBACK / END
@@ -55,27 +112,20 @@ module GoldLapel
     invalidation_port ||= detect_invalidation_port
     cache.connect_invalidation(invalidation_port) unless cache.connected?
 
-    # Smart-auto detection (concern 6 — trigger-internal SETs). On the
-    # first connection per upstream, run a single `pg_trigger` classifier
-    # query to decide whether any user-defined trigger function body
-    # mutates session state. The result is cached process-lifetime; later
-    # connections to the same upstream reuse it.
-    #
-    # `upstream` defaults to nil (callers that don't have an upstream
-    # URL handy — bare `GoldLapel.wrap(conn)` test helpers — keep
-    # working with detection skipped). When the override is :on or :off
-    # we skip detection entirely; the explicit kwarg already determined
-    # the outcome and the round-trip would just be wasted.
-    if upstream && (aggressive_verify == :auto || aggressive_verify.nil?) &&
-       !AggressiveVerify.cached?(upstream)
-      AggressiveVerify.detect!(conn, upstream)
-    end
+    # Aggressive verify is always-on by default. Resolution emits the
+    # one-shot opt-out warning when the caller passes `:off`. The
+    # `upstream:` kwarg is accepted for canonical-surface symmetry
+    # (production callers thread it through, bare
+    # `GoldLapel.wrap(conn)` defaults to nil) but no longer routes
+    # any wrapper behaviour — always-on bump makes per-upstream
+    # classification redundant.
+    _ = upstream
+    aggressive_active = _resolve_aggressive_verify(aggressive_verify)
 
     CachedConnection.new(
       conn,
       cache,
-      aggressive_verify: aggressive_verify,
-      upstream: upstream,
+      aggressive_verify_active: aggressive_active,
     )
   end
 
@@ -94,13 +144,16 @@ module GoldLapel
     # Exposed for tests and rare adapters. Don't mutate from outside.
     attr_reader :guc_state
 
-    def initialize(real_conn, cache, aggressive_verify: :auto, upstream: nil)
+    def initialize(real_conn, cache, aggressive_verify_active: true)
       @real = real_conn
       @cache = cache
       @in_transaction = false
-      # Per-connection unsafe-GUC fingerprint. Folded into the L1
-      # cache key so custom-GUC RLS (`SET app.user_id = '42'`) can
-      # never leak user A's rows to user B. See `goldlapel/guc_state.rb`.
+      # Per-connection unsafe-GUC fingerprint + post-DML sequence
+      # counter. Both fold into the L1 cache key so custom-GUC RLS
+      # (`SET app.user_id = '42'`) can never leak user A's rows to
+      # user B, and a server-side trigger that mutates session
+      # state can't replay a stale cached response. See
+      # `goldlapel/guc_state.rb`.
       @guc_state = GucState::ConnectionGucState.new
       # Serialises `@real` access between the user thread and any
       # post-call verify Thread (concern 6). pg connections are
@@ -115,13 +168,10 @@ module GoldLapel
       # outlives the underlying pg connection.
       @verify_thread = nil
       @closed = false
-      # Aggressive-verify (post-DML async verify) override + upstream
-      # URL key. The effective on/off is resolved per-query via
-      # `AggressiveVerify.effective?` so a license-payload update or a
-      # late-arriving smart-auto detection takes effect without
-      # rebuilding the wrapper.
-      @aggressive_verify_override = aggressive_verify
-      @aggressive_verify_upstream = upstream
+      # Always-on by default; set to false only when the caller
+      # explicitly opts out via `aggressive_verify: :off`. Controls
+      # whether `bump_dml_seq` fires after a confirmed DML write.
+      @aggressive_verify_active = aggressive_verify_active
     end
 
     def exec(sql, &block)
@@ -222,13 +272,11 @@ module GoldLapel
       true
     end
 
-    # Resolved on/off for post-DML async verify. Public so tests can
-    # inspect; production code uses it only from `handle_query`.
-    def aggressive_verify_effective?
-      AggressiveVerify.effective?(
-        @aggressive_verify_upstream,
-        @aggressive_verify_override,
-      )
+    # Resolved on/off for post-DML cache-key isolation. Public so
+    # tests can inspect; production code uses it only from
+    # `handle_query`.
+    def aggressive_verify_active?
+      @aggressive_verify_active
     end
 
     def method_missing(name, *args, **kwargs, &block)
@@ -329,8 +377,14 @@ module GoldLapel
       tx_changed = update_transaction_state(sql)
       if tx_changed
         result = delegate_with_pending(method, sql, params, result_format, pending_guc, &block)
-        wants_verify = should_post_verify || (wrote_something && aggressive_verify_effective?)
-        if wants_verify
+        # Aggressive-verify v2 (always-on bump): every confirmed
+        # DML write rolls the per-connection dml_seq forward so any
+        # subsequent cacheable read cannot share a slot with a pre-
+        # DML response keyed on the prior state. Closes the
+        # trigger-internal-SET cache-replay gap with no extra wire
+        # round-trip.
+        @guc_state.bump_dml_seq if wrote_something && @aggressive_verify_active
+        if should_post_verify
           if @in_transaction
             # Multi-stmt body left us still in a tx (`BEGIN; INSERT`):
             # mark dirty so the next post-commit checkout reconciles.
@@ -347,13 +401,9 @@ module GoldLapel
       # to the underlying connection so the server actually runs it.
       if wrote_something
         result = delegate_with_pending(method, sql, params, result_format, pending_guc, &block)
-        # Aggressive-verify (concern 6 mitigation for trigger-internal
-        # SETs): when the flag is on, every confirmed DML write
-        # schedules an async pg_settings reconcile. Triggers fire
-        # server-side and may SET session GUCs the wire layer never
-        # saw; the verify catches that drift.
-        wants_verify = should_post_verify || aggressive_verify_effective?
-        if wants_verify
+        # Always-on post-DML bump (see comment above).
+        @guc_state.bump_dml_seq if @aggressive_verify_active
+        if should_post_verify
           if @in_transaction
             # Mid-tx — verify must run post-commit. Mark dirty so the
             # next checkout (or the next out-of-tx user query) does
@@ -380,10 +430,15 @@ module GoldLapel
         return result
       end
 
-      # Read path: check L1 cache. Pass the per-connection state hash
-      # so cache slots never cross connections with different unsafe
-      # GUC state.
-      #
+      # Read path: check L1 cache UNLESS dirty (verify pending or
+      # failed). A dirty state map may not match the server's true
+      # session GUCs — serving a cached response keyed on a state
+      # hash that's drifted from server reality could leak rows
+      # across security boundaries. Bypass both GET and PUT until
+      # `ensure_state_clean!` reconciles successfully on the next
+      # checkout cycle.
+      bypass_cache = @guc_state.dirty?
+
       # Project pending GUC mutations onto the live state hash so a
       # multi-statement `SET app.x; SELECT ...` keys the cache lookup
       # by the post-SET state — matching what the SELECT actually
@@ -392,31 +447,37 @@ module GoldLapel
       # project; the sandbox in `projected_hash_after` is empty-
       # values-Hash#dup cheap.
       sh = @guc_state.projected_hash_after(pending_guc)
-      entry = @cache.get(sql, params, sh)
-      if entry
-        result = CachedResult.new(entry[:values], entry[:fields])
-        # No real query went on the wire — don't schedule verify
-        # for cache hits. The function call's body never executed,
-        # so there's nothing to reconcile. Likewise nothing to
-        # commit from `pending_guc` — a cache hit serves a SELECT
-        # we previously cached, which has no SET segments.
-        if block
-          block.call(result)
+      unless bypass_cache
+        entry = @cache.get(sql, params, sh)
+        if entry
+          result = CachedResult.new(entry[:values], entry[:fields])
+          # No real query went on the wire — don't schedule verify
+          # for cache hits. The function call's body never executed,
+          # so there's nothing to reconcile. Likewise nothing to
+          # commit from `pending_guc` — a cache hit serves a SELECT
+          # we previously cached, which has no SET segments.
+          if block
+            block.call(result)
+            return result
+          end
           return result
         end
-        return result
       end
 
-      # Cache miss: execute WITHOUT block so we can cache before PG clears the result
+      # Cache miss (or dirty bypass): execute WITHOUT block so we
+      # can cache before PG clears the result.
       result = delegate_with_pending(method, sql, params, result_format, pending_guc)
 
-      # Cache the result if it carries column schema. SET / RESET /
-      # LISTEN / UNLISTEN / NOTIFY / SAVEPOINT all return a result with
-      # empty `fields` and empty `values` — those are session-state
-      # commands, not cacheable reads. `fields.empty?` is a clean
-      # signal: any real SELECT (even one with zero rows) has a non-
-      # empty field list. Skipping the put avoids bloating the cache
-      # with no-row entries that never serve real data.
+      # Cache the result if it carries column schema AND we didn't
+      # bypass cache on entry AND the state hasn't gone dirty during
+      # delegate (e.g. an in-flight verify scheduled by a sibling
+      # path raced and marked dirty before we got here). SET /
+      # RESET / LISTEN / UNLISTEN / NOTIFY / SAVEPOINT all return a
+      # result with empty `fields` and empty `values` — those are
+      # session-state commands, not cacheable reads. `fields.empty?`
+      # is a clean signal: any real SELECT (even one with zero rows)
+      # has a non-empty field list. Skipping the put avoids bloating
+      # the cache with no-row entries that never serve real data.
       #
       # `sh` was sampled before delegate ran; now that pending GUC
       # mutations have been committed (delegate succeeded), re-sample
@@ -426,7 +487,8 @@ module GoldLapel
       # under the new state, and a cache lookup at that state should
       # hit.
       sh = @guc_state.state_hash
-      if result && result.respond_to?(:values) && result.respond_to?(:fields) &&
+      if !bypass_cache && !@guc_state.dirty? &&
+         result && result.respond_to?(:values) && result.respond_to?(:fields) &&
          !result.fields.empty?
         @cache.put(sql, params, result.values, result.fields, sh)
       end
