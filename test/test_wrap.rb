@@ -306,11 +306,25 @@ class TestTransactions < Minitest::Test
     conn = GoldLapel::CachedConnection.new(mock, @cache)
     conn.exec("BEGIN; INSERT INTO orders VALUES (1); COMMIT")
     assert_equal false, conn.instance_variable_get(:@in_transaction)
-    # Cache should still serve subsequent reads (not stuck bypassed).
+    # Wrapper is no longer stuck in tx — subsequent reads route
+    # through the normal path. They miss the peer-slot cache entry
+    # because the committed INSERT bumped this connection's
+    # dml_seq (always-on aggressive-verify cache-key isolation,
+    # protecting against trigger-internal SETs), but the wrapper
+    # WILL cache its own freshly-fetched result at the new state
+    # hash so the next read hits.
     @cache.put("SELECT * FROM orders", nil, [["x"]], ["id"])
     mock.calls.clear
     conn.exec("SELECT * FROM orders")
-    assert_empty mock.calls
+    # First post-DML read: cache miss (peer's slot was keyed at
+    # state_hash=0, this connection now has a non-zero dml_seq).
+    refute_empty mock.calls, "post-DML read must miss the peer-keyed slot"
+    mock.calls.clear
+    # Second read at the same dml_seq: hits this connection's own
+    # cached result.
+    conn.exec("SELECT * FROM orders")
+    assert_empty mock.calls,
+      "second read at unchanged dml_seq must hit the cached slot"
   end
 
   def test_multi_statement_begin_insert_leaves_wrapper_in_transaction
