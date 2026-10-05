@@ -22,7 +22,15 @@ module GoldLapel
       dbname = params[:dbname] ? URI.encode_uri_component(params[:dbname]) : ""
 
       authority = userinfo ? "#{userinfo}@#{host}:#{port}" : "#{host}:#{port}"
-      "postgresql://#{authority}/#{dbname}"
+      url = "postgresql://#{authority}/#{dbname}"
+
+      # The upstream hop keeps database.yml's TLS/GSS settings (sslmode etc.).
+      tls = GoldLapel::Proxy::UPSTREAM_TLS_PARAMS.filter_map do |key|
+        value = params[key.to_sym]
+        next if value.nil? || value.to_s.empty?
+        "#{key}=#{URI.encode_www_form_component(value.to_s)}"
+      end
+      tls.empty? ? url : "#{url}?#{tls.join('&')}"
     end
 
     module PostgreSQLExtension
@@ -30,14 +38,14 @@ module GoldLapel
 
       def connect
         unless @goldlapel_started
-          # database.yml `goldlapel:` block follows the canonical snake_case
-          # surface: proxy_port, dashboard_port, log_level, mode, license,
-          # config_file, config, extra_args.
+          # database.yml's `goldlapel:` block takes the same options as
+          # GoldLapel.start (proxy_port, dashboard_port, log_level, mode,
+          # license, client, config_file, config, extra_args, silent, mesh,
+          # ...), forwarded as given — unknown ones raise like they do there.
+          # `client` defaults to "rails" for telemetry.
           gl_config = @config.is_a?(Hash) ? @config[:goldlapel] || {} : {}
-          gl_config = gl_config.transform_keys(&:to_sym) if gl_config.is_a?(Hash)
-          proxy_port_opt = gl_config[:proxy_port]
-          config = gl_config[:config]
-          extra_args = gl_config[:extra_args] || []
+          options = gl_config.is_a?(Hash) ? gl_config.transform_keys(&:to_sym) : {}
+          options[:client] ||= "rails"
 
           upstream = GoldLapel::Rails.build_upstream_url(@connection_parameters)
 
@@ -45,28 +53,11 @@ module GoldLapel
             # Rails manages its own pg connections; only spawn the proxy here.
             # (`start_proxy` is the low-level, connection-less variant of
             # `GoldLapel.start` that returns the proxy URL, not an instance.)
-            proxy_url = GoldLapel.start_proxy(
-              upstream,
-              proxy_port: proxy_port_opt,
-              dashboard_port: gl_config[:dashboard_port],
-              log_level: gl_config[:log_level],
-              mode: gl_config[:mode],
-              license: gl_config[:license],
-              client: "rails",
-              config_file: gl_config[:config_file],
-              config: config,
-              extra_args: extra_args,
-              silent: gl_config[:silent] ? true : false,
-              mesh: gl_config[:mesh] ? true : false,
-              mesh_tag: gl_config[:mesh_tag],
-              disable_proxy_cache: gl_config[:disable_proxy_cache] ? true : false,
-              disable_sqloptimize: gl_config[:disable_sqloptimize] ? true : false,
-              disable_auto_indexes: gl_config[:disable_auto_indexes] ? true : false,
-            )
-            # Without a configured proxy_port the core picks a free port
-            # pair per upstream (multiple databases each get their own), so
-            # read the port back from the URL rather than assuming 7932.
-            proxy_port = URI.parse(proxy_url).port
+            # Without a configured proxy_port the core picks a free port pair
+            # per upstream (multiple databases each get their own), so read
+            # the port back from the registry rather than assuming 7932.
+            GoldLapel.start_proxy(upstream, **options)
+            proxy = GoldLapel::Proxy.instances.fetch(upstream)
           rescue => e
             ::Rails.logger.warn("[Gold Lapel] Proxy failed to start: #{e.message} — falling back to direct connection")
             @goldlapel_started = true
@@ -74,7 +65,12 @@ module GoldLapel
           end
 
           @connection_parameters[:host] = "127.0.0.1"
-          @connection_parameters[:port] = proxy_port
+          @connection_parameters[:port] = proxy.proxy_port
+          # The proxy declines TLS from the app unless it was given a
+          # certificate, so the upstream TLS settings stay on its side.
+          unless proxy.client_tls?
+            GoldLapel::Proxy::UPSTREAM_TLS_PARAMS.each { |key| @connection_parameters.delete(key.to_sym) }
+          end
           @goldlapel_started = true
         end
 

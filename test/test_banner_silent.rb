@@ -22,6 +22,7 @@ require_relative "../lib/goldlapel/proxy"
 require_relative "../lib/goldlapel"
 
 module BannerTestSupport
+  FAKE_PID = 12345
   # Install stubs on `GoldLapel::Proxy` that make `#start` run its full logic
   # without actually spawning a subprocess. The stubs record the command-line
   # array that would have been passed to the binary so tests can assert what
@@ -55,7 +56,27 @@ module BannerTestSupport
       if opts[:err].is_a?(IO)
         opts[:err].close unless opts[:err].closed?
       end
-      12345 # fake PID — not used since running? is never queried before stop
+      FAKE_PID
+    end
+
+    # The fake child is alive until stop signals it. Never let a signal or
+    # wait reach a real process that happens to have the fake PID.
+    alive = true
+    original_waitpid = Process.method(:waitpid)
+    original_kill = Process.method(:kill)
+    original_wait = Process.method(:wait)
+    Process.define_singleton_method(:waitpid) do |pid = -1, flags = 0|
+      next original_waitpid.call(pid, flags) unless pid == FAKE_PID
+      alive ? nil : FAKE_PID
+    end
+    Process.define_singleton_method(:kill) do |sig, *pids|
+      next original_kill.call(sig, *pids) unless pids == [FAKE_PID]
+      alive = false
+      1
+    end
+    Process.define_singleton_method(:wait) do |pid = -1, flags = 0|
+      next original_wait.call(pid, flags) unless pid == FAKE_PID
+      FAKE_PID
     end
 
     begin
@@ -64,6 +85,9 @@ module BannerTestSupport
       GoldLapel::Proxy.define_singleton_method(:find_binary, &original_find_binary)
       GoldLapel::Proxy.define_singleton_method(:wait_for_port, &original_wait_for_port)
       Process.define_singleton_method(:spawn, &original_spawn)
+      Process.define_singleton_method(:waitpid, &original_waitpid)
+      Process.define_singleton_method(:kill, &original_kill)
+      Process.define_singleton_method(:wait, &original_wait)
       $VERBOSE = verbose_was
     end
   end
@@ -84,8 +108,7 @@ module BannerTestSupport
     end
   end
 
-  # Build + start a bare Proxy with the given kwargs. We swallow any "stop"
-  # errors since the fake PID isn't a real process.
+  # Build + start a bare Proxy with the given kwargs, then stop it.
   def self.start_proxy(**kwargs)
     proxy = GoldLapel::Proxy.new("postgresql://user:pass@host:5432/db", **kwargs)
     proxy.start

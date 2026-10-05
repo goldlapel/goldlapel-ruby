@@ -5,33 +5,6 @@ require_relative "goldlapel/utils"
 require_relative "goldlapel/instance"
 
 module GoldLapel
-  # Map `log_level` strings → the proxy binary's count-based `-v` flag.
-  #
-  # The Rust proxy CLI uses `-v` / `-vv` / `-vvv` (clap's `ArgAction::Count`)
-  # rather than `--log-level <value>`. We accept the friendlier string names
-  # here and translate. Invalid values raise loudly instead of producing a
-  # cryptic "unknown argument" error from the spawned binary.
-  LOG_LEVELS = %w[trace debug info warn warning error].freeze
-
-  def self.log_level_to_args(log_level)
-    return [] if log_level.nil?
-
-    level = log_level.to_s.downcase
-    unless LOG_LEVELS.include?(level)
-      raise ArgumentError,
-            "log_level must be one of: trace, debug, info, warn, error " \
-            "(got #{log_level.inspect})"
-    end
-
-    case level
-    when "trace"           then ["-vvv"]
-    when "debug"           then ["-vv"]
-    when "info"            then ["-v"]
-    when "warn", "warning" then []  # default verbosity
-    when "error"           then []  # default verbosity
-    end
-  end
-
   # v0.2.0 factory API — the primary entry point.
   #
   # Spawns the Gold Lapel binary, opens an internal Postgres connection, and
@@ -67,7 +40,8 @@ module GoldLapel
     mesh_tag: nil,
     disable_proxy_cache: false,
     disable_sqloptimize: false,
-    disable_auto_indexes: false
+    disable_auto_indexes: false,
+    **unknown
   )
     Instance.new(
       upstream,
@@ -87,6 +61,7 @@ module GoldLapel
       disable_proxy_cache: disable_proxy_cache,
       disable_sqloptimize: disable_sqloptimize,
       disable_auto_indexes: disable_auto_indexes,
+      **unknown,
     )
   end
 
@@ -106,7 +81,8 @@ module GoldLapel
     mesh_tag: nil,
     disable_proxy_cache: false,
     disable_sqloptimize: false,
-    disable_auto_indexes: false
+    disable_auto_indexes: false,
+    **unknown
   )
     # Legacy/advanced: construct without eagerly spawning or connecting.
     Instance.new(
@@ -127,6 +103,7 @@ module GoldLapel
       disable_proxy_cache: disable_proxy_cache,
       disable_sqloptimize: disable_sqloptimize,
       disable_auto_indexes: disable_auto_indexes,
+      **unknown,
     )
   end
 
@@ -148,7 +125,8 @@ module GoldLapel
     mesh_tag: nil,
     disable_proxy_cache: false,
     disable_sqloptimize: false,
-    disable_auto_indexes: false
+    disable_auto_indexes: false,
+    **unknown
   )
     Proxy.start(
       upstream,
@@ -167,6 +145,7 @@ module GoldLapel
       disable_proxy_cache: disable_proxy_cache,
       disable_sqloptimize: disable_sqloptimize,
       disable_auto_indexes: disable_auto_indexes,
+      **unknown,
     )
   end
 

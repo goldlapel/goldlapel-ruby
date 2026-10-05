@@ -32,14 +32,18 @@ $LOADED_FEATURES << "goldlapel.rb"
 # test is actually running — never across unrelated test files.
 module RailsTestGoldLapelStub
   def self.install
+    FakeProxySupport.install
     verbose_was = $VERBOSE
     $VERBOSE = nil
 
     @original_start_proxy = GoldLapel.method(:start_proxy) if GoldLapel.respond_to?(:start_proxy)
 
+    # Records the call, then starts a fake proxy through the real registry
+    # (FakeProxySupport is installed alongside), which the railtie reads the
+    # port back from.
     GoldLapel.define_singleton_method(:start_proxy) do |upstream, **kwargs|
       @start_calls << { upstream: upstream, **kwargs }
-      GoldLapel::Proxy.make_proxy_url(upstream, kwargs[:proxy_port] || GoldLapel::DEFAULT_PROXY_PORT)
+      GoldLapel::Proxy.start(upstream, **kwargs)
     end
   ensure
     $VERBOSE = verbose_was
@@ -59,6 +63,7 @@ module RailsTestGoldLapelStub
     @original_start_proxy = nil
   ensure
     $VERBOSE = verbose_was
+    FakeProxySupport.restore
   end
 
   # Per-test helper to override the recording stub (e.g. to make start_proxy
@@ -235,9 +240,9 @@ class TestConnect < Minitest::Test
     assert_equal 1, GoldLapel.start_calls.length
     call = GoldLapel.start_calls.first
     assert_equal "postgresql://u:p@db.example.com:5432/mydb", call[:upstream]
-    assert_nil call[:config]
-    assert_nil call[:proxy_port]
-    assert_equal [], call[:extra_args]
+    refute call.key?(:config)
+    refute call.key?(:proxy_port)
+    refute call.key?(:extra_args)
 
     assert_equal "127.0.0.1", adapter.connection_parameters[:host]
     assert_equal GoldLapel::DEFAULT_PROXY_PORT, adapter.connection_parameters[:port]
@@ -324,10 +329,10 @@ class TestConnect < Minitest::Test
 
     adapter.send(:connect)
 
-    assert_nil GoldLapel.start_calls.first[:config]
+    refute GoldLapel.start_calls.first.key?(:config)
   end
 
-  def test_missing_goldlapel_config_uses_defaults
+  def test_missing_goldlapel_config_passes_only_client
     adapter = FakeAdapter.new(
       config: {},
       connection_parameters: {
@@ -339,9 +344,9 @@ class TestConnect < Minitest::Test
     adapter.send(:connect)
 
     call = GoldLapel.start_calls.first
-    assert_nil call[:config]
-    assert_nil call[:proxy_port]
-    assert_equal [], call[:extra_args]
+    refute call.key?(:config)
+    refute call.key?(:proxy_port)
+    refute call.key?(:extra_args)
   end
 
   def test_reconnect_skips_proxy_setup
@@ -404,7 +409,7 @@ class TestConnect < Minitest::Test
     assert_equal true, GoldLapel.start_calls.first[:silent]
   end
 
-  def test_silent_defaults_to_false
+  def test_silent_not_passed_when_unset
     adapter = FakeAdapter.new(
       config: {},
       connection_parameters: {
@@ -413,7 +418,7 @@ class TestConnect < Minitest::Test
       }
     )
     adapter.send(:connect)
-    assert_equal false, GoldLapel.start_calls.first[:silent]
+    refute GoldLapel.start_calls.first.key?(:silent)
   end
 
   def test_mesh_and_mesh_tag_forwarded_to_start_proxy
@@ -430,7 +435,7 @@ class TestConnect < Minitest::Test
     assert_equal "tenant-7", call[:mesh_tag]
   end
 
-  def test_mesh_defaults
+  def test_mesh_not_passed_when_unset
     adapter = FakeAdapter.new(
       config: {},
       connection_parameters: {
@@ -440,8 +445,8 @@ class TestConnect < Minitest::Test
     )
     adapter.send(:connect)
     call = GoldLapel.start_calls.first
-    assert_equal false, call[:mesh]
-    assert_nil call[:mesh_tag]
+    refute call.key?(:mesh)
+    refute call.key?(:mesh_tag)
   end
 
   def test_disable_proxy_cache_forwarded
@@ -480,7 +485,7 @@ class TestConnect < Minitest::Test
     assert_equal true, GoldLapel.start_calls.first[:disable_auto_indexes]
   end
 
-  def test_disable_proxy_side_flags_default_false
+  def test_disable_flags_not_passed_when_unset
     adapter = FakeAdapter.new(
       config: {},
       connection_parameters: {
@@ -490,9 +495,9 @@ class TestConnect < Minitest::Test
     )
     adapter.send(:connect)
     call = GoldLapel.start_calls.first
-    assert_equal false, call[:disable_proxy_cache]
-    assert_equal false, call[:disable_sqloptimize]
-    assert_equal false, call[:disable_auto_indexes]
+    refute call.key?(:disable_proxy_cache)
+    refute call.key?(:disable_sqloptimize)
+    refute call.key?(:disable_auto_indexes)
   end
 
   def test_string_keys_for_new_kwargs_from_yaml
@@ -525,26 +530,87 @@ class TestConnect < Minitest::Test
   end
 
   def test_multiple_databases_without_ports_get_distinct_pairs
-    # Route through the real registry so its allocation decides the ports.
-    RailsTestGoldLapelStub.override_start_proxy do |upstream, **kwargs|
-      GoldLapel::Proxy.start(upstream, **kwargs)
+    # The registry's allocation decides the ports; the railtie reads them back.
+    adapters = %w[primary analytics].map do |db|
+      FakeAdapter.new(
+        config: {},
+        connection_parameters: {
+          host: "db.example.com", port: "5432",
+          user: "u", password: "p", dbname: db
+        }
+      )
     end
+    adapters.each { |a| a.send(:connect) }
 
-    FakeProxySupport.with_fake_proxies do
-      adapters = %w[primary analytics].map do |db|
-        FakeAdapter.new(
-          config: {},
-          connection_parameters: {
-            host: "db.example.com", port: "5432",
-            user: "u", password: "p", dbname: db
-          }
-        )
-      end
-      adapters.each { |a| a.send(:connect) }
+    assert_equal [7932, 7934], adapters.map { |a| a.connection_parameters[:port] }
+    assert_equal %w[127.0.0.1 127.0.0.1], adapters.map { |a| a.connection_parameters[:host] }
+  end
 
-      assert_equal [7932, 7934], adapters.map { |a| a.connection_parameters[:port] }
-      assert_equal %w[127.0.0.1 127.0.0.1], adapters.map { |a| a.connection_parameters[:host] }
-    end
+  def test_client_defaults_to_rails
+    adapter = FakeAdapter.new(
+      config: {},
+      connection_parameters: {
+        host: "db.example.com", port: "5432",
+        user: "u", password: "p", dbname: "mydb"
+      }
+    )
+    adapter.send(:connect)
+    assert_equal "rails", GoldLapel.start_calls.first[:client]
+  end
+
+  def test_client_override
+    adapter = FakeAdapter.new(
+      config: { goldlapel: { "client" => "rails-admin" } },
+      connection_parameters: {
+        host: "db.example.com", port: "5432",
+        user: "u", password: "p", dbname: "mydb"
+      }
+    )
+    adapter.send(:connect)
+    assert_equal "rails-admin", GoldLapel.start_calls.first[:client]
+  end
+
+  def test_upstream_tls_kept_upstream_and_stripped_from_app_side
+    adapter = FakeAdapter.new(
+      config: {},
+      connection_parameters: {
+        host: "db.example.com", port: "5432",
+        user: "u", password: "p", dbname: "mydb",
+        sslmode: "require", channel_binding: "require", application_name: "app"
+      }
+    )
+    adapter.send(:connect)
+
+    assert_equal "postgresql://u:p@db.example.com:5432/mydb?sslmode=require&channel_binding=require",
+                 GoldLapel.start_calls.first[:upstream]
+    refute adapter.connection_parameters.key?(:sslmode)
+    refute adapter.connection_parameters.key?(:channel_binding)
+    assert_equal "app", adapter.connection_parameters[:application_name]
+  end
+
+  def test_upstream_tls_kept_app_side_when_proxy_takes_client_tls
+    adapter = FakeAdapter.new(
+      config: { goldlapel: { config: { tls_cert: "c.pem", tls_key: "k.pem" } } },
+      connection_parameters: {
+        host: "db.example.com", port: "5432",
+        user: "u", password: "p", dbname: "mydb", sslmode: "require"
+      }
+    )
+    adapter.send(:connect)
+    assert_equal "require", adapter.connection_parameters[:sslmode]
+  end
+
+  def test_unknown_option_falls_back_with_reason
+    adapter = FakeAdapter.new(
+      config: { goldlapel: { invalidation_port: 7934 } },
+      connection_parameters: {
+        host: "db.example.com", port: "5432",
+        user: "u", password: "p", dbname: "mydb"
+      }
+    )
+    adapter.send(:connect)
+    assert_equal "db.example.com", adapter.connection_parameters[:host]
+    assert Rails.logger.warnings.any? { |w| w.include?("invalidation_port") }
   end
 
   def test_graceful_fallback_on_start_failure
@@ -601,31 +667,5 @@ class TestPlainConnection < Minitest::Test
     adapter.send(:connect)
 
     assert_kind_of FakePgConnection, adapter.raw_connection
-  end
-
-  def test_removed_cache_keys_not_forwarded
-    # The in-process cache and invalidation port are gone; leftover keys
-    # in an old database.yml are ignored rather than passed to the proxy.
-    adapter = FakeAdapter.new(
-      config: {
-        goldlapel: {
-          invalidation_port: 7934,
-          disable_native_cache: true,
-          aggressive_verify: :off,
-          disable_matviews: true,
-        }
-      },
-      connection_parameters: {
-        host: "db.example.com", port: "5432",
-        user: "u", password: "p", dbname: "mydb"
-      }
-    )
-
-    adapter.send(:connect)
-
-    call = GoldLapel.start_calls.first
-    %i[invalidation_port disable_native_cache aggressive_verify disable_matviews].each do |key|
-      refute call.key?(key), "#{key} must not be forwarded to start_proxy"
-    end
   end
 end

@@ -35,8 +35,10 @@ module GoldLapel
       mesh_tag: nil,
       disable_proxy_cache: false,
       disable_sqloptimize: false,
-      disable_auto_indexes: false
+      disable_auto_indexes: false,
+      **unknown
     )
+      Proxy.reject_unknown_options(unknown)
       @upstream = upstream
       @proxy_port = proxy_port
       @dashboard_port = dashboard_port
@@ -93,8 +95,12 @@ module GoldLapel
     # rescue that tears the proxy back down before re-raising.
     def start!
       return self if @proxy&.running?
+      # The proxy died under us: drop it (and the connection to it) first.
+      stop if @proxy
 
-      @proxy = Proxy.new(
+      # Another instance (or start_proxy) on the same upstream shares its
+      # running proxy; it stops when its last holder does.
+      @proxy = Proxy.acquire(
         @upstream,
         proxy_port: @proxy_port,
         dashboard_port: @dashboard_port,
@@ -113,14 +119,7 @@ module GoldLapel
         disable_auto_indexes: @disable_auto_indexes,
       )
 
-      # Register the proxy in the module-level registry so GoldLapel.stop,
-      # GoldLapel.proxy_url, etc. still see it — and so at_exit cleanup works.
-      Proxy.register(@proxy)
-
       begin
-        @proxy.start
-
-        # Lazily require pg only on connect
         begin
           require "pg"
         rescue LoadError
@@ -131,14 +130,10 @@ module GoldLapel
 
         @internal_conn = PG.connect(@proxy.url)
       rescue Exception # rubocop:disable Lint/RescueException
-        # Any failure between spawn and connect leaks the subprocess, and a
-        # failed spawn would keep its ports claimed in the registry.
-        # Stop the proxy (idempotent — SIGTERM with 5s timeout, then SIGKILL),
-        # unregister it from the module-level registry, and clear internal
-        # state before re-raising so the caller sees the original error.
+        # Release our hold before re-raising, so a proxy nobody else uses is
+        # stopped instead of leaking with its ports claimed.
         begin
-          Proxy.unregister(@proxy)
-          @proxy.stop
+          Proxy.release(@proxy)
         ensure
           @internal_conn = nil
           @proxy = nil
@@ -190,8 +185,7 @@ module GoldLapel
         @internal_conn = nil
       end
       if @proxy
-        Proxy.unregister(@proxy)
-        @proxy.stop
+        Proxy.release(@proxy)
         @proxy = nil
       end
       nil

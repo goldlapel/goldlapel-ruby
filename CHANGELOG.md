@@ -30,8 +30,23 @@ Removed options (no aliases — passing them raises `ArgumentError`):
   coalescing flag the proxy has (it rejected `--enable-coalescing`, so the old
   key stopped the proxy from starting).
 
-In `database.yml`, the `goldlapel:` keys `invalidation_port`,
-`disable_native_cache`, `aggressive_verify` and `disable_matviews` are ignored.
+Unknown options now raise `ArgumentError` from every entry point
+(`GoldLapel.start`, `GoldLapel.new`, `GoldLapel.start_proxy`,
+`GoldLapel::Async.start`) as `Unknown option: <name>`, and the removed ones
+say why (`Unknown option: invalidation_port (it was removed with the in-process
+cache)`); removed `config:` keys do the same. In `database.yml`, the
+`goldlapel:` block is forwarded whole, so a leftover key makes the railtie log
+the error and connect directly — remove it.
+
+**`gl.url` drops the upstream's TLS settings.** `sslmode`, `sslrootcert`,
+`channel_binding`, `gssencmode` and the other TLS/GSS parameters in your URL
+configure the proxy's connection to Postgres, and stay there; the app's URL
+leaves them off, because the proxy declines TLS from the app unless it has a
+certificate. Before, any `?sslmode=require` URL (every Neon, Supabase and RDS
+one) made the app's connection fail. With `config: { tls_cert:, tls_key: }`
+they are kept. The Rails integration does the same with `database.yml`'s
+`sslmode` etc., which it now also passes to the upstream (it dropped them
+before, so the proxy connected to Postgres without TLS).
 
 **Doc-store and stream methods moved under nested namespaces.** The flat
 `gl.doc_*` and `gl.stream_*` methods are gone; document and stream operations
@@ -121,6 +136,31 @@ proxy still gets 7932; a second upstream gets 7934. An explicit `proxy_port`
 is used as given, and stopping a proxy frees its ports. This applies to
 `GoldLapel.start`, `GoldLapel.start_proxy` and the Rails integration, which
 now points each database at the port its proxy actually got.
+
+- **One proxy per database per process.** `GoldLapel.start` (and
+  `GoldLapel::Async.start`) on a database that already has a running proxy
+  shares it instead of spawning a second one that replaced the first in the
+  registry — the first was orphaned, its ports unclaimed and never stopped at
+  exit. The proxy stops when the last instance using it stops;
+  `GoldLapel.stop(url)` stops it regardless.
+- **Ports are checked before the start.** Without a `proxy_port`, a pair is
+  skipped when anything on the machine already listens on either port, not
+  just this process's proxies. An explicit `proxy_port` or `dashboard_port`
+  that another of this process's proxies uses raises an error naming the port
+  and that proxy's database (password redacted).
+- **A failed start says why.** The start succeeds only when the port answers
+  and the spawned proxy is still running; if it exited — e.g. because its port
+  is in use — the error carries its exit status and the end of its stderr
+  instead of a timeout, and another program on the port no longer passes for
+  the proxy.
+- **A crashed proxy no longer reads as running.** `running?` reaps the
+  process instead of signalling it, which succeeded on an unreaped zombie.
+- **Rails:** reads the proxy's port from the registry, and `client:` in the
+  `goldlapel:` block overrides the default `"rails"`.
+- `Proxy.log_level_to_verbose_flag` accepts symbols; the unused
+  `GoldLapel.log_level_to_args` / `GoldLapel::LOG_LEVELS` and
+  `GoldLapel::DEFAULT_DASHBOARD_PORT` are removed. The gem description no
+  longer mentions materialized views.
 
 **The Rails integration starts the proxy again.** Unless `database.yml` set a
 `goldlapel: config:` map — including when there was no `goldlapel:` block at

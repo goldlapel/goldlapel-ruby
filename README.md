@@ -41,7 +41,11 @@ gl.stop  # (also cleaned up automatically on process exit)
 
 Point `pg` at `gl.url`. Gold Lapel sits between your app and your DB, caching results and indexing from the query patterns it sees. `gl.conn` is a plain `PG::Connection` to the proxy, if you'd rather not open your own.
 
-The proxy listens on two ports: the proxy itself (`proxy_port`, default 7932) and the dashboard (`dashboard_port`, default proxy port + 1). Start several databases in one process without a `proxy_port` and each gets the next free pair — 7932, then 7934, and so on (Rails multi-database setups included); `gl.url` carries the port it got.
+The proxy listens on two ports: the proxy itself (`proxy_port`, default 7932) and the dashboard (`dashboard_port`, default proxy port + 1). Start several databases in one process without a `proxy_port` and each gets the next pair that is free — not used by another of your proxies or by anything else on the machine (Rails multi-database setups included); `gl.url` carries the port it got. A `proxy_port` that one of your other proxies already uses raises an error naming it; one some other program holds fails the start with the proxy's own "already in use" message.
+
+Starting the same database again in one process shares the proxy that is already running; it stops when the last `gl` using it stops (or at exit). `GoldLapel.stop(url)` stops it regardless.
+
+TLS settings in your URL (`sslmode`, `sslrootcert`, `channel_binding`, …) apply to the proxy's connection to Postgres; `gl.url` leaves them off, since your app talks to the proxy locally. They stay on when you give the proxy its own certificate (`config: { tls_cert:, tls_key: }`).
 
 ### Namespaces
 
@@ -61,7 +65,7 @@ gl.streams.read("events", "workers", "consumer-1", count: 10)
 
 Each call routes through the proxy's DDL API on first use — Gold Lapel materializes the canonical table (`_goldlapel.doc_orders`, `_goldlapel.stream_events`) and hands back the query patterns. One HTTP round-trip per `(family, name)` per session.
 
-Other namespaces (`gl.search`, `gl.publish` / `gl.subscribe`, `gl.incr`, `gl.zadd`, `gl.hset`, `gl.geoadd`, …) remain flat for now and will migrate to nested form in subsequent releases.
+The Redis-style families are nested the same way — `gl.counters`, `gl.zsets`, `gl.hashes`, `gl.queues`, `gl.geos`. Search, percolate and pub/sub (`gl.search`, `gl.publish` / `gl.subscribe`, …) are flat methods on `gl`.
 
 Fiber-aware async via `GoldLapel::Async.start`, scoped connections via `gl.using(conn) { ... }`, and Rails auto-wiring are in the docs.
 

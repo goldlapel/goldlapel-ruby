@@ -86,8 +86,8 @@ class TestMakeProxyUrl < Minitest::Test
   end
 
   def test_preserves_params
-    url = "postgresql://user:pass@remotehost:5432/mydb?sslmode=require"
-    assert_equal "postgresql://user:pass@localhost:7932/mydb?sslmode=require&#{APP_NAME_SUFFIX}",
+    url = "postgresql://user:pass@remotehost:5432/mydb?connect_timeout=10"
+    assert_equal "postgresql://user:pass@localhost:7932/mydb?connect_timeout=10&#{APP_NAME_SUFFIX}",
                  GoldLapel::Proxy.make_proxy_url(url, 7932)
   end
 
@@ -134,8 +134,8 @@ class TestMakeProxyUrl < Minitest::Test
   end
 
   def test_at_sign_in_password_with_query_params
-    url = "postgresql://user:p@ss@host:5432/mydb?sslmode=require&param=val@ue"
-    assert_equal "postgresql://user:p@ss@localhost:7932/mydb?sslmode=require&param=val@ue&#{APP_NAME_SUFFIX}",
+    url = "postgresql://user:p@ss@host:5432/mydb?connect_timeout=10&param=val@ue"
+    assert_equal "postgresql://user:p@ss@localhost:7932/mydb?connect_timeout=10&param=val@ue&#{APP_NAME_SUFFIX}",
                  GoldLapel::Proxy.make_proxy_url(url, 7932)
   end
 
@@ -172,8 +172,8 @@ class TestApplicationNameMarker < Minitest::Test
   end
 
   def test_marker_appended_with_existing_query
-    out = GoldLapel::Proxy.make_proxy_url("postgresql://localhost:5432/mydb?sslmode=require", 7932)
-    assert_includes out, "sslmode=require"
+    out = GoldLapel::Proxy.make_proxy_url("postgresql://localhost:5432/mydb?connect_timeout=5", 7932)
+    assert_includes out, "connect_timeout=5"
     assert_includes out, "&application_name=goldlapel:ruby:"
   end
 
@@ -346,22 +346,315 @@ class TestPortAllocation < Minitest::Test
     end
   end
 
-  def test_registered_proxies_get_distinct_pairs
-    # GoldLapel.start (Instance) builds its own Proxy and registers it.
+  def test_acquired_proxies_get_distinct_pairs
+    # GoldLapel.start (Instance) acquires through the same registry.
     FakeProxySupport.with_fake_proxies do
-      p1 = GoldLapel::Proxy.new(UP1)
-      p2 = GoldLapel::Proxy.new(UP2)
-      p3 = GoldLapel::Proxy.new(UP3, proxy_port: 9000)
-      [p1, p2, p3].each { |p| GoldLapel::Proxy.register(p) }
+      p1 = GoldLapel::Proxy.acquire(UP1)
+      p2 = GoldLapel::Proxy.acquire(UP2)
+      p3 = GoldLapel::Proxy.acquire(UP3, proxy_port: 9000)
       assert_equal 7932, p1.proxy_port
       assert_equal 7934, p2.proxy_port
       assert_equal 7935, p2.dashboard_port
       assert_equal 9000, p3.proxy_port
 
-      GoldLapel::Proxy.unregister(p1)
-      p4 = GoldLapel::Proxy.new("postgresql://localhost:5432/four")
-      GoldLapel::Proxy.register(p4)
+      GoldLapel::Proxy.release(p1)
+      p4 = GoldLapel::Proxy.acquire("postgresql://localhost:5432/four")
       assert_equal 7932, p4.proxy_port
+    end
+  end
+
+  def test_explicit_proxy_port_held_by_other_proxy_raises
+    FakeProxySupport.with_fake_proxies do
+      GoldLapel::Proxy.start("postgresql://alice:s3cret@db.example.com:5432/one")
+      err = assert_raises(ArgumentError) { GoldLapel::Proxy.start(UP2, proxy_port: 7932) }
+      assert_match(/port 7932 as the proxy port/, err.message)
+      assert_match(%r{alice:\*\*\*@db\.example\.com:5432/one}, err.message)
+      refute_match(/s3cret/, err.message)
+      assert_match(/as its proxy port/, err.message)
+      assert_equal "postgresql://u:***@h/db?x=a@b", GoldLapel::Proxy.redact_password("postgresql://u:p@ss@h/db?x=a@b")
+      assert_nil GoldLapel::Proxy.instances[UP2], "a refused proxy must not stay registered"
+    end
+  end
+
+  def test_explicit_port_on_other_proxys_dashboard_raises
+    FakeProxySupport.with_fake_proxies do
+      GoldLapel::Proxy.start(UP1)
+      err = assert_raises(ArgumentError) { GoldLapel::Proxy.start(UP2, proxy_port: 7933) }
+      assert_match(/port 7933 as the proxy port.*as its dashboard port/, err.message)
+    end
+  end
+
+  def test_explicit_port_whose_dashboard_collides_raises
+    FakeProxySupport.with_fake_proxies do
+      GoldLapel::Proxy.start(UP1)
+      # 7931's derived dashboard, 7932, is UP1's proxy port.
+      err = assert_raises(ArgumentError) { GoldLapel::Proxy.start(UP2, proxy_port: 7931) }
+      assert_match(/port 7932 as the dashboard port/, err.message)
+    end
+  end
+
+  def test_explicit_dashboard_port_held_by_other_proxy_raises
+    FakeProxySupport.with_fake_proxies do
+      GoldLapel::Proxy.start(UP1)
+      err = assert_raises(ArgumentError) { GoldLapel::Proxy.start(UP2, dashboard_port: 7933) }
+      assert_match(/port 7933 as the dashboard port/, err.message)
+    end
+  end
+
+  def test_dead_proxy_holds_no_ports
+    FakeProxySupport.with_fake_proxies do
+      GoldLapel::Proxy.start(UP1)
+      GoldLapel::Proxy.instances[UP1].define_singleton_method(:running?) { false } # crashed
+      GoldLapel::Proxy.start(UP2, proxy_port: 7932)
+      assert_equal 7932, port_of(UP2)
+    end
+  end
+
+  def test_ports_bound_by_other_processes_are_skipped
+    FakeProxySupport.with_fake_proxies do
+      busy = [7932, 7934]
+      GoldLapel::Proxy.define_singleton_method(:port_free?) { |port| !busy.include?(port) }
+      GoldLapel::Proxy.start(UP1)
+      # 7932 is busy; 7933's dashboard 7934 is busy; 7935/7936 are free.
+      assert_equal 7935, port_of(UP1)
+    end
+  end
+
+  def test_explicit_dashboard_only_probes_proxy_port
+    FakeProxySupport.with_fake_proxies do
+      GoldLapel::Proxy.define_singleton_method(:port_free?) { |port| port != 7932 }
+      GoldLapel::Proxy.start(UP1, dashboard_port: 0)
+      assert_equal 7933, port_of(UP1)
+    end
+  end
+
+  def test_shared_proxy_stops_with_its_last_holder
+    FakeProxySupport.with_fake_proxies do
+      a = GoldLapel::Proxy.acquire(UP1)
+      b = GoldLapel::Proxy.acquire(UP1)
+      assert_same a, b
+      assert_equal 1, GoldLapel::Proxy.instances.size
+
+      GoldLapel::Proxy.release(a)
+      assert a.running?, "another holder still uses the proxy"
+      assert_same a, GoldLapel::Proxy.instances[UP1]
+
+      GoldLapel::Proxy.release(b)
+      refute a.running?
+      assert_nil GoldLapel::Proxy.instances[UP1]
+    end
+  end
+
+  def test_start_proxy_after_instance_keeps_the_proxy
+    FakeProxySupport.with_fake_proxies do
+      held = GoldLapel::Proxy.acquire(UP1)
+      url = GoldLapel::Proxy.start(UP1)
+      assert_equal held.url, url
+      GoldLapel::Proxy.release(held)
+      assert held.running?, "start_proxy's hold keeps the proxy running"
+    end
+  end
+
+  def test_failed_start_releases_claim
+    FakeProxySupport.with_fake_proxies do
+      GoldLapel::Proxy.define_method(:start) { raise "boom" }
+      assert_raises(RuntimeError) { GoldLapel::Proxy.start(UP1) }
+      assert_equal({}, GoldLapel::Proxy.instances)
+    end
+  end
+
+  def test_unknown_option_raises_even_when_reusing
+    FakeProxySupport.with_fake_proxies do
+      GoldLapel::Proxy.start(UP1)
+      err = assert_raises(ArgumentError) { GoldLapel::Proxy.start(UP1, invalidation_port: 7934) }
+      assert_match(/invalidation_port/, err.message)
+    end
+  end
+end
+
+class TestPortFree < Minitest::Test
+  def test_bound_port_is_not_free
+    server = TCPServer.new("0.0.0.0", 0)
+    refute GoldLapel::Proxy.port_free?(server.addr[1])
+  ensure
+    server&.close
+  end
+
+  def test_unbound_port_is_free
+    server = TCPServer.new("0.0.0.0", 0)
+    port = server.addr[1]
+    server.close
+    assert GoldLapel::Proxy.port_free?(port)
+  end
+end
+
+class TestUnknownOptions < Minitest::Test
+  UP = "postgresql://localhost:5432/mydb"
+
+  def test_removed_option_names_why
+    err = assert_raises(ArgumentError) { GoldLapel::Proxy.new(UP, invalidation_port: 7934) }
+    assert_equal "Unknown option: invalidation_port (it was removed with the in-process cache)", err.message
+    err = assert_raises(ArgumentError) { GoldLapel::Proxy.new(UP, disable_matviews: true) }
+    assert_match(/disable_matviews \(materialized views were removed\)/, err.message)
+  end
+
+  def test_unknown_option_raises
+    err = assert_raises(ArgumentError) { GoldLapel::Proxy.new(UP, bogus: 1) }
+    assert_equal "Unknown option: bogus", err.message
+  end
+
+  def test_entry_points_reject_unknown_options
+    [
+      -> { GoldLapel.start(UP, aggressive_verify: true) },
+      -> { GoldLapel.new(UP, disable_native_cache: true) },
+      -> { GoldLapel.start_proxy(UP, native_cache_size: 10) },
+      -> { GoldLapel::Instance.new(UP, eager_connect: false, bogus: 1) },
+    ].each do |call|
+      assert_raises(ArgumentError) { call.call }
+    end
+    assert_equal({}, GoldLapel::Proxy.instances)
+  end
+
+  def test_removed_config_key_names_why
+    err = assert_raises(ArgumentError) { GoldLapel::Proxy.new(UP, config: { refresh_interval_secs: 5 }) }
+    assert_match(/Unknown config key: refresh_interval_secs \(materialized views were removed\)/, err.message)
+    err = assert_raises(ArgumentError) { GoldLapel::Proxy.new(UP, config: { enable_coalescing: true }) }
+    assert_match(/use disable_coalescing/, err.message)
+  end
+end
+
+class TestUpstreamTlsStripped < Minitest::Test
+  def setup
+    @orig_pgappname = ENV["PGAPPNAME"]
+    ENV["PGAPPNAME"] = "test"
+  end
+
+  def teardown
+    @orig_pgappname ? ENV["PGAPPNAME"] = @orig_pgappname : ENV.delete("PGAPPNAME")
+  end
+
+  def test_tls_params_removed_others_kept
+    url = GoldLapel::Proxy.make_proxy_url(
+      "postgresql://u:p@ep-x.neon.tech:5432/db?sslmode=require&channel_binding=require&application_name=app", 7932
+    )
+    assert_equal "postgresql://u:p@localhost:7932/db?application_name=app", url
+  end
+
+  def test_all_tls_params_case_insensitive
+    query = GoldLapel::Proxy::UPSTREAM_TLS_PARAMS.map { |k| "#{k.upcase}=x" }.join("&")
+    url = GoldLapel::Proxy.make_proxy_url("postgresql://db/app?#{query}", 7932)
+    assert_equal "postgresql://localhost:7932/app", url
+  end
+
+  def test_kept_when_client_tls
+    url = GoldLapel::Proxy.make_proxy_url("postgresql://db:5432/app?sslmode=require", 7932, strip_tls: false)
+    assert_equal "postgresql://localhost:7932/app?sslmode=require", url
+  end
+
+  def test_client_tls_detection
+    up = "postgresql://db/app"
+    refute GoldLapel::Proxy.new(up).client_tls?
+    assert GoldLapel::Proxy.new(up, config: { tls_cert: "c.pem", tls_key: "k.pem" }).client_tls?
+    assert GoldLapel::Proxy.new(up, extra_args: ["--tls-cert", "c.pem"]).client_tls?
+  end
+
+  def test_upstream_argument_keeps_tls
+    # Only the app's URL loses them; --upstream is the URL as given.
+    StubBinary.with_listener("postgresql://db:5432/app?sslmode=require") do |cmd, proxy|
+      assert_includes cmd, "postgresql://db:5432/app?sslmode=require"
+      assert_equal "postgresql://localhost:#{proxy.proxy_port}/app", proxy.url
+    end
+  end
+end
+
+# Runs Proxy#start against a stub binary (a shell script) to exercise the
+# spawn and readiness path for real.
+module StubBinary
+  # A stand-in proxy: records its arguments next to itself, listens on its
+  # --proxy-port and stays up.
+  LISTENER = %(echo "$@" > "$0.args"; exec #{RbConfig.ruby} -rsocket -e ) +
+             %('s = TCPServer.new("0.0.0.0", ARGV[ARGV.index("--proxy-port") + 1].to_i); sleep 30' -- "$@")
+
+  def self.with_script(body)
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "goldlapel")
+      File.write(path, "#!/bin/sh\n#{body}\n")
+      File.chmod(0o755, path)
+      saved = ENV["GOLDLAPEL_BINARY"]
+      ENV["GOLDLAPEL_BINARY"] = path
+      begin
+        yield path
+      ensure
+        saved ? ENV["GOLDLAPEL_BINARY"] = saved : ENV.delete("GOLDLAPEL_BINARY")
+      end
+    end
+  end
+
+  def self.free_port
+    server = TCPServer.new("0.0.0.0", 0)
+    server.addr[1]
+  ensure
+    server&.close
+  end
+
+  # Starts a proxy from LISTENER; yields its recorded arguments and the proxy.
+  def self.with_listener(upstream)
+    with_script(LISTENER) do |path|
+      proxy = GoldLapel::Proxy.new(upstream, proxy_port: free_port, dashboard_port: 0, silent: true)
+      begin
+        proxy.start
+        yield File.read("#{path}.args").split, proxy
+      ensure
+        proxy.stop
+      end
+    end
+  end
+end
+
+class TestReadiness < Minitest::Test
+  def test_child_exit_fails_even_when_port_answers
+    # Another listener answers on the port while our proxy refuses it — the
+    # start must fail with the proxy's message, not pass against the other.
+    server = TCPServer.new("127.0.0.1", 0)
+    port = server.addr[1]
+    StubBinary.with_script(%(echo "I'm afraid port #{port}, for the proxy, is already in use" >&2; exit 1)) do
+      proxy = GoldLapel::Proxy.new("postgresql://db/app", proxy_port: port, silent: true)
+      err = assert_raises(RuntimeError) { proxy.start }
+      assert_match(/exited with status 1 before it was ready on port #{port}/, err.message)
+      assert_match(/I'm afraid port #{port}, for the proxy, is already in use/, err.message)
+      refute proxy.running?
+      assert_nil proxy.url
+    end
+  ensure
+    server&.close
+  end
+
+  def test_child_exit_on_free_port_fails_with_stderr
+    StubBinary.with_script(%(echo "bad license" >&2; exit 3)) do
+      proxy = GoldLapel::Proxy.new("postgresql://db/app", proxy_port: StubBinary.free_port, silent: true)
+      err = assert_raises(RuntimeError) { proxy.start }
+      assert_match(/exited with status 3/, err.message)
+      assert_match(/bad license/, err.message)
+    end
+  end
+
+  def test_listening_child_is_ready
+    StubBinary.with_listener("postgresql://db/app") do |_args, proxy|
+      assert_includes proxy.url, "localhost:#{proxy.proxy_port}/"
+      assert proxy.running?
+      proxy.stop
+      refute proxy.running?
+    end
+  end
+
+  def test_crashed_proxy_is_not_running
+    # kill(0) succeeds on an unreaped zombie; running? must reap instead.
+    StubBinary.with_listener("postgresql://db/app") do |_args, proxy|
+      Process.kill("KILL", proxy.instance_variable_get(:@pid))
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5
+      sleep 0.05 while proxy.running? && Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
+      refute proxy.running?
+      assert proxy.dead?
     end
   end
 end
@@ -519,8 +812,7 @@ end
 class TestDashboardUrl < Minitest::Test
   def test_default_dashboard_port
     proxy = GoldLapel::Proxy.new("postgresql://localhost:5432/mydb")
-    assert_equal GoldLapel::DEFAULT_DASHBOARD_PORT,
-                 proxy.instance_variable_get(:@dashboard_port)
+    assert_equal GoldLapel::DEFAULT_PROXY_PORT + 1, proxy.dashboard_port
   end
 
   def test_dashboard_port_derives_from_custom_proxy_port
@@ -793,5 +1085,42 @@ class TestMultiInstance < Minitest::Test
     inject_fake(up1, 7932)
 
     assert_nil GoldLapel::Proxy.dashboard_url("postgresql://unknown:5432/db")
+  end
+end
+
+require_relative "_integration_gate"
+
+# Against the real proxy binary and Postgres.
+class TestRealProxyLifecycle < Minitest::Test
+  def setup
+    @upstream = GoldLapelTestGate.integration_upstream
+    skip GoldLapelTestGate.skip_reason unless @upstream
+    require "pg"
+  end
+
+  def test_two_starts_share_one_proxy_until_the_last_stops
+    a = GoldLapel.start(@upstream, silent: true)
+    b = GoldLapel.start(@upstream, silent: true)
+    assert_equal a.url, b.url
+    a.stop
+    assert_equal [{ "one" => "1" }], b.conn.exec("SELECT 1 AS one").to_a
+    b.stop
+    refute b.running?
+    assert_nil GoldLapel::Proxy.instances[@upstream]
+  ensure
+    a&.stop
+    b&.stop
+  end
+
+  def test_port_in_use_surfaces_the_proxys_refusal
+    server = TCPServer.new("0.0.0.0", 0)
+    port = server.addr[1]
+    err = assert_raises(RuntimeError) do
+      GoldLapel.start(@upstream, proxy_port: port, silent: true)
+    end
+    assert_match(/port #{port}, for the proxy, is already in use/, err.message)
+    assert_nil GoldLapel::Proxy.instances[@upstream]
+  ensure
+    server&.close
   end
 end

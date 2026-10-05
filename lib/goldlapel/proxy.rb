@@ -6,7 +6,6 @@ require "rbconfig"
 
 module GoldLapel
   DEFAULT_PROXY_PORT = 7932
-  DEFAULT_DASHBOARD_PORT = 7933
   STARTUP_TIMEOUT = 10.0
   STARTUP_POLL_INTERVAL = 0.05
 
@@ -49,27 +48,78 @@ module GoldLapel
       replica exclude_tables
     ].freeze
 
+    MATVIEWS_REMOVED = "materialized views were removed"
+    WRAPPER_CACHE_REMOVED = "it was removed with the in-process cache"
+
+    # Options that used to exist, with why they're gone — so passing one
+    # says so instead of a bare "unknown keyword".
+    REMOVED_OPTIONS = {
+      "invalidation_port" => WRAPPER_CACHE_REMOVED,
+      "disable_native_cache" => WRAPPER_CACHE_REMOVED,
+      "native_cache_size" => WRAPPER_CACHE_REMOVED,
+      "aggressive_verify" => WRAPPER_CACHE_REMOVED,
+      "disable_matviews" => MATVIEWS_REMOVED,
+    }.freeze
+
+    REMOVED_CONFIG_KEYS = {
+      "refresh_interval_secs" => MATVIEWS_REMOVED,
+      "pattern_ttl_secs" => MATVIEWS_REMOVED,
+      "max_tables_per_view" => MATVIEWS_REMOVED,
+      "max_columns_per_view" => MATVIEWS_REMOVED,
+      "disable_consolidation" => MATVIEWS_REMOVED,
+      "disable_rewrite" => MATVIEWS_REMOVED,
+      "disable_shadow_mode" => MATVIEWS_REMOVED,
+      "enable_coalescing" => "coalescing is on by default; use disable_coalescing",
+    }.freeze
+
+    # Connection parameters for the TLS/GSS hop to the upstream. The proxy
+    # keeps using them upstream, but declines TLS from the app unless it was
+    # started with --tls-cert/--tls-key, so they come off the app's URL.
+    UPSTREAM_TLS_PARAMS = %w[
+      sslmode sslcert sslkey sslrootcert sslcrl sslcrldir sslpassword sslsni
+      sslnegotiation ssl_min_protocol_version ssl_max_protocol_version
+      requiressl channel_binding gssencmode krbsrvname gsslib
+    ].freeze
+
     def self.config_keys
       VALID_CONFIG_KEYS.dup
     end
 
-    # Translate a log-level string into the proxy's count-based verbosity
-    # flag (`-v` / `-vv` / `-vvv`). Returns nil when no flag should be
-    # emitted (warn/error map to the binary's default level). Raises on
-    # invalid input.
+    # Raise for keyword options the entry points don't know, naming the ones
+    # that were removed.
+    def self.reject_unknown_options(options)
+      return if options.nil? || options.empty?
+      key = options.keys.first.to_s
+      reason = REMOVED_OPTIONS[key]
+      raise ArgumentError, "Unknown option: #{key} (#{reason})" if reason
+      raise ArgumentError, "Unknown option: #{key}"
+    end
+
+    def self.check_config_key(key)
+      return if VALID_CONFIG_KEYS.include?(key)
+      reason = REMOVED_CONFIG_KEYS[key]
+      raise ArgumentError, "Unknown config key: #{key} (#{reason})" if reason
+      raise ArgumentError, "Unknown config key: #{key}"
+    end
+
+    # Translate a log level (string or symbol, any case) into the proxy's
+    # count-based verbosity flag (`-v` / `-vv` / `-vvv`) — the binary uses
+    # clap's ArgAction::Count, not `--log-level <value>`. Returns nil when no
+    # flag should be emitted (warn/error are the binary's default level).
+    # Invalid values raise instead of producing a cryptic "unknown argument"
+    # error from the spawned binary.
     def self.log_level_to_verbose_flag(level)
       return nil if level.nil?
-      unless level.is_a?(String)
-        raise TypeError, "log_level expects a string, got #{level.class}"
-      end
-      case level.downcase
+      name = level.to_s.downcase if level.is_a?(String) || level.is_a?(Symbol)
+      case name
       when "trace" then "-vvv"
       when "debug" then "-vv"
       when "info"  then "-v"
       when "warn", "warning", "error" then nil
       else
         raise ArgumentError,
-              "log_level must be one of: trace, debug, info, warn, error"
+              "log_level must be one of: trace, debug, info, warn, error " \
+              "(got #{level.inspect})"
       end
     end
 
@@ -79,9 +129,7 @@ module GoldLapel
       args = []
       config.each do |key, value|
         key = key.to_s
-        unless VALID_CONFIG_KEYS.include?(key)
-          raise ArgumentError, "Unknown config key: #{key}"
-        end
+        check_config_key(key)
 
         flag = "--#{key.tr('_', '-')}"
 
@@ -122,11 +170,13 @@ module GoldLapel
       mesh_tag: nil,
       disable_proxy_cache: false,
       disable_sqloptimize: false,
-      disable_auto_indexes: false
+      disable_auto_indexes: false,
+      **unknown
     )
+      self.class.reject_unknown_options(unknown)
       @upstream = upstream
       # Without an explicit proxy_port the registry (Proxy.start /
-      # Proxy.register) moves this proxy to the first free port pair.
+      # Proxy.acquire) moves this proxy to the first free port pair.
       @proxy_port_explicit = !proxy_port.nil?
       @proxy_port = proxy_port || DEFAULT_PROXY_PORT
 
@@ -135,6 +185,7 @@ module GoldLapel
       @dashboard_port_explicit = !dashboard_port.nil?
       @dashboard_port = @dashboard_port_explicit ? dashboard_port.to_i : @proxy_port + 1
 
+      self.class.log_level_to_verbose_flag(log_level) # raises when invalid
       @log_level = log_level
       @mode = mode
       @license = license
@@ -145,14 +196,9 @@ module GoldLapel
       # without spawning still catches bad keys. nil (the Rails integration
       # passes database.yml's absent `config:` straight through) means none.
       config ||= {}
-      config.each do |k, _|
-        key = k.to_s
-        unless VALID_CONFIG_KEYS.include?(key)
-          raise ArgumentError, "Unknown config key: #{key}"
-        end
-      end
+      config.each_key { |k| self.class.check_config_key(k.to_s) }
       @config = config
-      @extra_args = extra_args
+      @extra_args = extra_args || []
       @silent = silent ? true : false
       # Mesh membership (startup intent — HQ enforces license).
       @mesh = mesh ? true : false
@@ -164,10 +210,13 @@ module GoldLapel
       @disable_sqloptimize = disable_sqloptimize ? true : false
       @disable_auto_indexes = disable_auto_indexes ? true : false
       @pid = nil
+      @exit_status = nil
       @url = nil
       @dashboard_url = nil
       @dashboard_token = nil
       @stderr_reader = nil
+      @holders = 0
+      @stopped = false
     end
 
     def proxy_port_explicit?
@@ -183,6 +232,19 @@ module GoldLapel
     def assign_proxy_port(port)
       @proxy_port = port
       @dashboard_port = port + 1 unless @dashboard_port_explicit
+    end
+
+    # True once the proxy was stopped or its process exited. Before start
+    # it is false, so a proxy being started still claims its ports.
+    def dead?
+      @stopped || (!@pid.nil? && !running?)
+    end
+
+    # Whether the app's URL keeps the upstream TLS parameters: only when the
+    # proxy itself accepts TLS from the app.
+    def client_tls?
+      return true if @config.any? { |k, v| %w[tls_cert tls_key].include?(k.to_s) && v }
+      @extra_args.any? { |a| a.to_s.start_with?("--tls-cert", "--tls-key") }
     end
 
     # Backwards-compat alias for the rest of the wrapper (ddl.rb etc.) that
@@ -233,7 +295,14 @@ module GoldLapel
         @dashboard_token = SecureRandom.hex(32)
         env["GOLDLAPEL_DASHBOARD_TOKEN"] = @dashboard_token
       end
+      # Someone already listening on the proxy port would answer the
+      # readiness check in our proxy's place. The proxy refuses a port in
+      # use, so then wait for it to exit and report why.
+      port_taken = !self.class.port_free?(@proxy_port)
+
       stderr_read, stderr_write = IO.pipe
+      @exit_status = nil
+      @stopped = false
       @pid = Process.spawn(env, *cmd,
         in: File::NULL,
         out: File::NULL,
@@ -241,20 +310,46 @@ module GoldLapel
       stderr_write.close
       @stderr_reader = stderr_read
 
-      unless self.class.wait_for_port("127.0.0.1", @proxy_port, STARTUP_TIMEOUT)
-        Process.kill("KILL", @pid) rescue Errno::ESRCH
-        Process.wait(@pid) rescue Errno::ECHILD
-        stderr_output = stderr_read.read
+      # Ready means the port answers AND our child is still alive: another
+      # process answering on the port (or our child exiting because the port
+      # is taken) is a failed start, not a ready one.
+      if port_taken
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + STARTUP_TIMEOUT
+        sleep STARTUP_POLL_INTERVAL while running? && Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
+        ready = false
+      else
+        ready = self.class.wait_for_port("127.0.0.1", @proxy_port, STARTUP_TIMEOUT) { running? }
+      end
+      unless ready && running?
+        exited = !running?
+        unless exited
+          Process.kill("KILL", @pid) rescue Errno::ESRCH
+          Process.wait(@pid) rescue Errno::ECHILD
+        end
+        stderr_tail = stderr_read.read.to_s.lines.last(20).join
         stderr_read.close
+        status = @exit_status
         @pid = nil
+        @exit_status = nil
         @stderr_reader = nil
+        if exited
+          how = if status&.exitstatus then " with status #{status.exitstatus}"
+                elsif status&.termsig then " on signal #{status.termsig}"
+                end
+          raise "Gold Lapel exited#{how} before it was ready on port #{@proxy_port}." \
+                "\nstderr: #{stderr_tail}"
+        end
+        if port_taken
+          raise "Gold Lapel could not start: port #{@proxy_port} is already in use." \
+                "\nstderr: #{stderr_tail}"
+        end
         raise "Gold Lapel failed to start on port #{@proxy_port} " \
-              "within #{STARTUP_TIMEOUT}s.\nstderr: #{stderr_output}"
+              "within #{STARTUP_TIMEOUT}s.\nstderr: #{stderr_tail}"
       end
 
       @stderr_reader.close
       @stderr_reader = nil
-      @url = self.class.make_proxy_url(@upstream, @proxy_port)
+      @url = self.class.make_proxy_url(@upstream, @proxy_port, strip_tls: !client_tls?)
       @dashboard_url = @dashboard_port > 0 ? "http://127.0.0.1:#{@dashboard_port}" : nil
 
       # Banner — $stderr (not $stdout), and only when not silenced. Library
@@ -273,18 +368,22 @@ module GoldLapel
     end
 
     def stop
+      @stopped = true
       if @pid
-        begin
-          Process.kill("TERM", @pid)
-          Timeout.timeout(5) { Process.wait(@pid) }
-        rescue Errno::ESRCH, Errno::ECHILD
-          # Process already exited
-        rescue Timeout::Error
-          Process.kill("KILL", @pid) rescue Errno::ESRCH
-          Process.wait(@pid) rescue Errno::ECHILD
+        if running?
+          begin
+            Process.kill("TERM", @pid)
+            Timeout.timeout(5) { Process.wait(@pid) }
+          rescue Errno::ESRCH, Errno::ECHILD
+            # Process already exited
+          rescue Timeout::Error
+            Process.kill("KILL", @pid) rescue Errno::ESRCH
+            Process.wait(@pid) rescue Errno::ECHILD
+          end
         end
         @stderr_reader&.close rescue IOError
         @pid = nil
+        @exit_status = nil
         @url = nil
         @dashboard_url = nil
         @dashboard_token = nil
@@ -292,12 +391,26 @@ module GoldLapel
       end
     end
 
+    # Reaps the child when it has exited (kill(0) would still succeed on an
+    # unreaped zombie, so a crashed proxy would read as running forever).
     def running?
-      return false unless @pid
-      Process.kill(0, @pid)
-      true
-    rescue Errno::ESRCH, Errno::EPERM
+      return false if @pid.nil? || @exit_status
+      return true unless Process.waitpid(@pid, Process::WNOHANG)
+      @exit_status = $?
       false
+    rescue Errno::ECHILD
+      false
+    end
+
+    # Reference count of the holders sharing this proxy (each GoldLapel.start
+    # instance and each start_proxy call). Changed under the registry mutex.
+    def hold
+      @holders += 1
+    end
+
+    def release_hold
+      @holders -= 1 if @holders > 0
+      @holders
     end
 
     # --- Class-level helpers ---
@@ -364,14 +477,19 @@ module GoldLapel
       "#{url}#{sep}application_name=#{application_name_marker}"
     end
 
-    def self.make_proxy_url(upstream, port)
+    # `strip_tls` drops the upstream TLS/GSS parameters (UPSTREAM_TLS_PARAMS)
+    # from the query; Proxy#start passes false when the proxy accepts TLS
+    # from the app.
+    def self.make_proxy_url(upstream, port, strip_tls: true)
       # pg URL with explicit port
       if upstream =~ /\A(postgres(?:ql)?:\/\/(?:.*@)?)([^:\/?#]+):(\d+)(.*)\z/
-        return inject_application_name("#{$1}localhost:#{port}#{$4}")
+        rest = strip_tls ? strip_tls_params($4) : $4
+        return inject_application_name("#{$1}localhost:#{port}#{rest}")
       end
       # pg URL without port
       if upstream =~ /\A(postgres(?:ql)?:\/\/(?:.*@)?)([^:\/?#]+)(.*)\z/
-        return inject_application_name("#{$1}localhost:#{port}#{$3}")
+        rest = strip_tls ? strip_tls_params($3) : $3
+        return inject_application_name("#{$1}localhost:#{port}#{rest}")
       end
       # bare host:port (guard against scheme colons).
       # Bare-host form skips the marker — atypical caller path.
@@ -382,9 +500,23 @@ module GoldLapel
       "localhost:#{port}"
     end
 
+    # `rest` is the part of a URL after host:port ("/db?a=1&b=2").
+    def self.strip_tls_params(rest)
+      path, query = rest.split("?", 2)
+      return rest if query.nil?
+      kept = query.split("&").reject do |pair|
+        UPSTREAM_TLS_PARAMS.include?(pair.split("=", 2).first.downcase)
+      end
+      kept.empty? ? path : "#{path}?#{kept.join('&')}"
+    end
+
+    # Polls until `port` accepts a connection. With a block, gives up early
+    # (false) as soon as the block returns false — Proxy#start passes one
+    # that checks its child is still alive.
     def self.wait_for_port(host, port, timeout)
       deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
       while Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
+        return false if block_given? && !yield
         begin
           sock = TCPSocket.new(host, port)
           sock.close
@@ -396,89 +528,88 @@ module GoldLapel
       false
     end
 
-    # Module-level multi-instance registry keyed by upstream URL. Proxies
-    # started without a proxy_port are given the smallest port P >= 7932
-    # such that neither P nor its dashboard port is held by another
-    # registered proxy, so several upstreams in one process don't collide.
+    # Whether `port` can be bound right now — the same bind the proxy does
+    # before it starts (0.0.0.0, SO_REUSEADDR, no SO_REUSEPORT).
+    def self.port_free?(port)
+      sock = Socket.new(:INET, :STREAM)
+      sock.setsockopt(:SOCKET, :REUSEADDR, true)
+      sock.bind(Addrinfo.tcp("0.0.0.0", port))
+      true
+    rescue SystemCallError
+      false
+    ensure
+      sock&.close
+    end
+
+    # `url` with the password in its userinfo replaced by `***`, for errors.
+    def self.redact_password(url)
+      url.sub(%r{\A([^:/?#]+://[^:/?#@]*:)[^/?#]*@}, '\1***@')
+    end
+
+    # Module-level multi-instance registry keyed by upstream URL: one proxy
+    # per upstream per process, shared by everything that starts it.
+    # Proxies started without a proxy_port are given the smallest port
+    # P >= 7932 such that neither P nor its dashboard port is held by another
+    # live proxy of this process or bound by anything else on the machine.
     @instances = {}
     @mutex = Mutex.new
     @cleanup_registered = false
 
     class << self
-      # Low-level entry point — spawns a Proxy and returns the proxy URL
-      # string. Does NOT open a PG connection or wrap it. Used by
-      # `GoldLapel.start_proxy` and tests.
-      def start(
-        upstream,
-        proxy_port: nil,
-        dashboard_port: nil,
-        log_level: nil,
-        mode: nil,
-        license: nil,
-        client: nil,
-        config_file: nil,
-        config: {},
-        extra_args: [],
-        silent: false,
-        mesh: false,
-        mesh_tag: nil,
-        disable_proxy_cache: false,
-        disable_sqloptimize: false,
-        disable_auto_indexes: false
-      )
+      # Low-level entry point — spawns a Proxy (or reuses the running one for
+      # this upstream) and returns the proxy URL string. Does NOT open a PG
+      # connection or wrap it. Used by `GoldLapel.start_proxy`, the Rails
+      # integration and tests. Each call holds the proxy until
+      # `GoldLapel.stop(upstream)` or process exit.
+      def start(upstream, **options)
+        acquire(upstream, **options).url
+      end
+
+      # Returns the running proxy for `upstream`, starting one if there is
+      # none, and counts the caller as a holder — `release` it when done.
+      # A running proxy is reused as is: options given here only apply when a
+      # new proxy is started.
+      def acquire(upstream, **options)
+        # Constructing validates the options, so a bad one raises even when
+        # the running proxy is reused.
+        proxy = Proxy.new(upstream, **options)
         @mutex.synchronize do
           existing = @instances[upstream]
-          return existing.url if existing&.running?
+          if existing && !existing.dead?
+            existing.hold
+            return existing
+          end
+          @instances.delete(upstream)&.stop
 
-          proxy = Proxy.new(
-            upstream,
-            proxy_port: proxy_port,
-            dashboard_port: dashboard_port,
-            log_level: log_level,
-            mode: mode,
-            license: license,
-            client: client,
-            config_file: config_file,
-            config: config,
-            extra_args: extra_args,
-            silent: silent,
-            mesh: mesh,
-            mesh_tag: mesh_tag,
-            disable_proxy_cache: disable_proxy_cache,
-            disable_sqloptimize: disable_sqloptimize,
-            disable_auto_indexes: disable_auto_indexes,
-          )
           unless @cleanup_registered
             at_exit { cleanup }
             @cleanup_registered = true
           end
           claim_port(proxy)
-          proxy.start
           @instances[upstream] = proxy
-          proxy.url
-        end
-      end
-
-      # Register an externally-constructed proxy in the module registry
-      # (used by Instance so the at_exit cleanup covers it).
-      def register(proxy)
-        @mutex.synchronize do
-          unless @cleanup_registered
-            at_exit { cleanup }
-            @cleanup_registered = true
+          begin
+            proxy.start
+          rescue Exception # rubocop:disable Lint/RescueException
+            @instances.delete(upstream) if @instances[upstream].equal?(proxy)
+            proxy.stop
+            raise
           end
-          claim_port(proxy)
-          @instances[proxy.upstream] = proxy
+          proxy.hold
+          proxy
         end
       end
 
-      def unregister(proxy)
+      # Drops one holder; stops the proxy when it was the last.
+      def release(proxy)
         @mutex.synchronize do
-          existing = @instances[proxy.upstream]
-          @instances.delete(proxy.upstream) if existing.equal?(proxy)
+          next if proxy.release_hold > 0
+          @instances.delete(proxy.upstream) if @instances[proxy.upstream].equal?(proxy)
+          proxy.stop
         end
       end
 
+      # Stops the proxy for `upstream` (every proxy without one) whoever
+      # still holds it.
       def stop(upstream = nil)
         @mutex.synchronize do
           if upstream
@@ -519,29 +650,52 @@ module GoldLapel
 
       private
 
-      # Caller holds @mutex. Ports held by every other registered proxy are
-      # claimed — except a dead one for the same upstream, which this proxy
-      # is about to replace in the registry.
+      # Caller holds @mutex. An explicit port another live proxy of this
+      # process listens on is an error: the proxy would refuse it anyway, and
+      # before it could report that, a readiness check would pass against the
+      # other proxy. Without a proxy_port, picks the first pair that is
+      # neither claimed nor bound by another process.
       def claim_port(proxy)
-        return if proxy.proxy_port_explicit?
+        claimed = {}
+        @instances.each_value do |other|
+          next if other.equal?(proxy) || other.dead?
+          claimed[other.proxy_port] = [other.upstream, "proxy"]
+          claimed[other.dashboard_port] = [other.upstream, "dashboard"] if other.dashboard_port > 0
+        end
 
-        claimed = []
-        @instances.each do |upstream, other|
-          next if other.equal?(proxy)
-          next if upstream == proxy.upstream && !other.running?
-          claimed << other.proxy_port
-          claimed << other.dashboard_port if other.dashboard_port > 0
+        if proxy.proxy_port_explicit?
+          check_unclaimed(claimed, proxy.proxy_port, "proxy")
+          check_unclaimed(claimed, proxy.dashboard_port, "dashboard") if proxy.dashboard_port > 0
+          return
+        end
+        if proxy.dashboard_port_explicit? && proxy.dashboard_port > 0
+          check_unclaimed(claimed, proxy.dashboard_port, "dashboard")
         end
 
         # An explicit dashboard port is fixed, so only the proxy port has to
         # step around it; a derived one moves with the proxy port.
-        port = DEFAULT_PROXY_PORT
-        if proxy.dashboard_port_explicit?
-          port += 1 while claimed.include?(port) || port == proxy.dashboard_port
-        else
-          port += 1 while claimed.include?(port) || claimed.include?(port + 1)
+        (DEFAULT_PROXY_PORT...65535).each do |port|
+          next if claimed.key?(port)
+          if proxy.dashboard_port_explicit?
+            next if port == proxy.dashboard_port || !port_free?(port)
+          else
+            next if claimed.key?(port + 1)
+            next unless port_free?(port) && port_free?(port + 1)
+          end
+          proxy.assign_proxy_port(port)
+          return
         end
-        proxy.assign_proxy_port(port)
+        raise "Gold Lapel could not find a free proxy port"
+      end
+
+      def check_unclaimed(claimed, port, role)
+        return unless claimed.key?(port)
+        upstream, held_as = claimed[port]
+        raise ArgumentError,
+              "Gold Lapel cannot use port #{port} as the #{role} port: this " \
+              "process's proxy for #{redact_password(upstream)} already holds " \
+              "it as its #{held_as} port. Choose another port, or omit " \
+              "proxy_port and dashboard_port to have a free pair assigned."
       end
 
       def cleanup

@@ -128,61 +128,59 @@ end
 # The wrapper must translate friendly strings to the right `-v` count (or
 # omit the flag for default-verbosity levels), and must raise on bad values.
 class TestLogLevelTranslation < Minitest::Test
+  def flag(level)
+    GoldLapel::Proxy.log_level_to_verbose_flag(level)
+  end
+
   def test_trace_maps_to_vvv
-    assert_equal ["-vvv"], GoldLapel.log_level_to_args("trace")
+    assert_equal "-vvv", flag("trace")
   end
 
   def test_debug_maps_to_vv
-    assert_equal ["-vv"], GoldLapel.log_level_to_args("debug")
+    assert_equal "-vv", flag("debug")
   end
 
   def test_info_maps_to_v
-    assert_equal ["-v"], GoldLapel.log_level_to_args("info")
+    assert_equal "-v", flag("info")
   end
 
   def test_warn_is_default_no_flag
-    assert_equal [], GoldLapel.log_level_to_args("warn")
+    assert_nil flag("warn")
   end
 
   def test_warning_alias_is_default_no_flag
-    assert_equal [], GoldLapel.log_level_to_args("warning")
+    assert_nil flag("warning")
   end
 
   def test_error_is_default_no_flag
-    assert_equal [], GoldLapel.log_level_to_args("error")
+    assert_nil flag("error")
   end
 
   def test_nil_produces_no_flag
-    assert_equal [], GoldLapel.log_level_to_args(nil)
+    assert_nil flag(nil)
   end
 
   def test_symbol_accepted
-    assert_equal ["-vv"], GoldLapel.log_level_to_args(:debug)
+    assert_equal "-vv", flag(:debug)
   end
 
   def test_case_insensitive
-    assert_equal ["-vv"], GoldLapel.log_level_to_args("DEBUG")
-    assert_equal ["-v"], GoldLapel.log_level_to_args("Info")
+    assert_equal "-vv", flag("DEBUG")
+    assert_equal "-v", flag("Info")
   end
 
   def test_invalid_value_raises_argument_error
-    err = assert_raises(ArgumentError) do
-      GoldLapel.log_level_to_args("invalid")
-    end
-    assert_match(/log_level must be one of: trace, debug, info, warn, error/, err.message)
+    err = assert_raises(ArgumentError) { flag("invalid") }
+    assert_match(/log_level must be one of: trace, debug, info, warn, error \(got "invalid"\)/, err.message)
   end
 
   def test_empty_string_raises_argument_error
-    err = assert_raises(ArgumentError) do
-      GoldLapel.log_level_to_args("")
-    end
+    err = assert_raises(ArgumentError) { flag("") }
     assert_match(/log_level must be one of/, err.message)
   end
 
   def test_numeric_value_raises_argument_error
-    err = assert_raises(ArgumentError) do
-      GoldLapel.log_level_to_args(2)
-    end
+    err = assert_raises(ArgumentError) { flag(2) }
     assert_match(/log_level must be one of/, err.message)
   end
 

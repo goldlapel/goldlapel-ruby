@@ -91,8 +91,17 @@ class TestSubprocessCleanupOnConnectFailure < Minitest::Test
       end
 
       # Mirror the registry API Proxy exposes at the class level.
-      def self.register(*); end
-      def self.unregister(*); end
+      def self.acquire(upstream, **kwargs)
+        proxy = new(upstream, **kwargs)
+        proxy.start
+        proxy
+      end
+
+      def self.release(proxy)
+        proxy.stop
+      end
+
+      def self.reject_unknown_options(*); end
       def self.reset!
         @instances = []
       end
@@ -179,5 +188,63 @@ class TestSubprocessCleanupOnConnectFailure < Minitest::Test
     # The constructor raised, so no Instance is bound to a local variable,
     # but we can still verify via the proxy instance count + stop_calls.
     assert_equal 1, @fake_proxy_class.instances.first.stop_calls
+  end
+end
+
+# GoldLapel.start on an upstream that already has a running proxy shares it:
+# no second spawn, no orphan, and the proxy stops with its last holder.
+require_relative "_fake_proxy_helper"
+
+class TestInstancesShareOneProxy < Minitest::Test
+  UP = "postgresql://user:pass@host/db"
+
+  def with_pg_connect
+    original = PG.method(:connect)
+    PG.define_singleton_method(:connect) do |*|
+      conn = Object.new
+      conn.define_singleton_method(:close) {}
+      conn
+    end
+    begin
+      yield
+    ensure
+      PG.define_singleton_method(:connect, &original)
+    end
+  end
+
+  def test_second_start_reuses_and_last_stop_stops
+    FakeProxySupport.with_fake_proxies do
+      with_pg_connect do
+        a = GoldLapel::Instance.new(UP)
+        b = GoldLapel::Instance.new(UP)
+        assert_equal a.url, b.url
+        assert_equal 1, GoldLapel::Proxy.instances.size
+        proxy = GoldLapel::Proxy.instances[UP]
+
+        a.stop
+        assert proxy.running?, "b still uses the proxy"
+        assert b.running?
+        assert_same proxy, GoldLapel::Proxy.instances[UP]
+
+        b.stop
+        refute proxy.running?
+        assert_equal({}, GoldLapel::Proxy.instances)
+      end
+    end
+  end
+
+  def test_restart_after_crash_gets_a_fresh_proxy
+    FakeProxySupport.with_fake_proxies do
+      with_pg_connect do
+        a = GoldLapel::Instance.new(UP)
+        old = GoldLapel::Proxy.instances[UP]
+        old.define_singleton_method(:running?) { false } # crashed
+        a.start!
+        refute_same old, GoldLapel::Proxy.instances[UP]
+        assert a.running?
+        a.stop
+        assert_equal({}, GoldLapel::Proxy.instances)
+      end
+    end
   end
 end

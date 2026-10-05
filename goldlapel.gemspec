@@ -6,10 +6,12 @@ Gem::Specification.new do |spec|
   spec.platform = ENV["GEM_PLATFORM"] if ENV["GEM_PLATFORM"]
   spec.authors = ["The Waiter of Gold Lapel"]
   spec.email = ["thewaiter@goldlapel.com"]
-  spec.summary = "Self-optimizing Postgres proxy — automatic materialized views and indexes"
-  spec.description = "Gold Lapel sits between your app and Postgres, watches query patterns, " \
-                     "and automatically creates materialized views and indexes to make your " \
-                     "database faster. Zero code changes required."
+  spec.summary = "Self-optimizing Postgres proxy — shared result cache and automatic indexes"
+  spec.description = "Gold Lapel sits between your app and Postgres, serves repeated reads from " \
+                     "a result cache shared by every connection, and creates the indexes your " \
+                     "query patterns need. The gem runs the proxy for you and adds " \
+                     "Postgres-backed helpers: search, documents, streams, queues, counters " \
+                     "and more. Zero code changes required."
   spec.homepage = "https://goldlapel.com"
   spec.license = "MIT"
 

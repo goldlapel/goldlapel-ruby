@@ -121,7 +121,7 @@ class TestInstanceConn < Minitest::Test
   def test_stop_is_idempotent
     # Double-stop is reachable via atexit hooks, signal handlers, try/ensure
     # chains, and test teardown. Guard against regression (NPE on second
-    # close / double-unregister / double-kill).
+    # close / double-release / double-kill).
     mock_conn = InstanceMockConnection.new
     stop_calls = 0
     fake_proxy = Struct.new(:upstream, :url, :dashboard_url).new(
@@ -129,8 +129,8 @@ class TestInstanceConn < Minitest::Test
     )
     fake_proxy.define_singleton_method(:stop) { stop_calls += 1 }
     fake_proxy.define_singleton_method(:running?) { false }
-    # Explicit port: the registry leaves it alone instead of allocating one.
-    fake_proxy.define_singleton_method(:proxy_port_explicit?) { true }
+    # Instance#stop releases its hold; it was the only holder.
+    fake_proxy.define_singleton_method(:release_hold) { 0 }
 
     inst = GoldLapel::Instance.allocate
     inst.instance_variable_set(:@upstream, "postgresql://localhost/test")
@@ -138,14 +138,8 @@ class TestInstanceConn < Minitest::Test
     inst.instance_variable_set(:@proxy, fake_proxy)
     inst.instance_variable_set(:@fiber_key, :"__goldlapel_conn_#{inst.object_id}")
 
-    # Register so Instance#stop's Proxy.unregister call finds it.
-    GoldLapel::Proxy.register(fake_proxy)
-    begin
-      inst.stop
-      inst.stop # must not raise
-    ensure
-      GoldLapel::Proxy.unregister(fake_proxy)
-    end
+    inst.stop
+    inst.stop # must not raise
 
     # Internal state fully torn down after first stop; second stop is no-op.
     assert_nil inst.instance_variable_get(:@internal_conn)
