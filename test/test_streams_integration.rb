@@ -39,7 +39,7 @@ if PG_URL
     end
 
     def test_stream_add_creates_prefixed_table
-      @gl.stream_add(@stream_name, { type: "click" })
+      @gl.streams.add(@stream_name, { type: "click" })
 
       c = direct_conn
       begin
@@ -63,7 +63,7 @@ if PG_URL
     end
 
     def test_schema_meta_row_recorded
-      @gl.stream_add(@stream_name, { type: "click" })
+      @gl.streams.add(@stream_name, { type: "click" })
 
       c = direct_conn
       begin
@@ -91,10 +91,10 @@ if PG_URL
 
       begin
         fresh = "gl_int_stream_ct_#{(Time.now.to_f * 1000).to_i}"
-        @gl.stream_add(fresh, { i: 1 })
+        @gl.streams.add(fresh, { i: 1 })
         assert_equal 1, count, "first call posts once"
-        @gl.stream_add(fresh, { i: 2 })
-        @gl.stream_add(fresh, { i: 3 })
+        @gl.streams.add(fresh, { i: 2 })
+        @gl.streams.add(fresh, { i: 3 })
         assert_equal 1, count, "subsequent calls use cache"
       ensure
         GoldLapel::DDL.define_singleton_method(:_post, original)
@@ -114,12 +114,12 @@ if PG_URL
     end
 
     def test_add_and_read_round_trip
-      @gl.stream_create_group(@name, "workers")
-      r1 = @gl.stream_add(@name, { i: 1 })
-      r2 = @gl.stream_add(@name, { i: 2 })
+      @gl.streams.create_group(@name, "workers")
+      r1 = @gl.streams.add(@name, { i: 1 })
+      r2 = @gl.streams.add(@name, { i: 2 })
       assert r2["id"] > r1["id"]
 
-      messages = @gl.stream_read(@name, "workers", "c", count: 10)
+      messages = @gl.streams.read(@name, "workers", "c", count: 10)
       assert_equal 2, messages.length
       assert_equal({ "i" => 1 }, messages[0]["payload"])
       assert_equal({ "i" => 2 }, messages[1]["payload"])
@@ -127,19 +127,19 @@ if PG_URL
 
     def test_ack_removes_pending
       name = "#{@name}_ack"
-      @gl.stream_create_group(name, "workers")
-      r = @gl.stream_add(name, { i: 1 })
-      @gl.stream_read(name, "workers", "c", count: 10)
-      assert_equal true, @gl.stream_ack(name, "workers", r["id"])
-      assert_equal false, @gl.stream_ack(name, "workers", r["id"])
+      @gl.streams.create_group(name, "workers")
+      r = @gl.streams.add(name, { i: 1 })
+      @gl.streams.read(name, "workers", "c", count: 10)
+      assert_equal true, @gl.streams.ack(name, "workers", r["id"])
+      assert_equal false, @gl.streams.ack(name, "workers", r["id"])
     end
 
     def test_claim_reassigns_idle
       name = "#{@name}_claim"
-      @gl.stream_create_group(name, "workers")
-      @gl.stream_add(name, { i: 1 })
-      @gl.stream_read(name, "workers", "consumer-a", count: 10)
-      claimed = @gl.stream_claim(name, "workers", "consumer-b", min_idle_ms: 0)
+      @gl.streams.create_group(name, "workers")
+      @gl.streams.add(name, { i: 1 })
+      @gl.streams.read(name, "workers", "consumer-a", count: 10)
+      claimed = @gl.streams.claim(name, "workers", "consumer-b", min_idle_ms: 0)
       assert_equal 1, claimed.length
       assert_equal({ "i" => 1 }, claimed[0]["payload"])
     end

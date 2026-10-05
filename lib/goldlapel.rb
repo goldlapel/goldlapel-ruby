@@ -1,7 +1,5 @@
 # frozen_string_literal: true
 
-require_relative "goldlapel/cache"
-require_relative "goldlapel/wrap"
 require_relative "goldlapel/proxy"
 require_relative "goldlapel/utils"
 require_relative "goldlapel/instance"
@@ -57,7 +55,6 @@ module GoldLapel
     upstream,
     proxy_port: nil,
     dashboard_port: nil,
-    invalidation_port: nil,
     log_level: nil,
     mode: nil,
     license: nil,
@@ -68,18 +65,14 @@ module GoldLapel
     silent: false,
     mesh: false,
     mesh_tag: nil,
-    disable_native_cache: false,
     disable_proxy_cache: false,
-    disable_matviews: false,
     disable_sqloptimize: false,
-    disable_auto_indexes: false,
-    aggressive_verify: :auto
+    disable_auto_indexes: false
   )
     Instance.new(
       upstream,
       proxy_port: proxy_port,
       dashboard_port: dashboard_port,
-      invalidation_port: invalidation_port,
       log_level: log_level,
       mode: mode,
       license: license,
@@ -91,12 +84,9 @@ module GoldLapel
       silent: silent,
       mesh: mesh,
       mesh_tag: mesh_tag,
-      disable_native_cache: disable_native_cache,
       disable_proxy_cache: disable_proxy_cache,
-      disable_matviews: disable_matviews,
       disable_sqloptimize: disable_sqloptimize,
       disable_auto_indexes: disable_auto_indexes,
-      aggressive_verify: aggressive_verify,
     )
   end
 
@@ -104,7 +94,6 @@ module GoldLapel
     upstream,
     proxy_port: nil,
     dashboard_port: nil,
-    invalidation_port: nil,
     log_level: nil,
     mode: nil,
     license: nil,
@@ -115,19 +104,15 @@ module GoldLapel
     silent: false,
     mesh: false,
     mesh_tag: nil,
-    disable_native_cache: false,
     disable_proxy_cache: false,
-    disable_matviews: false,
     disable_sqloptimize: false,
-    disable_auto_indexes: false,
-    aggressive_verify: :auto
+    disable_auto_indexes: false
   )
     # Legacy/advanced: construct without eagerly spawning or connecting.
     Instance.new(
       upstream,
       proxy_port: proxy_port,
       dashboard_port: dashboard_port,
-      invalidation_port: invalidation_port,
       log_level: log_level,
       mode: mode,
       license: license,
@@ -139,12 +124,9 @@ module GoldLapel
       silent: silent,
       mesh: mesh,
       mesh_tag: mesh_tag,
-      disable_native_cache: disable_native_cache,
       disable_proxy_cache: disable_proxy_cache,
-      disable_matviews: disable_matviews,
       disable_sqloptimize: disable_sqloptimize,
       disable_auto_indexes: disable_auto_indexes,
-      aggressive_verify: aggressive_verify,
     )
   end
 
@@ -154,7 +136,6 @@ module GoldLapel
     upstream,
     proxy_port: nil,
     dashboard_port: nil,
-    invalidation_port: nil,
     log_level: nil,
     mode: nil,
     license: nil,
@@ -166,7 +147,6 @@ module GoldLapel
     mesh: false,
     mesh_tag: nil,
     disable_proxy_cache: false,
-    disable_matviews: false,
     disable_sqloptimize: false,
     disable_auto_indexes: false
   )
@@ -174,7 +154,6 @@ module GoldLapel
       upstream,
       proxy_port: proxy_port,
       dashboard_port: dashboard_port,
-      invalidation_port: invalidation_port,
       log_level: log_level,
       mode: mode,
       license: license,
@@ -186,7 +165,6 @@ module GoldLapel
       mesh: mesh,
       mesh_tag: mesh_tag,
       disable_proxy_cache: disable_proxy_cache,
-      disable_matviews: disable_matviews,
       disable_sqloptimize: disable_sqloptimize,
       disable_auto_indexes: disable_auto_indexes,
     )

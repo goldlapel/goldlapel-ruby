@@ -43,14 +43,12 @@ module GoldLapel
 
   def self.publish(conn, channel, message)
     _validate_identifier(channel)
-    raw = _raw_conn(conn)
-    raw.async_exec_params("SELECT pg_notify($1, $2)", [channel, message.to_s])
+    conn.async_exec_params("SELECT pg_notify($1, $2)", [channel, message.to_s])
   end
 
   def self.subscribe(conn, channel, &block)
     _validate_identifier(channel)
-    raw = _raw_conn(conn)
-    listen_conn = PG.connect(_listener_conninfo(raw))
+    listen_conn = PG.connect(_listener_conninfo(conn))
     listen_conn.async_exec("LISTEN #{channel}")
     loop do
       listen_conn.wait_for_notify(5) do |ch, _pid, payload|
@@ -62,8 +60,7 @@ module GoldLapel
   def self.count_distinct(conn, table, column)
     _validate_identifier(table)
     _validate_identifier(column)
-    raw = _raw_conn(conn)
-    result = raw.async_exec("SELECT COUNT(DISTINCT #{column}) FROM #{table}")
+    result = conn.async_exec("SELECT COUNT(DISTINCT #{column}) FROM #{table}")
     result[0]["count"].to_i
   end
 
@@ -113,8 +110,7 @@ module GoldLapel
 
   def self.counter_incr(conn, name, key, amount = 1, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(_pattern_sql(patterns, "incr", "counter"), [key, amount.to_i])
+    result = conn.async_exec_params(_pattern_sql(patterns, "incr", "counter"), [key, amount.to_i])
     result[0]["value"].to_i
   end
 
@@ -124,30 +120,26 @@ module GoldLapel
 
   def self.counter_set(conn, name, key, value, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(_pattern_sql(patterns, "set", "counter"), [key, value.to_i])
+    result = conn.async_exec_params(_pattern_sql(patterns, "set", "counter"), [key, value.to_i])
     result[0]["value"].to_i
   end
 
   def self.counter_get(conn, name, key, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(_pattern_sql(patterns, "get", "counter"), [key])
+    result = conn.async_exec_params(_pattern_sql(patterns, "get", "counter"), [key])
     return 0 if result.ntuples.zero?
     result[0]["value"].to_i
   end
 
   def self.counter_delete(conn, name, key, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(_pattern_sql(patterns, "delete", "counter"), [key])
+    result = conn.async_exec_params(_pattern_sql(patterns, "delete", "counter"), [key])
     result.cmd_tuples > 0
   end
 
   def self.counter_count_keys(conn, name, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(_pattern_sql(patterns, "count_keys", "counter"), [])
+    result = conn.async_exec_params(_pattern_sql(patterns, "count_keys", "counter"), [])
     return 0 if result.ntuples.zero?
     result[0].values[0].to_i
   end
@@ -156,8 +148,7 @@ module GoldLapel
 
   def self.zset_add(conn, name, zset_key, member, score, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       _pattern_sql(patterns, "zadd", "zset"),
       [zset_key.to_s, member.to_s, score.to_f]
     )
@@ -166,8 +157,7 @@ module GoldLapel
 
   def self.zset_incr_by(conn, name, zset_key, member, delta = 1, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       _pattern_sql(patterns, "zincrby", "zset"),
       [zset_key.to_s, member.to_s, delta.to_f]
     )
@@ -176,8 +166,7 @@ module GoldLapel
 
   def self.zset_score(conn, name, zset_key, member, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       _pattern_sql(patterns, "zscore", "zset"),
       [zset_key.to_s, member.to_s]
     )
@@ -187,8 +176,7 @@ module GoldLapel
 
   def self.zset_remove(conn, name, zset_key, member, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       _pattern_sql(patterns, "zrem", "zset"),
       [zset_key.to_s, member.to_s]
     )
@@ -197,10 +185,9 @@ module GoldLapel
 
   def self.zset_range(conn, name, zset_key, start = 0, stop = 10, desc = true, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
     key = desc ? "zrange_desc" : "zrange_asc"
     limit = [stop.to_i - start.to_i + 1, 0].max
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       _pattern_sql(patterns, key, "zset"),
       [zset_key.to_s, limit, start.to_i]
     )
@@ -209,8 +196,7 @@ module GoldLapel
 
   def self.zset_range_by_score(conn, name, zset_key, min_score, max_score, limit: 100, offset: 0, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       _pattern_sql(patterns, "zrangebyscore", "zset"),
       [zset_key.to_s, min_score.to_f, max_score.to_f, limit.to_i, offset.to_i]
     )
@@ -219,9 +205,8 @@ module GoldLapel
 
   def self.zset_rank(conn, name, zset_key, member, desc: true, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
     key = desc ? "zrank_desc" : "zrank_asc"
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       _pattern_sql(patterns, key, "zset"),
       [zset_key.to_s, member.to_s]
     )
@@ -231,8 +216,7 @@ module GoldLapel
 
   def self.zset_card(conn, name, zset_key, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       _pattern_sql(patterns, "zcard", "zset"),
       [zset_key.to_s]
     )
@@ -244,8 +228,7 @@ module GoldLapel
 
   def self.hash_set(conn, name, hash_key, field, value, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       _pattern_sql(patterns, "hset", "hash"),
       [hash_key.to_s, field.to_s, JSON.generate(value)]
     )
@@ -255,8 +238,7 @@ module GoldLapel
 
   def self.hash_get(conn, name, hash_key, field, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       _pattern_sql(patterns, "hget", "hash"),
       [hash_key.to_s, field.to_s]
     )
@@ -266,8 +248,7 @@ module GoldLapel
 
   def self.hash_get_all(conn, name, hash_key, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       _pattern_sql(patterns, "hgetall", "hash"),
       [hash_key.to_s]
     )
@@ -280,8 +261,7 @@ module GoldLapel
 
   def self.hash_keys(conn, name, hash_key, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       _pattern_sql(patterns, "hkeys", "hash"),
       [hash_key.to_s]
     )
@@ -290,8 +270,7 @@ module GoldLapel
 
   def self.hash_values(conn, name, hash_key, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       _pattern_sql(patterns, "hvals", "hash"),
       [hash_key.to_s]
     )
@@ -300,8 +279,7 @@ module GoldLapel
 
   def self.hash_exists(conn, name, hash_key, field, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       _pattern_sql(patterns, "hexists", "hash"),
       [hash_key.to_s, field.to_s]
     )
@@ -312,8 +290,7 @@ module GoldLapel
 
   def self.hash_delete(conn, name, hash_key, field, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       _pattern_sql(patterns, "hdel", "hash"),
       [hash_key.to_s, field.to_s]
     )
@@ -322,8 +299,7 @@ module GoldLapel
 
   def self.hash_len(conn, name, hash_key, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       _pattern_sql(patterns, "hlen", "hash"),
       [hash_key.to_s]
     )
@@ -335,8 +311,7 @@ module GoldLapel
 
   def self.queue_enqueue(conn, name, payload, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       _pattern_sql(patterns, "enqueue", "queue"),
       [JSON.generate(payload)]
     )
@@ -346,8 +321,7 @@ module GoldLapel
 
   def self.queue_claim(conn, name, visibility_timeout_ms: 30000, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       _pattern_sql(patterns, "claim", "queue"),
       [visibility_timeout_ms.to_i]
     )
@@ -358,8 +332,7 @@ module GoldLapel
 
   def self.queue_ack(conn, name, message_id, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       _pattern_sql(patterns, "ack", "queue"),
       [message_id.to_i]
     )
@@ -368,8 +341,7 @@ module GoldLapel
 
   def self.queue_abandon(conn, name, message_id, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       _pattern_sql(patterns, "nack", "queue"),
       [message_id.to_i]
     )
@@ -378,8 +350,7 @@ module GoldLapel
 
   def self.queue_extend(conn, name, message_id, additional_ms, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       _pattern_sql(patterns, "extend", "queue"),
       [message_id.to_i, additional_ms.to_i]
     )
@@ -389,8 +360,7 @@ module GoldLapel
 
   def self.queue_peek(conn, name, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(_pattern_sql(patterns, "peek", "queue"), [])
+    result = conn.async_exec_params(_pattern_sql(patterns, "peek", "queue"), [])
     return nil if result.ntuples.zero?
     row = result[0]
     {
@@ -404,16 +374,14 @@ module GoldLapel
 
   def self.queue_count_ready(conn, name, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(_pattern_sql(patterns, "count_ready", "queue"), [])
+    result = conn.async_exec_params(_pattern_sql(patterns, "count_ready", "queue"), [])
     return 0 if result.ntuples.zero?
     result[0].values[0].to_i
   end
 
   def self.queue_count_claimed(conn, name, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(_pattern_sql(patterns, "count_claimed", "queue"), [])
+    result = conn.async_exec_params(_pattern_sql(patterns, "count_claimed", "queue"), [])
     return 0 if result.ntuples.zero?
     result[0].values[0].to_i
   end
@@ -422,8 +390,7 @@ module GoldLapel
 
   def self.geo_add(conn, name, member, lon, lat, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       _pattern_sql(patterns, "geoadd", "geo"),
       [member.to_s, lon.to_f, lat.to_f]
     )
@@ -433,8 +400,7 @@ module GoldLapel
 
   def self.geo_pos(conn, name, member, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       _pattern_sql(patterns, "geopos", "geo"),
       [member.to_s]
     )
@@ -444,8 +410,7 @@ module GoldLapel
 
   def self.geo_dist(conn, name, member_a, member_b, unit: "m", patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       _pattern_sql(patterns, "geodist", "geo"),
       [member_a.to_s, member_b.to_s]
     )
@@ -460,9 +425,8 @@ module GoldLapel
   # 4-tuple with no duplicates, indexed by `$N`.
   def self.geo_radius(conn, name, lon, lat, radius, unit: "m", limit: 50, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
     radius_m = _to_meters(radius, unit)
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       _pattern_sql(patterns, "georadius_with_dist", "geo"),
       [lon.to_f, lat.to_f, radius_m, limit.to_i]
     )
@@ -474,9 +438,8 @@ module GoldLapel
   # binding both slots hold the same value).
   def self.geo_radius_by_member(conn, name, member, radius, unit: "m", limit: 50, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
     radius_m = _to_meters(radius, unit)
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       _pattern_sql(patterns, "geosearch_member", "geo"),
       [member.to_s, member.to_s, radius_m, limit.to_i]
     )
@@ -485,8 +448,7 @@ module GoldLapel
 
   def self.geo_remove(conn, name, member, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       _pattern_sql(patterns, "geo_remove", "geo"),
       [member.to_s]
     )
@@ -495,24 +457,22 @@ module GoldLapel
 
   def self.geo_count(conn, name, patterns: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(_pattern_sql(patterns, "geo_count", "geo"), [])
+    result = conn.async_exec_params(_pattern_sql(patterns, "geo_count", "geo"), [])
     return 0 if result.ntuples.zero?
     result[0].values[0].to_i
   end
 
   def self.script(conn, lua_code, *args)
-    raw = _raw_conn(conn)
-    raw.async_exec("CREATE EXTENSION IF NOT EXISTS pllua")
+    conn.async_exec("CREATE EXTENSION IF NOT EXISTS pllua")
     func_name = "_gl_lua_#{rand(16**8).to_s(16)}"
     params = args.each_with_index.map { |_, i| "p#{i + 1} text" }.join(", ")
-    raw.async_exec("CREATE OR REPLACE FUNCTION pg_temp.#{func_name}(#{params}) " \
+    conn.async_exec("CREATE OR REPLACE FUNCTION pg_temp.#{func_name}(#{params}) " \
              "RETURNS text LANGUAGE pllua AS $pllua$ #{lua_code} $pllua$")
     if args.empty?
-      result = raw.async_exec("SELECT pg_temp.#{func_name}()")
+      result = conn.async_exec("SELECT pg_temp.#{func_name}()")
     else
       placeholders = args.each_with_index.map { |_, i| "$#{i + 1}" }.join(", ")
-      result = raw.async_exec_params(
+      result = conn.async_exec_params(
         "SELECT pg_temp.#{func_name}(#{placeholders})",
         args.map(&:to_s)
       )
@@ -548,8 +508,7 @@ module GoldLapel
   def self.stream_add(conn, stream, payload, patterns: nil)
     _validate_identifier(stream)
     qp = _require_patterns(patterns, "stream_add")
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(qp["insert"], [JSON.generate(payload)])
+    result = conn.async_exec_params(qp["insert"], [JSON.generate(payload)])
     row = result[0]
     { "id" => row["id"].to_i, "payload" => payload, "created_at" => row["created_at"] }
   end
@@ -557,15 +516,13 @@ module GoldLapel
   def self.stream_create_group(conn, stream, group, patterns: nil)
     _validate_identifier(stream)
     qp = _require_patterns(patterns, "stream_create_group")
-    raw = _raw_conn(conn)
-    raw.async_exec_params(qp["create_group"], [group])
+    conn.async_exec_params(qp["create_group"], [group])
     nil
   end
 
   def self.stream_read(conn, stream, group, consumer, count: 1, patterns: nil)
     _validate_identifier(stream)
     qp = _require_patterns(patterns, "stream_read")
-    raw = _raw_conn(conn)
     # Wrap in an explicit transaction so the FOR UPDATE lock from
     # group_get_cursor is held until we've advanced the cursor and inserted
     # pending rows. Under autocommit the row lock is released immediately,
@@ -573,13 +530,13 @@ module GoldLapel
     # same messages. See sync stream_read in lib/goldlapel/utils.rb for the
     # full explanation.
     messages = nil
-    raw.transaction do
-      cursor_res = raw.async_exec_params(qp["group_get_cursor"], [group])
+    conn.transaction do
+      cursor_res = conn.async_exec_params(qp["group_get_cursor"], [group])
       if cursor_res.ntuples.zero?
         messages = []
       else
         last_id = cursor_res[0]["last_delivered_id"].to_i
-        rows = raw.async_exec_params(qp["read_since"], [last_id, count])
+        rows = conn.async_exec_params(qp["read_since"], [last_id, count])
         messages = rows.map do |row|
           payload_raw = row["payload"]
           payload = payload_raw.is_a?(String) ? JSON.parse(payload_raw) : payload_raw
@@ -587,9 +544,9 @@ module GoldLapel
         end
         unless messages.empty?
           new_last = messages.last["id"]
-          raw.async_exec_params(qp["group_advance_cursor"], [new_last, group])
+          conn.async_exec_params(qp["group_advance_cursor"], [new_last, group])
           messages.each do |msg|
-            raw.async_exec_params(qp["pending_insert"], [msg["id"], group, consumer])
+            conn.async_exec_params(qp["pending_insert"], [msg["id"], group, consumer])
           end
         end
       end
@@ -600,23 +557,21 @@ module GoldLapel
   def self.stream_ack(conn, stream, group, message_id, patterns: nil)
     _validate_identifier(stream)
     qp = _require_patterns(patterns, "stream_ack")
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(qp["ack"], [group, message_id])
+    result = conn.async_exec_params(qp["ack"], [group, message_id])
     result.cmd_tuples > 0
   end
 
   def self.stream_claim(conn, stream, group, consumer, min_idle_ms: 60000, patterns: nil)
     _validate_identifier(stream)
     qp = _require_patterns(patterns, "stream_claim")
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(qp["claim"], [consumer, group, min_idle_ms])
+    result = conn.async_exec_params(qp["claim"], [consumer, group, min_idle_ms])
     ids = result.map { |row| row["message_id"].to_i }
     return [] if ids.empty?
 
     read_by_id = qp["read_by_id"]
     messages = []
     ids.each do |msg_id|
-      r = raw.async_exec_params(read_by_id, [msg_id])
+      r = conn.async_exec_params(read_by_id, [msg_id])
       next if r.ntuples == 0
 
       row = r[0]
@@ -628,14 +583,13 @@ module GoldLapel
   end
 
   def self.search(conn, table, column, query, limit: 50, lang: 'english', highlight: false)
-    raw = _raw_conn(conn)
     columns = Array(column)
     _validate_identifier(table)
     columns.each { |col| _validate_identifier(col) }
     tsvec = columns.map { |col| "coalesce(#{col}, '')" }.join(" || ' ' || ")
     if highlight
       hl_col = columns[0]
-      result = raw.async_exec_params(
+      result = conn.async_exec_params(
         "SELECT *, " \
         "ts_rank(to_tsvector($1, #{tsvec}), plainto_tsquery($2, $3)) AS _score, " \
         "ts_headline($4, #{hl_col}, plainto_tsquery($5, $6), " \
@@ -646,7 +600,7 @@ module GoldLapel
         [lang, lang, query, lang, lang, query, lang, lang, query, limit]
       )
     else
-      result = raw.async_exec_params(
+      result = conn.async_exec_params(
         "SELECT *, " \
         "ts_rank(to_tsvector($1, #{tsvec}), plainto_tsquery($2, $3)) AS _score " \
         "FROM #{table} " \
@@ -659,8 +613,7 @@ module GoldLapel
   end
 
   def self.analyze(conn, text, lang: 'english')
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       "SELECT alias, description, token, dictionaries, dictionary, lexemes " \
       "FROM ts_debug($1, $2)",
       [lang, text]
@@ -672,8 +625,7 @@ module GoldLapel
     _validate_identifier(table)
     _validate_identifier(column)
     _validate_identifier(id_column)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       "SELECT #{column} AS document_text, to_tsvector($1, #{column})::text AS document_tokens, " \
       "plainto_tsquery($1, $2)::text AS query_tokens, " \
       "to_tsvector($1, #{column}) @@ plainto_tsquery($1, $2) AS matches, " \
@@ -690,8 +642,7 @@ module GoldLapel
   def self.search_fuzzy(conn, table, column, query, limit: 50, threshold: 0.3)
     _validate_identifier(table)
     _validate_identifier(column)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       "SELECT *, similarity(#{column}, $1) AS _score " \
       "FROM #{table} " \
       "WHERE similarity(#{column}, $2) > $3 " \
@@ -704,8 +655,7 @@ module GoldLapel
   def self.search_phonetic(conn, table, column, query, limit: 50)
     _validate_identifier(table)
     _validate_identifier(column)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       "SELECT *, similarity(#{column}, $1) AS _score " \
       "FROM #{table} " \
       "WHERE soundex(#{column}) = soundex($2) " \
@@ -718,9 +668,8 @@ module GoldLapel
   def self.similar(conn, table, column, vector, limit: 10)
     _validate_identifier(table)
     _validate_identifier(column)
-    raw = _raw_conn(conn)
     vec_literal = "[" + vector.map { |v| v.to_f.to_s }.join(",") + "]"
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       "SELECT *, (#{column} <=> $1::vector) AS _score " \
       "FROM #{table} " \
       "ORDER BY _score LIMIT $2",
@@ -732,9 +681,8 @@ module GoldLapel
   def self.suggest(conn, table, column, prefix, limit: 10)
     _validate_identifier(table)
     _validate_identifier(column)
-    raw = _raw_conn(conn)
     pattern = prefix + "%"
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       "SELECT *, similarity(#{column}, $1) AS _score " \
       "FROM #{table} " \
       "WHERE #{column} ILIKE $2 " \
@@ -747,12 +695,11 @@ module GoldLapel
   def self.facets(conn, table, column, limit: 50, query: nil, query_column: nil, lang: 'english')
     _validate_identifier(table)
     _validate_identifier(column)
-    raw = _raw_conn(conn)
     if query && query_column
       columns = Array(query_column)
       columns.each { |col| _validate_identifier(col) }
       tsvec = columns.map { |col| "coalesce(#{col}, '')" }.join(" || ' ' || ")
-      result = raw.async_exec_params(
+      result = conn.async_exec_params(
         "SELECT #{column} AS value, COUNT(*) AS count " \
         "FROM #{table} " \
         "WHERE to_tsvector($1, #{tsvec}) @@ plainto_tsquery($2, $3) " \
@@ -760,7 +707,7 @@ module GoldLapel
         [lang, lang, query, limit]
       )
     else
-      result = raw.async_exec_params(
+      result = conn.async_exec_params(
         "SELECT #{column} AS value, COUNT(*) AS count " \
         "FROM #{table} " \
         "GROUP BY #{column} ORDER BY count DESC, #{column} LIMIT $1",
@@ -780,11 +727,10 @@ module GoldLapel
     unless AGGREGATE_FUNCS.include?(func_lower)
       raise ArgumentError, "Invalid aggregate function: #{func}. Must be one of: #{AGGREGATE_FUNCS.join(', ')}"
     end
-    raw = _raw_conn(conn)
     expr = func_lower == "count" ? "COUNT(*)" : "#{func_lower.upcase}(#{column})"
     if group_by
       _validate_identifier(group_by)
-      result = raw.async_exec_params(
+      result = conn.async_exec_params(
         "SELECT #{group_by}, #{expr} AS value " \
         "FROM #{table} " \
         "GROUP BY #{group_by} ORDER BY value DESC LIMIT $1",
@@ -792,7 +738,7 @@ module GoldLapel
       )
       result.map { |row| row.transform_keys(&:to_s) }
     else
-      result = raw.async_exec(
+      result = conn.async_exec(
         "SELECT #{expr} AS value FROM #{table}"
       )
       return [{ "value" => nil }] if result.ntuples.zero?
@@ -802,17 +748,16 @@ module GoldLapel
 
   def self.percolate_add(conn, name, query_id, query, lang: 'english', metadata: nil)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    raw.async_exec("CREATE TABLE IF NOT EXISTS #{name} (" \
+    conn.async_exec("CREATE TABLE IF NOT EXISTS #{name} (" \
              "query_id TEXT PRIMARY KEY, " \
              "query_text TEXT NOT NULL, " \
              "tsquery TSQUERY NOT NULL, " \
              "lang TEXT NOT NULL DEFAULT 'english', " \
              "metadata JSONB, " \
              "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
-    raw.async_exec("CREATE INDEX IF NOT EXISTS #{name}_tsq_idx " \
+    conn.async_exec("CREATE INDEX IF NOT EXISTS #{name}_tsq_idx " \
              "ON #{name} USING GIST (tsquery)")
-    raw.async_exec_params(
+    conn.async_exec_params(
       "INSERT INTO #{name} (query_id, query_text, tsquery, lang, metadata) " \
       "VALUES ($1, $2, plainto_tsquery($3, $2), $3, $4) " \
       "ON CONFLICT (query_id) DO UPDATE SET " \
@@ -826,8 +771,7 @@ module GoldLapel
 
   def self.percolate(conn, name, text, lang: 'english', limit: 50)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       "SELECT query_id, query_text, metadata, " \
       "ts_rank(to_tsvector($1, $2), tsquery) AS _score " \
       "FROM #{name} " \
@@ -840,8 +784,7 @@ module GoldLapel
 
   def self.percolate_delete(conn, name, query_id)
     _validate_identifier(name)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       "DELETE FROM #{name} WHERE query_id = $1 RETURNING query_id",
       [query_id]
     )
@@ -851,13 +794,12 @@ module GoldLapel
   def self.create_search_config(conn, name, copy_from: 'english')
     _validate_identifier(name)
     _validate_identifier(copy_from)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       "SELECT 1 FROM pg_ts_config WHERE cfgname = $1",
       [name]
     )
     return if result.ntuples > 0
-    raw.async_exec("CREATE TEXT SEARCH CONFIGURATION #{name} (COPY = #{copy_from})")
+    conn.async_exec("CREATE TEXT SEARCH CONFIGURATION #{name} (COPY = #{copy_from})")
   end
 
   SORT_KEY_PATTERN = /\A[a-zA-Z_][a-zA-Z0-9_.]*\z/
@@ -1229,8 +1171,7 @@ module GoldLapel
   def self.doc_insert(conn, collection, document, patterns: nil)
     _validate_identifier(collection)
     table = _doc_table(patterns)
-    raw = _raw_conn(conn)
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       "INSERT INTO #{table} (data) VALUES ($1::jsonb) " \
       "RETURNING _id, data, created_at",
       [JSON.generate(document)]
@@ -1243,10 +1184,9 @@ module GoldLapel
     _validate_identifier(collection)
     raise ArgumentError, "documents must be a non-empty array" if !documents.is_a?(Array) || documents.empty?
     table = _doc_table(patterns)
-    raw = _raw_conn(conn)
     placeholders = documents.each_with_index.map { |_, i| "($#{i + 1}::jsonb)" }.join(", ")
     params = documents.map { |doc| JSON.generate(doc) }
-    result = raw.async_exec_params(
+    result = conn.async_exec_params(
       "INSERT INTO #{table} (data) VALUES #{placeholders} " \
       "RETURNING _id, data, created_at",
       params
@@ -1259,7 +1199,6 @@ module GoldLapel
   def self.doc_find(conn, collection, filter: nil, sort: nil, limit: nil, skip: nil, patterns: nil)
     _validate_identifier(collection)
     table = _doc_table(patterns)
-    raw = _raw_conn(conn)
     sql = "SELECT _id, data, created_at FROM #{table}"
     params = []
     idx = 1
@@ -1287,7 +1226,7 @@ module GoldLapel
       sql += " OFFSET $#{idx}"
       params << skip
     end
-    result = raw.async_exec_params(sql, params)
+    result = conn.async_exec_params(sql, params)
     result.map do |row|
       { "_id" => row["_id"], "data" => JSON.parse(row["data"]), "created_at" => row["created_at"] }
     end
@@ -1296,7 +1235,6 @@ module GoldLapel
   def self.doc_find_cursor(conn, collection, filter: nil, sort: nil, limit: nil, skip: nil, batch_size: 100, patterns: nil)
     _validate_identifier(collection)
     table = _doc_table(patterns)
-    raw = _raw_conn(conn)
     sql = "SELECT _id, data, created_at FROM #{table}"
     params = []
     idx = 1
@@ -1325,18 +1263,18 @@ module GoldLapel
       params << skip
     end
     cursor_name = "gl_cursor_#{collection}_#{conn.object_id}"
-    raw.async_exec("BEGIN")
-    raw.async_exec_params("DECLARE #{cursor_name} CURSOR FOR #{sql}", params)
+    conn.async_exec("BEGIN")
+    conn.async_exec_params("DECLARE #{cursor_name} CURSOR FOR #{sql}", params)
     Enumerator.new do |yielder|
       begin
         loop do
-          result = raw.async_exec("FETCH #{batch_size} FROM #{cursor_name}")
+          result = conn.async_exec("FETCH #{batch_size} FROM #{cursor_name}")
           break if result.ntuples == 0
           result.each { |row| yielder.yield row }
         end
       ensure
-        raw.async_exec("CLOSE #{cursor_name}")
-        raw.async_exec("COMMIT")
+        conn.async_exec("CLOSE #{cursor_name}")
+        conn.async_exec("COMMIT")
       end
     end
   end
@@ -1344,7 +1282,6 @@ module GoldLapel
   def self.doc_find_one(conn, collection, filter: nil, patterns: nil)
     _validate_identifier(collection)
     table = _doc_table(patterns)
-    raw = _raw_conn(conn)
     sql = "SELECT _id, data, created_at FROM #{table}"
     params = []
     where_clause, filter_params, _idx = _build_filter(filter, 1)
@@ -1353,7 +1290,7 @@ module GoldLapel
       params.concat(filter_params)
     end
     sql += " LIMIT 1"
-    result = raw.async_exec_params(sql, params)
+    result = conn.async_exec_params(sql, params)
     return nil if result.ntuples.zero?
     row = result[0]
     { "_id" => row["_id"], "data" => JSON.parse(row["data"]), "created_at" => row["created_at"] }
@@ -1362,7 +1299,6 @@ module GoldLapel
   def self.doc_update(conn, collection, filter, update, patterns: nil)
     _validate_identifier(collection)
     table = _doc_table(patterns)
-    raw = _raw_conn(conn)
     where_clause, filter_params, idx = _build_filter(filter, 1)
     update_expr, update_params, _idx = _build_update(update, idx)
     sql = "UPDATE #{table} SET data = #{update_expr}"
@@ -1370,14 +1306,13 @@ module GoldLapel
     unless where_clause.empty?
       sql += " WHERE #{where_clause}"
     end
-    result = raw.async_exec_params(sql, params)
+    result = conn.async_exec_params(sql, params)
     result.cmd_tuples
   end
 
   def self.doc_update_one(conn, collection, filter, update, patterns: nil)
     _validate_identifier(collection)
     table = _doc_table(patterns)
-    raw = _raw_conn(conn)
     where_clause, filter_params, idx = _build_filter(filter, 1)
     update_expr, update_params, _idx = _build_update(update, idx)
     cte_where = where_clause.empty? ? "" : " WHERE #{where_clause}"
@@ -1387,27 +1322,25 @@ module GoldLapel
           ") UPDATE #{table} SET data = #{update_expr} " \
           "FROM target WHERE #{table}._id = target._id"
     params = filter_params + update_params
-    result = raw.async_exec_params(sql, params)
+    result = conn.async_exec_params(sql, params)
     result.cmd_tuples
   end
 
   def self.doc_delete(conn, collection, filter, patterns: nil)
     _validate_identifier(collection)
     table = _doc_table(patterns)
-    raw = _raw_conn(conn)
     where_clause, filter_params, _idx = _build_filter(filter, 1)
     sql = "DELETE FROM #{table}"
     unless where_clause.empty?
       sql += " WHERE #{where_clause}"
     end
-    result = raw.async_exec_params(sql, filter_params)
+    result = conn.async_exec_params(sql, filter_params)
     result.cmd_tuples
   end
 
   def self.doc_delete_one(conn, collection, filter, patterns: nil)
     _validate_identifier(collection)
     table = _doc_table(patterns)
-    raw = _raw_conn(conn)
     where_clause, filter_params, _idx = _build_filter(filter, 1)
     cte_where = where_clause.empty? ? "" : " WHERE #{where_clause}"
     sql = "WITH target AS (" \
@@ -1415,21 +1348,20 @@ module GoldLapel
           "LIMIT 1" \
           ") DELETE FROM #{table} " \
           "USING target WHERE #{table}._id = target._id"
-    result = raw.async_exec_params(sql, filter_params)
+    result = conn.async_exec_params(sql, filter_params)
     result.cmd_tuples
   end
 
   def self.doc_count(conn, collection, filter: nil, patterns: nil)
     _validate_identifier(collection)
     table = _doc_table(patterns)
-    raw = _raw_conn(conn)
     sql = "SELECT COUNT(*) FROM #{table}"
     where_clause, filter_params, _idx = _build_filter(filter, 1)
     if where_clause.empty?
-      result = raw.async_exec(sql)
+      result = conn.async_exec(sql)
     else
       sql += " WHERE #{where_clause}"
-      result = raw.async_exec_params(sql, filter_params)
+      result = conn.async_exec_params(sql, filter_params)
     end
     result[0]["count"].to_i
   end
@@ -1437,7 +1369,6 @@ module GoldLapel
   def self.doc_find_one_and_update(conn, collection, filter, update, patterns: nil)
     _validate_identifier(collection)
     table = _doc_table(patterns)
-    raw = _raw_conn(conn)
     where_clause, filter_params, idx = _build_filter(filter, 1)
     update_expr, update_params, _idx = _build_update(update, idx)
     cte_where = where_clause.empty? ? "" : " WHERE #{where_clause}"
@@ -1448,7 +1379,7 @@ module GoldLapel
           "FROM target WHERE #{table}._id = target._id " \
           "RETURNING #{table}._id, #{table}.data, #{table}.created_at"
     params = filter_params + update_params
-    result = raw.async_exec_params(sql, params)
+    result = conn.async_exec_params(sql, params)
     return nil if result.ntuples.zero?
     row = result[0]
     { "_id" => row["_id"], "data" => JSON.parse(row["data"]), "created_at" => row["created_at"] }
@@ -1457,7 +1388,6 @@ module GoldLapel
   def self.doc_find_one_and_delete(conn, collection, filter, patterns: nil)
     _validate_identifier(collection)
     table = _doc_table(patterns)
-    raw = _raw_conn(conn)
     where_clause, filter_params, _idx = _build_filter(filter, 1)
     cte_where = where_clause.empty? ? "" : " WHERE #{where_clause}"
     sql = "WITH target AS (" \
@@ -1466,7 +1396,7 @@ module GoldLapel
           ") DELETE FROM #{table} " \
           "USING target WHERE #{table}._id = target._id " \
           "RETURNING #{table}._id, #{table}.data, #{table}.created_at"
-    result = raw.async_exec_params(sql, filter_params)
+    result = conn.async_exec_params(sql, filter_params)
     return nil if result.ntuples.zero?
     row = result[0]
     { "_id" => row["_id"], "data" => JSON.parse(row["data"]), "created_at" => row["created_at"] }
@@ -1475,7 +1405,6 @@ module GoldLapel
   def self.doc_distinct(conn, collection, field, filter: nil, patterns: nil)
     _validate_identifier(collection)
     table = _doc_table(patterns)
-    raw = _raw_conn(conn)
     field_expr = _field_path(field)
     sql = "SELECT DISTINCT #{field_expr} AS val FROM #{table}"
     params = []
@@ -1487,18 +1416,17 @@ module GoldLapel
       params.concat(filter_params)
     end
     sql += " WHERE #{where_parts.join(' AND ')}"
-    result = raw.async_exec_params(sql, params)
+    result = conn.async_exec_params(sql, params)
     result.map { |row| row["val"] }
   end
 
   def self.doc_create_index(conn, collection, keys: nil, patterns: nil)
     _validate_identifier(collection)
     table = _doc_table(patterns)
-    raw = _raw_conn(conn)
     bare = table.split(".").last
     if keys.nil?
       idx_name = "#{bare}_data_gin_idx"
-      raw.async_exec("CREATE INDEX IF NOT EXISTS #{idx_name} " \
+      conn.async_exec("CREATE INDEX IF NOT EXISTS #{idx_name} " \
                "ON #{table} USING GIN (data)")
     else
       key_names = []
@@ -1511,7 +1439,7 @@ module GoldLapel
         exprs << "(data->>'#{key}')"
       end
       idx_name = "#{bare}_#{key_names.join('_')}_idx"
-      raw.async_exec("CREATE INDEX IF NOT EXISTS #{idx_name} " \
+      conn.async_exec("CREATE INDEX IF NOT EXISTS #{idx_name} " \
                "ON #{table} (#{exprs.join(', ')})")
     end
     nil
@@ -1545,7 +1473,6 @@ module GoldLapel
     return [] if pipeline.empty?
 
     table = _doc_table(patterns)
-    raw = _raw_conn(conn)
     params = []
     idx = 1
     lookup_tables ||= {}
@@ -1806,7 +1733,7 @@ module GoldLapel
       params << skip_val
     end
 
-    result = raw.async_exec_params(sql, params)
+    result = conn.async_exec_params(sql, params)
     result.map { |row| row.transform_keys(&:to_s) }
   end
 
@@ -1815,11 +1742,10 @@ module GoldLapel
   def self.doc_watch(conn, collection, patterns: nil, &block)
     _validate_identifier(collection)
     table = _doc_table(patterns)
-    raw = _raw_conn(conn)
     channel = "_gl_watch_#{collection}"
     fn_name = "_gl_notify_#{collection}"
 
-    raw.async_exec(
+    conn.async_exec(
       "CREATE OR REPLACE FUNCTION #{fn_name}() RETURNS trigger AS $$ " \
       "BEGIN " \
         "PERFORM pg_notify('#{channel}', json_build_object(" \
@@ -1835,13 +1761,13 @@ module GoldLapel
     # where a DROP + CREATE pair could have two concurrent doc_watch calls
     # replace each other's triggers mid-flight and end up with a partially
     # dropped one. GL targets PG14+ across the product, so this is safe.
-    raw.async_exec(
+    conn.async_exec(
       "CREATE OR REPLACE TRIGGER #{fn_name}_trg " \
       "AFTER INSERT OR UPDATE OR DELETE ON #{table} " \
       "FOR EACH ROW EXECUTE FUNCTION #{fn_name}()"
     )
 
-    listen_conn = PG.connect(_listener_conninfo(raw))
+    listen_conn = PG.connect(_listener_conninfo(conn))
     listen_conn.async_exec("LISTEN #{channel}")
     loop do
       listen_conn.wait_for_notify(5) do |_ch, _pid, payload|
@@ -1857,10 +1783,9 @@ module GoldLapel
   def self.doc_unwatch(conn, collection, patterns: nil)
     _validate_identifier(collection)
     table = _doc_table(patterns)
-    raw = _raw_conn(conn)
     fn_name = "_gl_notify_#{collection}"
-    raw.async_exec("DROP TRIGGER IF EXISTS #{fn_name}_trg ON #{table}")
-    raw.async_exec("DROP FUNCTION IF EXISTS #{fn_name}()")
+    conn.async_exec("DROP TRIGGER IF EXISTS #{fn_name}_trg ON #{table}")
+    conn.async_exec("DROP FUNCTION IF EXISTS #{fn_name}()")
   end
 
   # --- TTL indexes (doc_create_ttl_index / doc_remove_ttl_index) ---
@@ -1873,10 +1798,9 @@ module GoldLapel
       raise ArgumentError, "Invalid field key: #{field}"
     end
     table = _doc_table(patterns)
-    raw = _raw_conn(conn)
     fn_name = "_gl_ttl_#{collection}"
 
-    raw.async_exec(
+    conn.async_exec(
       "CREATE OR REPLACE FUNCTION #{fn_name}() RETURNS trigger AS $$ " \
       "BEGIN " \
         "DELETE FROM #{table} " \
@@ -1888,7 +1812,7 @@ module GoldLapel
 
     # CREATE OR REPLACE TRIGGER (Postgres 14+): atomic, avoids the same
     # race documented in doc_watch.
-    raw.async_exec(
+    conn.async_exec(
       "CREATE OR REPLACE TRIGGER #{fn_name}_trg " \
       "BEFORE INSERT ON #{table} " \
       "FOR EACH STATEMENT EXECUTE FUNCTION #{fn_name}()"
@@ -1898,10 +1822,9 @@ module GoldLapel
   def self.doc_remove_ttl_index(conn, collection, patterns: nil)
     _validate_identifier(collection)
     table = _doc_table(patterns)
-    raw = _raw_conn(conn)
     fn_name = "_gl_ttl_#{collection}"
-    raw.async_exec("DROP TRIGGER IF EXISTS #{fn_name}_trg ON #{table}")
-    raw.async_exec("DROP FUNCTION IF EXISTS #{fn_name}()")
+    conn.async_exec("DROP TRIGGER IF EXISTS #{fn_name}_trg ON #{table}")
+    conn.async_exec("DROP FUNCTION IF EXISTS #{fn_name}()")
   end
 
   # --- Capped collections (doc_create_capped / doc_remove_cap) ---
@@ -1909,11 +1832,10 @@ module GoldLapel
   def self.doc_create_capped(conn, collection, max:, patterns: nil)
     _validate_identifier(collection)
     table = _doc_table(patterns)
-    raw = _raw_conn(conn)
 
     fn_name = "_gl_cap_#{collection}"
 
-    raw.async_exec(
+    conn.async_exec(
       "CREATE OR REPLACE FUNCTION #{fn_name}() RETURNS trigger AS $$ " \
       "BEGIN " \
         "DELETE FROM #{table} WHERE _id IN (" \
@@ -1927,7 +1849,7 @@ module GoldLapel
 
     # CREATE OR REPLACE TRIGGER (Postgres 14+): atomic, avoids the same
     # race documented in doc_watch.
-    raw.async_exec(
+    conn.async_exec(
       "CREATE OR REPLACE TRIGGER #{fn_name}_trg " \
       "AFTER INSERT ON #{table} " \
       "FOR EACH STATEMENT EXECUTE FUNCTION #{fn_name}()"
@@ -1937,10 +1859,9 @@ module GoldLapel
   def self.doc_remove_cap(conn, collection, patterns: nil)
     _validate_identifier(collection)
     table = _doc_table(patterns)
-    raw = _raw_conn(conn)
     fn_name = "_gl_cap_#{collection}"
-    raw.async_exec("DROP TRIGGER IF EXISTS #{fn_name}_trg ON #{table}")
-    raw.async_exec("DROP FUNCTION IF EXISTS #{fn_name}()")
+    conn.async_exec("DROP TRIGGER IF EXISTS #{fn_name}_trg ON #{table}")
+    conn.async_exec("DROP FUNCTION IF EXISTS #{fn_name}()")
   end
 
   # No-op shim — see goldlapel/utils.rb#doc_create_collection.
@@ -1960,11 +1881,6 @@ module GoldLapel
     end
   end
   private_class_method :_validate_identifier
-
-  def self._raw_conn(conn)
-    conn.is_a?(GoldLapel::CachedConnection) ? conn.send(:instance_variable_get, :@real) : conn
-  end
-  private_class_method :_raw_conn
 
   # `PG::Connection#conninfo_hash` on pg 1.6 returns a dense hash including
   # unset keys as `nil` (e.g. `:service => nil`). Passing that straight to

@@ -1,16 +1,13 @@
 # frozen_string_literal: true
 
 # Regression test: Instance#start! must clean up its subprocess if the eager
-# PG.connect (or subsequent wrap step) raises after the subprocess has been
-# spawned.
+# PG.connect raises after the subprocess has been spawned.
 #
 # This was a real bug caught in review: the proxy.start subprocess spawned
 # successfully and bound its port, but then PG.connect failed (bad creds,
 # network issue, etc.) and the subprocess kept running indefinitely.
 
 require "minitest/autorun"
-require_relative "../lib/goldlapel/cache"
-require_relative "../lib/goldlapel/wrap"
 require_relative "../lib/goldlapel/utils"
 require_relative "../lib/goldlapel/proxy"
 require_relative "../lib/goldlapel/instance"
@@ -32,22 +29,19 @@ end
 # whether the subprocess was "spawned" and "stopped", without running a
 # real binary.
 class FakeProxy
-  attr_accessor :wrapped_conn
-  attr_reader :upstream, :proxy_port, :invalidation_port, :start_calls, :stop_calls
+  attr_reader :upstream, :proxy_port, :start_calls, :stop_calls
 
-  def initialize(upstream, proxy_port: nil, dashboard_port: nil, invalidation_port: nil,
+  def initialize(upstream, proxy_port: nil, dashboard_port: nil,
                  log_level: nil, mode: nil, license: nil, client: nil, config_file: nil,
                  config: {}, extra_args: [], silent: false, mesh: false, mesh_tag: nil,
-                 disable_proxy_cache: false, disable_matviews: false,
-                 disable_sqloptimize: false, disable_auto_indexes: false)
+                 disable_proxy_cache: false, disable_sqloptimize: false,
+                 disable_auto_indexes: false)
     @upstream = upstream
     @proxy_port = proxy_port || GoldLapel::DEFAULT_PROXY_PORT
-    @invalidation_port = invalidation_port || (@proxy_port + 2)
     @silent = silent
     @mesh = mesh
     @mesh_tag = mesh_tag
     @disable_proxy_cache = disable_proxy_cache
-    @disable_matviews = disable_matviews
     @disable_sqloptimize = disable_sqloptimize
     @disable_auto_indexes = disable_auto_indexes
     @running = false
@@ -156,29 +150,18 @@ class TestSubprocessCleanupOnConnectFailure < Minitest::Test
     assert_equal 1, proxy.stop_calls, "proxy must be stopped when LoadError is raised"
   end
 
-  def test_subprocess_stopped_when_wrap_raises
-    # Simulate PG.connect succeeding but GoldLapel.wrap failing. The wrap
-    # failure should still trigger subprocess cleanup AND close the raw
-    # PG connection (which the wrap never took ownership of).
+  def test_conn_is_the_plain_pg_connection
+    # `gl.conn` hands back exactly what PG.connect returned — no wrapper
+    # object in between.
     fake_raw = Object.new
-    close_called = false
-    fake_raw.define_singleton_method(:close) { close_called = true }
+    fake_raw.define_singleton_method(:close) {}
 
-    with_pg_connect(->(*) { fake_raw }) do
-      original_wrap = GoldLapel.method(:wrap)
-      GoldLapel.define_singleton_method(:wrap) { |*, **| raise RuntimeError, "wrap kaboom" }
-      begin
-        assert_raises(RuntimeError) do
-          GoldLapel::Instance.new("postgresql://user:pass@host/db")
-        end
-      ensure
-        GoldLapel.define_singleton_method(:wrap, &original_wrap)
-      end
+    gl = with_pg_connect(->(*) { fake_raw }) do
+      GoldLapel::Instance.new("postgresql://user:pass@host/db")
     end
 
-    proxy = @fake_proxy_class.instances.first
-    assert_equal 1, proxy.stop_calls, "proxy must be stopped when wrap raises"
-    assert close_called, "raw PG connection must be closed when wrap raises"
+    assert_same fake_raw, gl.conn
+    gl.stop
   end
 
   def test_internal_state_cleared_after_failure

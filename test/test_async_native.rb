@@ -69,6 +69,26 @@ class TestAsyncNativeIntegration < Minitest::Test
     @collection = "_gl_async_native_test_#{SecureRandom.hex(4)}"
     @counter_table = "_gl_async_native_counter_#{SecureRandom.hex(4)}"
     @watch_collection = "_gl_async_native_watch_#{SecureRandom.hex(4)}"
+    create_doc_tables if @db_reachable
+  end
+
+  # These tests call the util-level doc_* functions straight against Postgres.
+  # In production the proxy's DDL API creates a collection's table; here it's
+  # created by hand in the same shape (see the proxy's schema/v1/doc_store.rs).
+  def create_doc_tables
+    conn = PG.connect(DATABASE_URL)
+    [@collection, @watch_collection].each do |tbl|
+      conn.exec(<<~SQL)
+        CREATE TABLE #{tbl} (
+          _id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          data JSONB NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      SQL
+    end
+  ensure
+    conn&.close
   end
 
   def teardown

@@ -3,71 +3,37 @@ require "minitest/autorun"
 # Stub goldlapel gem BEFORE requiring rails.rb (which does `require "goldlapel"`).
 #
 # We only define the module skeleton + helpers that other test files don't
-# provide (reset!, WrappedConnection, start_calls/wrap_calls accessors).
-# The `start_proxy` and `wrap` stubs that record calls are installed per-test
-# in `setup` and restored in `teardown` — defining them at file-load time
-# leaks into every other test file loaded in the same process.
+# provide (reset!, start_calls accessor). The `start_proxy` stub that records
+# calls is installed per-test in `setup` and restored in `teardown` — defining
+# it at file-load time leaks into every other test file loaded in the same
+# process.
 module GoldLapel
   DEFAULT_PROXY_PORT = 7932 unless defined?(DEFAULT_PROXY_PORT)
 
   @start_calls = []
-  @wrap_calls = []
 
   def self.start_calls
     @start_calls
   end
 
-  def self.wrap_calls
-    @wrap_calls
-  end
-
   def self.reset!
     @start_calls = []
-    @wrap_calls = []
-  end
-
-  unless defined?(WrappedConnection)
-    class WrappedConnection
-      attr_reader :real_conn, :invalidation_port
-
-      def initialize(real_conn, invalidation_port)
-        @real_conn = real_conn
-        @invalidation_port = invalidation_port
-      end
-    end
   end
 end
 $LOADED_FEATURES << "goldlapel.rb"
 
-# Helpers to install/restore the `start_proxy` + `wrap` stubs. Called from
-# each Rails test class's `setup` / `teardown` so the stubs only apply while
-# a Rails test is actually running — never across unrelated test files.
+# Helpers to install/restore the `start_proxy` stub. Called from each Rails
+# test class's `setup` / `teardown` so the stub only applies while a Rails
+# test is actually running — never across unrelated test files.
 module RailsTestGoldLapelStub
   def self.install
     verbose_was = $VERBOSE
     $VERBOSE = nil
 
     @original_start_proxy = GoldLapel.method(:start_proxy) if GoldLapel.respond_to?(:start_proxy)
-    @original_wrap = GoldLapel.method(:wrap) if GoldLapel.respond_to?(:wrap)
 
     GoldLapel.define_singleton_method(:start_proxy) do |upstream, **kwargs|
       @start_calls << { upstream: upstream, **kwargs }
-    end
-    GoldLapel.define_singleton_method(:wrap) do |
-      conn,
-      invalidation_port: nil,
-      disable_native_cache: false,
-      aggressive_verify: :auto,
-      upstream: nil
-    |
-      @wrap_calls << {
-        conn: conn,
-        invalidation_port: invalidation_port,
-        disable_native_cache: disable_native_cache,
-        aggressive_verify: aggressive_verify,
-        upstream: upstream,
-      }
-      GoldLapel::WrappedConnection.new(conn, invalidation_port)
     end
   ensure
     $VERBOSE = verbose_was
@@ -84,34 +50,18 @@ module RailsTestGoldLapelStub
       GoldLapel.singleton_class.send(:remove_method, :start_proxy)
     end
 
-    if @original_wrap
-      GoldLapel.define_singleton_method(:wrap, &@original_wrap)
-    elsif GoldLapel.singleton_class.method_defined?(:wrap) ||
-          GoldLapel.singleton_class.private_method_defined?(:wrap)
-      GoldLapel.singleton_class.send(:remove_method, :wrap)
-    end
-
     @original_start_proxy = nil
-    @original_wrap = nil
   ensure
     $VERBOSE = verbose_was
   end
 
-  # Per-test helpers to override the recording stub (e.g. to make start_proxy
+  # Per-test helper to override the recording stub (e.g. to make start_proxy
   # raise). The install/restore pair in setup/teardown reinstates the recording
   # stub between tests, so no ensure block is needed at the call site.
   def self.override_start_proxy(&block)
     verbose_was = $VERBOSE
     $VERBOSE = nil
     GoldLapel.define_singleton_method(:start_proxy, &block)
-  ensure
-    $VERBOSE = verbose_was
-  end
-
-  def self.override_wrap(&block)
-    verbose_was = $VERBOSE
-    $VERBOSE = nil
-    GoldLapel.define_singleton_method(:wrap, &block)
   ensure
     $VERBOSE = verbose_was
   end
@@ -432,10 +382,9 @@ class TestConnect < Minitest::Test
   #
   # `database.yml`'s `goldlapel:` block exposes the canonical top-
   # level surface (proxy_port, dashboard_port, ..., silent, mesh,
-  # mesh_tag, disable_proxy_cache, disable_matviews,
-  # disable_sqloptimize, disable_auto_indexes, disable_native_cache).
-  # Each kwarg must thread from configuration through to
-  # `start_proxy` (or `wrap`, for `disable_native_cache`).
+  # mesh_tag, disable_proxy_cache, disable_sqloptimize,
+  # disable_auto_indexes). Each kwarg must thread from configuration
+  # through to `start_proxy`.
 
   def test_silent_forwarded_to_start_proxy
     adapter = FakeAdapter.new(
@@ -501,18 +450,6 @@ class TestConnect < Minitest::Test
     assert_equal true, GoldLapel.start_calls.first[:disable_proxy_cache]
   end
 
-  def test_disable_matviews_forwarded
-    adapter = FakeAdapter.new(
-      config: { goldlapel: { disable_matviews: true } },
-      connection_parameters: {
-        host: "db.example.com", port: "5432",
-        user: "u", password: "p", dbname: "mydb"
-      }
-    )
-    adapter.send(:connect)
-    assert_equal true, GoldLapel.start_calls.first[:disable_matviews]
-  end
-
   def test_disable_sqloptimize_forwarded
     adapter = FakeAdapter.new(
       config: { goldlapel: { disable_sqloptimize: true } },
@@ -548,7 +485,6 @@ class TestConnect < Minitest::Test
     adapter.send(:connect)
     call = GoldLapel.start_calls.first
     assert_equal false, call[:disable_proxy_cache]
-    assert_equal false, call[:disable_matviews]
     assert_equal false, call[:disable_sqloptimize]
     assert_equal false, call[:disable_auto_indexes]
   end
@@ -563,7 +499,6 @@ class TestConnect < Minitest::Test
           "mesh" => true,
           "mesh_tag" => "node-a",
           "disable_proxy_cache" => true,
-          "disable_matviews" => true,
           "disable_sqloptimize" => true,
           "disable_auto_indexes" => true,
         }
@@ -579,7 +514,6 @@ class TestConnect < Minitest::Test
     assert_equal true, call[:mesh]
     assert_equal "node-a", call[:mesh_tag]
     assert_equal true, call[:disable_proxy_cache]
-    assert_equal true, call[:disable_matviews]
     assert_equal true, call[:disable_sqloptimize]
     assert_equal true, call[:disable_auto_indexes]
   end
@@ -613,9 +547,10 @@ class TestConnect < Minitest::Test
 end
 
 # ---------------------------------------------------------------------------
-# L1 native cache wrapping tests
+# Connection handling — Rails talks to the proxy over its own plain
+# PG::Connection; the railtie only rewrites host/port.
 # ---------------------------------------------------------------------------
-class TestL1CacheWrapping < Minitest::Test
+class TestPlainConnection < Minitest::Test
   def setup
     RailsTestGoldLapelStub.install
     GoldLapel.reset!
@@ -625,7 +560,7 @@ class TestL1CacheWrapping < Minitest::Test
     RailsTestGoldLapelStub.restore
   end
 
-  def test_connect_wraps_raw_connection
+  def test_raw_connection_is_left_unwrapped
     adapter = FakeAdapter.new(
       config: {},
       connection_parameters: {
@@ -636,311 +571,32 @@ class TestL1CacheWrapping < Minitest::Test
 
     adapter.send(:connect)
 
-    assert_equal 1, GoldLapel.wrap_calls.length
-    assert_kind_of GoldLapel::WrappedConnection, adapter.raw_connection
-  end
-
-  def test_wrap_receives_raw_pg_connection
-    adapter = FakeAdapter.new(
-      config: {},
-      connection_parameters: {
-        host: "db.example.com", port: "5432",
-        user: "u", password: "p", dbname: "mydb"
-      }
-    )
-
-    adapter.send(:connect)
-
-    call = GoldLapel.wrap_calls.first
-    assert_kind_of FakePgConnection, call[:conn]
-  end
-
-  def test_default_invalidation_port_is_proxy_plus_two
-    adapter = FakeAdapter.new(
-      config: {},
-      connection_parameters: {
-        host: "db.example.com", port: "5432",
-        user: "u", password: "p", dbname: "mydb"
-      }
-    )
-
-    adapter.send(:connect)
-
-    call = GoldLapel.wrap_calls.first
-    assert_equal GoldLapel::DEFAULT_PROXY_PORT + 2, call[:invalidation_port]
-  end
-
-  def test_custom_invalidation_port_from_config
-    adapter = FakeAdapter.new(
-      config: { goldlapel: { invalidation_port: 8888 } },
-      connection_parameters: {
-        host: "db.example.com", port: "5432",
-        user: "u", password: "p", dbname: "mydb"
-      }
-    )
-
-    adapter.send(:connect)
-
-    call = GoldLapel.wrap_calls.first
-    assert_equal 8888, call[:invalidation_port]
-  end
-
-  def test_invalidation_port_derives_from_custom_proxy_port
-    adapter = FakeAdapter.new(
-      config: { goldlapel: { proxy_port: 9000 } },
-      connection_parameters: {
-        host: "db.example.com", port: "5432",
-        user: "u", password: "p", dbname: "mydb"
-      }
-    )
-
-    adapter.send(:connect)
-
-    call = GoldLapel.wrap_calls.first
-    assert_equal 9002, call[:invalidation_port]
-  end
-
-  def test_invalidation_port_string_key_from_yaml
-    adapter = FakeAdapter.new(
-      config: { goldlapel: { "invalidation_port" => 7777 } },
-      connection_parameters: {
-        host: "db.example.com", port: "5432",
-        user: "u", password: "p", dbname: "mydb"
-      }
-    )
-
-    adapter.send(:connect)
-
-    call = GoldLapel.wrap_calls.first
-    assert_equal 7777, call[:invalidation_port]
-  end
-
-  def test_reconnect_wraps_each_time
-    adapter = FakeAdapter.new(
-      config: {},
-      connection_parameters: {
-        host: "db.example.com", port: "5432",
-        user: "u", password: "p", dbname: "mydb"
-      }
-    )
-
-    adapter.send(:connect)
-    adapter.send(:connect)
-
-    # Proxy started once, but wrap called twice (each connect gets a new PG connection)
-    assert_equal 1, GoldLapel.start_calls.length
-    assert_equal 2, GoldLapel.wrap_calls.length
-  end
-
-  def test_disable_native_cache_forwarded_to_wrap
-    adapter = FakeAdapter.new(
-      config: { goldlapel: { disable_native_cache: true } },
-      connection_parameters: {
-        host: "db.example.com", port: "5432",
-        user: "u", password: "p", dbname: "mydb"
-      }
-    )
-    adapter.send(:connect)
-    call = GoldLapel.wrap_calls.first
-    assert_equal true, call[:disable_native_cache]
-  end
-
-  def test_disable_native_cache_defaults_to_false
-    adapter = FakeAdapter.new(
-      config: {},
-      connection_parameters: {
-        host: "db.example.com", port: "5432",
-        user: "u", password: "p", dbname: "mydb"
-      }
-    )
-    adapter.send(:connect)
-    call = GoldLapel.wrap_calls.first
-    assert_equal false, call[:disable_native_cache]
-  end
-
-  def test_disable_native_cache_string_key_from_yaml
-    adapter = FakeAdapter.new(
-      config: { goldlapel: { "disable_native_cache" => true } },
-      connection_parameters: {
-        host: "db.example.com", port: "5432",
-        user: "u", password: "p", dbname: "mydb"
-      }
-    )
-    adapter.send(:connect)
-    call = GoldLapel.wrap_calls.first
-    assert_equal true, call[:disable_native_cache]
-  end
-
-  def test_no_wrap_on_fallback
-    RailsTestGoldLapelStub.override_start_proxy do |upstream, **kwargs|
-      raise RuntimeError, "binary not found"
-    end
-
-    adapter = FakeAdapter.new(
-      config: {},
-      connection_parameters: {
-        host: "db.example.com", port: "5432",
-        user: "u", password: "p", dbname: "mydb"
-      }
-    )
-
-    adapter.send(:connect)
-
-    # Wrap should NOT be called when proxy failed to start
-    assert_equal 0, GoldLapel.wrap_calls.length
-    # raw_connection should be the unwrapped FakePgConnection
     assert_kind_of FakePgConnection, adapter.raw_connection
   end
 
-  def test_graceful_fallback_on_wrap_failure
-    RailsTestGoldLapelStub.override_wrap do |
-      conn,
-      invalidation_port: nil,
-      disable_native_cache: false,
-      aggressive_verify: :auto,
-      upstream: nil
-    |
-      @wrap_calls << {
-        conn: conn,
-        invalidation_port: invalidation_port,
-        disable_native_cache: disable_native_cache,
-        aggressive_verify: aggressive_verify,
-        upstream: upstream,
-      }
-      raise RuntimeError, "wrap exploded"
-    end
-
+  def test_removed_cache_keys_not_forwarded
+    # The in-process cache and invalidation port are gone; leftover keys
+    # in an old database.yml are ignored rather than passed to the proxy.
     adapter = FakeAdapter.new(
-      config: {},
+      config: {
+        goldlapel: {
+          invalidation_port: 7934,
+          disable_native_cache: true,
+          aggressive_verify: :off,
+          disable_matviews: true,
+        }
+      },
       connection_parameters: {
         host: "db.example.com", port: "5432",
         user: "u", password: "p", dbname: "mydb"
       }
     )
 
-    # Should not raise
     adapter.send(:connect)
 
-    # raw_connection should remain the unwrapped FakePgConnection
-    assert_kind_of FakePgConnection, adapter.raw_connection
-
-    # Warning logged
-    assert Rails.logger.warnings.any? { |w| w.include?("L1 cache wrap failed") }
-  end
-end
-
-# ---------------------------------------------------------------------------
-# Pool checkin DISCARD ALL hook (RLS hardening — concern 4)
-#
-# AR's `ConnectionPool#checkin` calls `expire` on the adapter. Our prepend
-# fires `discard_all_on_release!` on the wrapped connection so the unsafe-
-# GUC state and any server-side session GUCs are reset before the next
-# request checks the connection back out.
-# ---------------------------------------------------------------------------
-
-# A fake raw connection that records discard calls and exposes the
-# `discard_all_on_release!` API the railtie hook expects.
-class FakeWrappedConn
-  attr_reader :discard_calls
-
-  def initialize
-    @discard_calls = 0
-  end
-
-  def discard_all_on_release!
-    @discard_calls += 1
-    true
-  end
-end
-
-# Adapter double that does NOT use `wrap` — exposes the hook directly so
-# we can assert behaviour without spinning up the full proxy. The
-# `super_expire` flag captures that AR's underlying `expire` was called
-# afterward (we don't actually have an AR superclass here, so we mock
-# it as a no-op via the parent module).
-module FakeAdapterParent
-  def expire
-    @parent_expire_called = (@parent_expire_called || 0) + 1
-    nil
-  end
-end
-
-class FakeAdapterWithExpire
-  include FakeAdapterParent
-  prepend GoldLapel::Rails::PostgreSQLExtension
-
-  attr_accessor :raw_connection
-  attr_reader :parent_expire_called
-
-  def initialize(raw)
-    @raw_connection = raw
-    @parent_expire_called = 0
-  end
-end
-
-class TestPoolCheckinDiscardHook < Minitest::Test
-  def setup
-    Rails.logger.instance_variable_set(:@warnings, [])
-  end
-
-  def test_expire_calls_discard_all_on_release
-    raw = FakeWrappedConn.new
-    adapter = FakeAdapterWithExpire.new(raw)
-    adapter.expire
-    assert_equal 1, raw.discard_calls,
-      "AR pool checkin must invoke wrapper's DISCARD ALL hook"
-  end
-
-  def test_expire_calls_super
-    # The railtie's expire override must always chain to AR's
-    # underlying expire — otherwise the pool's own checkin
-    # bookkeeping breaks.
-    raw = FakeWrappedConn.new
-    adapter = FakeAdapterWithExpire.new(raw)
-    adapter.expire
-    assert_equal 1, adapter.parent_expire_called
-  end
-
-  def test_expire_skips_discard_for_non_wrapped_conn
-    # Fallback path — `wrap` failed at connect time, raw_connection
-    # is a plain pg conn that doesn't implement
-    # `discard_all_on_release!`. Hook must be a no-op there, not
-    # raise NoMethodError into AR's pool checkin.
-    raw = FakePgConnection.new
-    adapter = FakeAdapterWithExpire.new(raw)
-    adapter.expire  # must not raise
-    assert_equal 1, adapter.parent_expire_called
-  end
-
-  def test_expire_swallows_errors_from_discard_hook
-    # If the wrapper's DISCARD raises (broken pipe / closed conn),
-    # don't propagate into AR's pool. Log a warning and chain to
-    # super so the pool's bookkeeping still runs.
-    raw = Class.new do
-      def discard_all_on_release!
-        raise RuntimeError, "broken pipe"
-      end
-    end.new
-    adapter = FakeAdapterWithExpire.new(raw)
-    adapter.expire  # must not raise
-    assert_equal 1, adapter.parent_expire_called
-    assert Rails.logger.warnings.any? { |w| w.include?("DISCARD ALL on pool checkin failed") }
-  end
-
-  def test_expire_with_nil_raw_connection
-    # An adapter that never opened a connection (or had it
-    # disconnected) has nil raw_connection. Hook must tolerate
-    # that — `nil.respond_to?(...)` returns false.
-    adapter = FakeAdapterWithExpire.new(nil)
-    adapter.expire
-    assert_equal 1, adapter.parent_expire_called
-  end
-
-  def test_expire_called_repeatedly_is_safe
-    raw = FakeWrappedConn.new
-    adapter = FakeAdapterWithExpire.new(raw)
-    3.times { adapter.expire }
-    assert_equal 3, raw.discard_calls
-    assert_equal 3, adapter.parent_expire_called
+    call = GoldLapel.start_calls.first
+    %i[invalidation_port disable_native_cache aggressive_verify disable_matviews].each do |key|
+      refute call.key?(key), "#{key} must not be forwarded to start_proxy"
+    end
   end
 end

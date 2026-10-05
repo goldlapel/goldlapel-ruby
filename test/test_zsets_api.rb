@@ -12,8 +12,6 @@
 #     proxy's `$1, $2, $3` template.
 
 require "minitest/autorun"
-require_relative "../lib/goldlapel/cache"
-require_relative "../lib/goldlapel/wrap"
 require_relative "../lib/goldlapel/utils"
 require_relative "../lib/goldlapel/proxy"
 require_relative "../lib/goldlapel/streams"
@@ -88,7 +86,6 @@ def make_zsets_api_inst
   inst = GoldLapel::Instance.allocate
   inst.instance_variable_set(:@upstream, "postgresql://localhost/test")
   inst.instance_variable_set(:@internal_conn, conn)
-  inst.instance_variable_set(:@wrapped_conn, conn)
   inst.instance_variable_set(:@proxy, nil)
   inst.instance_variable_set(:@fiber_key, :"__goldlapel_conn_#{inst.object_id}")
   zsets = GoldLapel::ZsetsAPI.new(inst)

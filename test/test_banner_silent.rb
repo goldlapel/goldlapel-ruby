@@ -298,17 +298,15 @@ class TestMeshKwargs < Minitest::Test
 end
 
 class TestDisableTopLevelKwargs < Minitest::Test
-  # The four cache-/optimization-disable flags
-  # (disable_proxy_cache, disable_matviews, disable_sqloptimize,
-  # disable_auto_indexes) are top-level canonical-surface kwargs. Each
-  # maps 1:1 to a CLI flag on the spawned proxy binary. None of them
-  # belong in the structured `config:` map — passing them through there
-  # raises ArgumentError. (Atomic break for `disable_proxy_cache` and
-  # `disable_matviews`, which used to live in the config map.)
+  # The three cache-/optimization-disable flags
+  # (disable_proxy_cache, disable_sqloptimize, disable_auto_indexes) are
+  # top-level canonical-surface kwargs. Each maps 1:1 to a CLI flag on the
+  # spawned proxy binary. None of them belong in the structured `config:`
+  # map — passing them through there raises ArgumentError. (Atomic break
+  # for `disable_proxy_cache`, which used to live in the config map.)
 
   DISABLE_FLAGS = {
     disable_proxy_cache: "--disable-proxy-cache",
-    disable_matviews: "--disable-matviews",
     disable_sqloptimize: "--disable-sqloptimize",
     disable_auto_indexes: "--disable-auto-indexes",
   }.freeze
@@ -316,7 +314,6 @@ class TestDisableTopLevelKwargs < Minitest::Test
   def test_defaults_are_false
     proxy = GoldLapel::Proxy.new("postgresql://user@host/db")
     assert_equal false, proxy.disable_proxy_cache
-    assert_equal false, proxy.disable_matviews
     assert_equal false, proxy.disable_sqloptimize
     assert_equal false, proxy.disable_auto_indexes
   end
@@ -325,12 +322,10 @@ class TestDisableTopLevelKwargs < Minitest::Test
     proxy = GoldLapel::Proxy.new(
       "postgresql://user@host/db",
       disable_proxy_cache: true,
-      disable_matviews: true,
       disable_sqloptimize: true,
       disable_auto_indexes: true,
     )
     assert_equal true, proxy.disable_proxy_cache
-    assert_equal true, proxy.disable_matviews
     assert_equal true, proxy.disable_sqloptimize
     assert_equal true, proxy.disable_auto_indexes
   end
@@ -339,12 +334,10 @@ class TestDisableTopLevelKwargs < Minitest::Test
     proxy = GoldLapel::Proxy.new(
       "postgresql://user@host/db",
       disable_proxy_cache: "yes",
-      disable_matviews: 1,
       disable_sqloptimize: Object.new,
       disable_auto_indexes: "no", # any truthy string normalizes to true
     )
     assert_equal true, proxy.disable_proxy_cache
-    assert_equal true, proxy.disable_matviews
     assert_equal true, proxy.disable_sqloptimize
     assert_equal true, proxy.disable_auto_indexes
   end
@@ -376,7 +369,6 @@ class TestDisableTopLevelKwargs < Minitest::Test
       BannerTestSupport.start_proxy(
         proxy_port: 17946,
         disable_proxy_cache: false,
-        disable_matviews: false,
         disable_sqloptimize: false,
         disable_auto_indexes: false,
         silent: true,
@@ -387,12 +379,11 @@ class TestDisableTopLevelKwargs < Minitest::Test
     end
   end
 
-  def test_all_four_flags_emitted_together
+  def test_all_three_flags_emitted_together
     BannerTestSupport.with_stubbed_spawn do |recorded|
       BannerTestSupport.start_proxy(
         proxy_port: 17947,
         disable_proxy_cache: true,
-        disable_matviews: true,
         disable_sqloptimize: true,
         disable_auto_indexes: true,
         silent: true,
@@ -411,11 +402,10 @@ class TestDisableTopLevelKwargs < Minitest::Test
   end
 
   def test_in_config_map_rejected
-    # Atomic break: `disable_proxy_cache` and `disable_matviews` used to be
-    # valid `config:` keys. After promotion to top-level kwargs they must
-    # raise on the config-map path instead of silently turning into a CLI
-    # flag (otherwise users have two ways to set them and we have a config
-    # surface drift).
+    # Atomic break: `disable_proxy_cache` used to be a valid `config:` key.
+    # After promotion to a top-level kwarg it must raise on the config-map
+    # path instead of silently turning into a CLI flag (otherwise users have
+    # two ways to set it and we have a config surface drift).
     DISABLE_FLAGS.each_key do |kwarg|
       assert_raises(ArgumentError, "passing #{kwarg} via config: must raise") do
         GoldLapel::Proxy.config_to_args({ kwarg => true })
@@ -430,12 +420,10 @@ class TestDisableTopLevelKwargs < Minitest::Test
       "postgresql://user:pass@host/db",
       eager_connect: false,
       disable_proxy_cache: true,
-      disable_matviews: true,
       disable_sqloptimize: true,
       disable_auto_indexes: true,
     )
     assert_equal true, inst.instance_variable_get(:@disable_proxy_cache)
-    assert_equal true, inst.instance_variable_get(:@disable_matviews)
     assert_equal true, inst.instance_variable_get(:@disable_sqloptimize)
     assert_equal true, inst.instance_variable_get(:@disable_auto_indexes)
   end
@@ -445,7 +433,6 @@ class TestDisableTopLevelKwargs < Minitest::Test
       "postgresql://user:pass@host/db", eager_connect: false,
     )
     assert_equal false, inst.instance_variable_get(:@disable_proxy_cache)
-    assert_equal false, inst.instance_variable_get(:@disable_matviews)
     assert_equal false, inst.instance_variable_get(:@disable_sqloptimize)
     assert_equal false, inst.instance_variable_get(:@disable_auto_indexes)
   end

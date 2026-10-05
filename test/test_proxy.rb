@@ -49,8 +49,7 @@ end
 
 class TestMakeProxyUrl < Minitest::Test
   # The wrapper appends `application_name=goldlapel:ruby:<version>` to the
-  # rewritten URL so the proxy can classify wrapper-vs-raw traffic and skip
-  # L2 result cache for wrappers (they have their own L1).
+  # rewritten URL so Postgres-side tooling can see wrapper traffic.
   APP_NAME_SUFFIX = "application_name=#{GoldLapel::Proxy.application_name_marker}"
 
   def setup
@@ -148,9 +147,9 @@ end
 
 
 class TestApplicationNameMarker < Minitest::Test
-  # L2-router architecture: wrappers identify themselves to the proxy via PG
-  # `application_name` so the proxy can gate L2 result cache (wrapper has L1;
-  # raw clients don't).
+  # Wrappers tag their connections with PG `application_name`. The proxy
+  # passes it through to Postgres untouched (`pg_stat_activity`, ops
+  # dashboards) and caches these connections like any other client.
 
   def setup
     @orig_pgappname = ENV["PGAPPNAME"]
@@ -271,16 +270,16 @@ class TestConfigToArgs < Minitest::Test
   end
 
   def test_boolean_true
-    # `disable_consolidation` remains in the structured config map; the
+    # `disable_btree_indexes` remains in the structured config map; the
     # cache-/optimization-level disables (disable_proxy_cache,
-    # disable_matviews, disable_sqloptimize, disable_auto_indexes) are
-    # top-level kwargs now and rejected by the config-map path.
-    result = GoldLapel::Proxy.config_to_args({ disable_consolidation: true })
-    assert_equal ["--disable-consolidation"], result
+    # disable_sqloptimize, disable_auto_indexes) are top-level kwargs now
+    # and rejected by the config-map path.
+    result = GoldLapel::Proxy.config_to_args({ disable_btree_indexes: true })
+    assert_equal ["--disable-btree-indexes"], result
   end
 
   def test_boolean_false_skipped
-    result = GoldLapel::Proxy.config_to_args({ disable_consolidation: false })
+    result = GoldLapel::Proxy.config_to_args({ disable_btree_indexes: false })
     assert_equal [], result
   end
 
@@ -332,7 +331,7 @@ class TestConfigToArgs < Minitest::Test
 
   def test_boolean_key_with_non_bool_raises
     error = assert_raises(TypeError) do
-      GoldLapel::Proxy.config_to_args({ disable_consolidation: "yes" })
+      GoldLapel::Proxy.config_to_args({ disable_btree_indexes: "yes" })
     end
     assert_match(/expects a boolean/, error.message)
   end
@@ -357,20 +356,34 @@ class TestConfigKeys < Minitest::Test
     # Tuning knobs still live in the structured config map.
     keys = GoldLapel::Proxy.config_keys
     assert_includes keys, "pool_size"
-    assert_includes keys, "disable_consolidation"
+    assert_includes keys, "disable_btree_indexes"
     assert_includes keys, "replica"
   end
 
   def test_does_not_contain_promoted_top_level_keys
     # Top-level concepts (mode, log_level, dashboard_port, etc.) were
-    # promoted out of the structured config map. The four
+    # promoted out of the structured config map. The three
     # cache-/optimization-disable flags are also top-level now.
     keys = GoldLapel::Proxy.config_keys
     %w[
-      mode log_level dashboard_port invalidation_port config license client
-      disable_proxy_cache disable_matviews disable_sqloptimize disable_auto_indexes
+      mode log_level dashboard_port config license client
+      disable_proxy_cache disable_sqloptimize disable_auto_indexes
     ].each do |promoted|
       refute_includes keys, promoted
+    end
+  end
+
+  def test_does_not_contain_removed_keys
+    # The proxy dropped materialized views and the wrappers' in-process
+    # cache; their settings are gone from the config map too.
+    keys = GoldLapel::Proxy.config_keys
+    %w[
+      invalidation_port native_cache_size disable_native_cache
+      aggressive_verify disable_matviews disable_consolidation
+      disable_rewrite disable_shadow_mode refresh_interval_secs
+      pattern_ttl_secs max_tables_per_view max_columns_per_view
+    ].each do |removed|
+      refute_includes keys, removed
     end
   end
 
@@ -446,21 +459,14 @@ class TestDashboardUrl < Minitest::Test
     assert_equal 0, proxy.instance_variable_get(:@dashboard_port)
   end
 
-  def test_invalidation_port_derives_from_custom_proxy_port
-    proxy = GoldLapel::Proxy.new(
-      "postgresql://localhost:5432/mydb",
-      proxy_port: 17932
-    )
-    assert_equal 17934, proxy.invalidation_port
-  end
-
-  def test_explicit_invalidation_port_overrides_derivation
-    proxy = GoldLapel::Proxy.new(
-      "postgresql://localhost:5432/mydb",
-      proxy_port: 17932,
-      invalidation_port: 9999
-    )
-    assert_equal 9999, proxy.invalidation_port
+  def test_removed_kwargs_rejected
+    # Atomic break: the invalidation port and matviews are gone from the
+    # proxy, so their kwargs are gone too (no aliases).
+    %i[invalidation_port disable_matviews].each do |kwarg|
+      assert_raises(ArgumentError) do
+        GoldLapel::Proxy.new("postgresql://localhost:5432/mydb", kwarg => true)
+      end
+    end
   end
 
   def test_dashboard_url_nil_when_not_running

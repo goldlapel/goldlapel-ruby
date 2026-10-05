@@ -12,44 +12,37 @@ module GoldLapel
 
   class Proxy
     attr_reader :url, :upstream, :dashboard_url, :proxy_port, :config, :dashboard_port,
-                :invalidation_port, :dashboard_token, :mesh, :mesh_tag,
-                :disable_proxy_cache, :disable_matviews, :disable_sqloptimize,
-                :disable_auto_indexes
-    attr_accessor :wrapped_conn
+                :dashboard_token, :mesh, :mesh_tag,
+                :disable_proxy_cache, :disable_sqloptimize, :disable_auto_indexes
 
     # Keys that are valid inside the structured `config` hash. Top-level
-    # concepts (proxy_port, dashboard_port, invalidation_port, log_level,
-    # mode, license, client, config_file) are exposed as their own keyword
+    # concepts (proxy_port, dashboard_port, log_level, mode, license,
+    # client, config_file) are exposed as their own keyword
     # arguments on GoldLapel.start / Proxy.new and are NOT valid keys here
     # — passing them through `config` raises.
     #
-    # The four cache-/optimization-disable flags
-    # (disable_proxy_cache, disable_matviews, disable_sqloptimize,
-    # disable_auto_indexes) are also top-level kwargs now and intentionally
+    # The three cache-/optimization-disable flags
+    # (disable_proxy_cache, disable_sqloptimize, disable_auto_indexes) are also top-level kwargs now and intentionally
     # absent from this list — the config-map path rejects them.
     VALID_CONFIG_KEYS = %w[
-      min_pattern_count refresh_interval_secs pattern_ttl_secs
-      max_tables_per_view max_columns_per_view deep_pagination_threshold
-      report_interval_secs proxy_cache_size batch_cache_size
+      min_pattern_count deep_pagination_threshold report_interval_secs proxy_cache_size batch_cache_size
       batch_cache_ttl_secs pool_size pool_timeout_secs
       pool_mode mgmt_idle_timeout fallback read_after_write_secs
       n1_threshold n1_window_ms n1_cross_threshold
       tls_cert tls_key tls_client_ca
-      disable_consolidation disable_btree_indexes
-      disable_trigram_indexes disable_expression_indexes
-      disable_partial_indexes disable_rewrite disable_rewrite_prepared_cache
-      disable_pool
-      disable_n1 disable_n1_cross_connection disable_shadow_mode
-      enable_coalescing replica exclude_tables
+      disable_btree_indexes disable_trigram_indexes
+      disable_expression_indexes disable_partial_indexes
+      disable_rewrite_prepared_cache disable_pool
+      disable_n1 disable_n1_cross_connection
+      disable_coalescing replica exclude_tables
     ].freeze
 
     BOOLEAN_KEYS = %w[
-      disable_consolidation disable_btree_indexes
-      disable_trigram_indexes disable_expression_indexes
-      disable_partial_indexes disable_rewrite disable_rewrite_prepared_cache
-      disable_pool
-      disable_n1 disable_n1_cross_connection disable_shadow_mode
-      enable_coalescing
+      disable_btree_indexes disable_trigram_indexes
+      disable_expression_indexes disable_partial_indexes
+      disable_rewrite_prepared_cache disable_pool
+      disable_n1 disable_n1_cross_connection
+      disable_coalescing
     ].freeze
 
     LIST_KEYS = %w[
@@ -117,7 +110,6 @@ module GoldLapel
       upstream,
       proxy_port: nil,
       dashboard_port: nil,
-      invalidation_port: nil,
       log_level: nil,
       mode: nil,
       license: nil,
@@ -129,20 +121,16 @@ module GoldLapel
       mesh: false,
       mesh_tag: nil,
       disable_proxy_cache: false,
-      disable_matviews: false,
       disable_sqloptimize: false,
       disable_auto_indexes: false
     )
       @upstream = upstream
       @proxy_port = proxy_port || DEFAULT_PROXY_PORT
 
-      # Dashboard / invalidation ports default to proxy_port + 1 / + 2 when
-      # unset. An explicit value (including 0 for "disable dashboard")
-      # overrides the derivation.
+      # Dashboard port defaults to proxy_port + 1 when unset. An explicit
+      # value (including 0 for "disable dashboard") overrides the derivation.
       @dashboard_port_explicit = !dashboard_port.nil?
       @dashboard_port = @dashboard_port_explicit ? dashboard_port.to_i : @proxy_port + 1
-      @invalidation_port_explicit = !invalidation_port.nil?
-      @invalidation_port = @invalidation_port_explicit ? invalidation_port.to_i : @proxy_port + 2
 
       @log_level = log_level
       @mode = mode
@@ -168,7 +156,6 @@ module GoldLapel
       # Top-level disable flags promoted out of the structured config map.
       # Each maps 1:1 to a CLI flag on the spawned binary.
       @disable_proxy_cache = disable_proxy_cache ? true : false
-      @disable_matviews = disable_matviews ? true : false
       @disable_sqloptimize = disable_sqloptimize ? true : false
       @disable_auto_indexes = disable_auto_indexes ? true : false
       @pid = nil
@@ -197,9 +184,6 @@ module GoldLapel
       if @dashboard_port_explicit
         cmd.push("--dashboard-port", @dashboard_port.to_s)
       end
-      if @invalidation_port_explicit
-        cmd.push("--invalidation-port", @invalidation_port.to_s)
-      end
       verbose_flag = self.class.log_level_to_verbose_flag(@log_level)
       cmd.push(verbose_flag) if verbose_flag
       cmd.push("--mode", @mode) if @mode
@@ -209,7 +193,6 @@ module GoldLapel
       cmd.push("--mesh") if @mesh
       cmd.push("--mesh-tag", @mesh_tag) if @mesh_tag
       cmd.push("--disable-proxy-cache") if @disable_proxy_cache
-      cmd.push("--disable-matviews") if @disable_matviews
       cmd.push("--disable-sqloptimize") if @disable_sqloptimize
       cmd.push("--disable-auto-indexes") if @disable_auto_indexes
       cmd.concat(self.class.config_to_args(@config))
@@ -336,8 +319,7 @@ module GoldLapel
 
     # Wrapper version, read from the loaded gem spec or the GEM_VERSION env
     # var (set by CI at publish time). Local dev installs return "0.0.0".
-    # Used to build the application_name marker on PG connections so the proxy
-    # can classify wrapper-vs-raw traffic and gate L2 result cache.
+    # Used to build the application_name marker on PG connections.
     def self.wrapper_version
       spec = Gem.loaded_specs["goldlapel"]
       return spec.version.to_s if spec && spec.version
@@ -351,9 +333,10 @@ module GoldLapel
     end
 
     # Append `application_name=goldlapel:ruby:<version>` to `url` unless it
-    # already has one (or PGAPPNAME is set in the env). The marker tells the
-    # proxy this is wrapper traffic, so it can skip L2 result cache (the
-    # wrapper has its own L1). Idempotent and override-respecting.
+    # already has one (or PGAPPNAME is set in the env). The proxy passes it
+    # through to Postgres untouched, so `pg_stat_activity` and ops dashboards
+    # can see the wrapper/version mix; it does not change how the proxy
+    # caches the connection. Idempotent and override-respecting.
     def self.inject_application_name(url)
       return url if url =~ /[?&]application_name=/
       return url if ENV["PGAPPNAME"] && !ENV["PGAPPNAME"].empty?
@@ -406,7 +389,6 @@ module GoldLapel
         upstream,
         proxy_port: nil,
         dashboard_port: nil,
-        invalidation_port: nil,
         log_level: nil,
         mode: nil,
         license: nil,
@@ -418,7 +400,6 @@ module GoldLapel
         mesh: false,
         mesh_tag: nil,
         disable_proxy_cache: false,
-        disable_matviews: false,
         disable_sqloptimize: false,
         disable_auto_indexes: false
       )
@@ -430,7 +411,6 @@ module GoldLapel
             upstream,
             proxy_port: proxy_port,
             dashboard_port: dashboard_port,
-            invalidation_port: invalidation_port,
             log_level: log_level,
             mode: mode,
             license: license,
@@ -442,7 +422,6 @@ module GoldLapel
             mesh: mesh,
             mesh_tag: mesh_tag,
             disable_proxy_cache: disable_proxy_cache,
-            disable_matviews: disable_matviews,
             disable_sqloptimize: disable_sqloptimize,
             disable_auto_indexes: disable_auto_indexes,
           )

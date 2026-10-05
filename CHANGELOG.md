@@ -4,6 +4,35 @@
 
 ### Breaking changes
 
+**The in-process cache (L1) is gone.** The proxy's result cache now caches
+every client the same way, wrapper or not, so the gem no longer keeps its own
+cache in front of `pg`. `gl.conn` (sync and `GoldLapel::Async`) is now the plain
+`PG::Connection` to the proxy instead of a caching wrapper, and the Rails
+integration no longer wraps ActiveRecord's connection or issues `DISCARD ALL`
+on pool checkin — it spawns the proxy and rewrites host/port, nothing more.
+Deleted with it: `GoldLapel.wrap`, `CachedConnection`, `NativeCache`,
+`CachedResult`, the session-settings (GUC) tracker, the invalidation-socket
+client and stats reporting to the proxy.
+
+Removed options (no aliases — passing them raises `ArgumentError`):
+
+- `invalidation_port:` — the proxy no longer serves an invalidation port; it
+  listens on two ports, proxy and dashboard (proxy port + 1).
+- `disable_native_cache:` and `aggressive_verify:` — both only configured the
+  in-process cache.
+- `disable_matviews:` — the proxy no longer builds materialized views.
+- The matview tuning keys in the `config:` map: `refresh_interval_secs`,
+  `pattern_ttl_secs`, `max_tables_per_view`, `max_columns_per_view`,
+  `disable_consolidation`, `disable_rewrite`, `disable_shadow_mode`.
+- The `GOLDLAPEL_NATIVE_CACHE`, `GOLDLAPEL_NATIVE_CACHE_SIZE` and
+  `GOLDLAPEL_REPORT_STATS` environment variables are no longer read.
+- `config: { enable_coalescing: … }` is now `disable_coalescing`, the only
+  coalescing flag the proxy has (it rejected `--enable-coalescing`, so the old
+  key stopped the proxy from starting).
+
+In `database.yml`, the `goldlapel:` keys `invalidation_port`,
+`disable_native_cache`, `aggressive_verify` and `disable_matviews` are ignored.
+
 **Doc-store and stream methods moved under nested namespaces.** The flat
 `gl.doc_*` and `gl.stream_*` methods are gone; document and stream operations
 now live under `gl.documents.<verb>` and `gl.streams.<verb>`. No

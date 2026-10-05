@@ -2,7 +2,13 @@
 
 [![Tests](https://github.com/goldlapel/goldlapel-ruby/actions/workflows/test.yml/badge.svg)](https://github.com/goldlapel/goldlapel-ruby/actions/workflows/test.yml)
 
-The Ruby wrapper for [Gold Lapel](https://goldlapel.com) — a self-optimizing Postgres proxy that watches query patterns and creates materialized views + indexes automatically. Zero code changes beyond the connection string.
+The Ruby wrapper for [Gold Lapel](https://goldlapel.com) — a self-optimizing Postgres proxy that caches query results, creates indexes from the query patterns it sees, and optimizes SQL on the way through. Zero code changes beyond the connection string.
+
+The gem gives you:
+
+- **The proxy as a managed subprocess.** `GoldLapel.start` finds the binary, starts it (and stops it with your app), turns your options into proxy flags, and hands back a URL any Postgres driver can use. All caching happens in the proxy, so every connection through `gl.url` gets it — no in-process cache in the gem.
+- **Postgres-backed helpers** — search and percolator, a Mongo-style document store, streams, counters, sorted sets, hashes, queues, geo, and pub/sub.
+- **Rails integration** — `require "goldlapel/rails"` spawns the proxy and points ActiveRecord at it.
 
 ## Install
 
@@ -33,7 +39,9 @@ conn.exec("SELECT * FROM users WHERE id = $1", [42])
 gl.stop  # (also cleaned up automatically on process exit)
 ```
 
-Point `pg` at `gl.url`. Gold Lapel sits between your app and your DB, watching query patterns and creating materialized views + indexes automatically. Zero code changes beyond the connection string.
+Point `pg` at `gl.url`. Gold Lapel sits between your app and your DB, caching results and indexing from the query patterns it sees. `gl.conn` is a plain `PG::Connection` to the proxy, if you'd rather not open your own.
+
+The proxy listens on two ports: the proxy itself (`proxy_port`, default 7932) and the dashboard (`dashboard_port`, default proxy port + 1).
 
 ### Namespaces
 
@@ -72,7 +80,7 @@ Full API reference, async usage, configuration, Rails integration, upgrading fro
 
 ## Uninstalling
 
-Before removing the package, drop Gold Lapel's helper schema and cached matviews from your Postgres:
+Before removing the package, drop Gold Lapel's helper schema and the indexes it created from your Postgres:
 
 ```bash
 goldlapel clean
@@ -86,7 +94,7 @@ rm -rf ~/.goldlapel
 rm -f goldlapel.toml     # only if you wrote one
 ```
 
-Cancelling your subscription does not delete your data — only Gold Lapel's helper schema and cached matviews go away.
+Cancelling your subscription does not delete your data — only Gold Lapel's helper schema and the indexes it created go away.
 
 ## License
 

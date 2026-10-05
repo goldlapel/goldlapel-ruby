@@ -2,8 +2,6 @@
 
 require "minitest/autorun"
 require "json"
-require_relative "../lib/goldlapel/cache"
-require_relative "../lib/goldlapel/wrap"
 require_relative "../lib/goldlapel/utils"
 require_relative "../lib/goldlapel/proxy"
 require_relative "../lib/goldlapel/instance"
@@ -72,7 +70,6 @@ def make_test_instance(mock_conn)
   inst = GoldLapel::Instance.allocate
   inst.instance_variable_set(:@upstream, "postgresql://localhost/test")
   inst.instance_variable_set(:@internal_conn, mock_conn)
-  inst.instance_variable_set(:@wrapped_conn, mock_conn)
   inst.instance_variable_set(:@proxy, nil)
   inst.instance_variable_set(:@fiber_key, :"__goldlapel_conn_#{inst.object_id}")
   inst.instance_variable_set(:@documents, GoldLapel::DocumentsAPI.new(inst))
@@ -85,7 +82,6 @@ def make_stopped_instance
   inst = GoldLapel::Instance.allocate
   inst.instance_variable_set(:@upstream, "postgresql://localhost/test")
   inst.instance_variable_set(:@internal_conn, nil)
-  inst.instance_variable_set(:@wrapped_conn, nil)
   inst.instance_variable_set(:@proxy, nil)
   inst.instance_variable_set(:@fiber_key, :"__goldlapel_conn_#{inst.object_id}")
   inst.instance_variable_set(:@documents, GoldLapel::DocumentsAPI.new(inst))
@@ -137,7 +133,6 @@ class TestInstanceConn < Minitest::Test
     inst = GoldLapel::Instance.allocate
     inst.instance_variable_set(:@upstream, "postgresql://localhost/test")
     inst.instance_variable_set(:@internal_conn, mock_conn)
-    inst.instance_variable_set(:@wrapped_conn, mock_conn)
     inst.instance_variable_set(:@proxy, fake_proxy)
     inst.instance_variable_set(:@fiber_key, :"__goldlapel_conn_#{inst.object_id}")
 
@@ -152,7 +147,6 @@ class TestInstanceConn < Minitest::Test
 
     # Internal state fully torn down after first stop; second stop is no-op.
     assert_nil inst.instance_variable_get(:@internal_conn)
-    assert_nil inst.instance_variable_get(:@wrapped_conn)
     assert_nil inst.instance_variable_get(:@proxy)
     assert_equal 1, stop_calls, "proxy.stop must be called exactly once across two Instance#stop calls"
   end

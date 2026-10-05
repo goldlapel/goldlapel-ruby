@@ -7,8 +7,6 @@
 
 require "minitest/autorun"
 require "json"
-require_relative "../lib/goldlapel/cache"
-require_relative "../lib/goldlapel/wrap"
 require_relative "../lib/goldlapel/utils"
 require_relative "../lib/goldlapel/instance"
 require_relative "../lib/goldlapel/documents"
@@ -82,7 +80,6 @@ def fake_factory_instance(internal_conn)
   inst = GoldLapel::Instance.allocate
   inst.instance_variable_set(:@upstream, "postgresql://localhost/test")
   inst.instance_variable_set(:@internal_conn, internal_conn)
-  inst.instance_variable_set(:@wrapped_conn, internal_conn)
   inst.instance_variable_set(:@proxy, nil)
   inst.instance_variable_set(:@fiber_key, :"__goldlapel_conn_#{inst.object_id}")
   documents = GoldLapel::DocumentsAPI.new(inst)
@@ -518,15 +515,15 @@ class TestAsyncSubmodule < Minitest::Test
     async_utils_src = File.read(File.expand_path("../lib/goldlapel/async/utils.rb", __dir__))
     assert_match(/async_exec_params/, async_utils_src,
       "async/utils.rb must call async_exec_params at SQL call sites")
-    refute_match(/\braw\.exec_params\b|\braw\.exec\b|\blisten_conn\.exec_params\b|\blisten_conn\.exec\b/, async_utils_src,
+    refute_match(/\bconn\.exec_params\b|\bconn\.exec\b|\blisten_conn\.exec_params\b|\blisten_conn\.exec\b/, async_utils_src,
       "async/utils.rb must not call sync exec/exec_params — " \
       "those belong to the sync utils layer")
 
     # Sync utils still uses sync exec_params — the two layers are independent.
     utils_src = File.read(File.expand_path("../lib/goldlapel/utils.rb", __dir__))
-    assert_match(/\braw\.exec_params\b/, utils_src,
+    assert_match(/\bconn\.exec_params\b/, utils_src,
       "utils.rb should still use sync exec_params")
-    refute_match(/\braw\.async_exec_params\b/, utils_src,
+    refute_match(/\bconn\.async_exec_params\b/, utils_src,
       "utils.rb (sync path) should NOT use async_exec_params — " \
       "that's the async layer's job")
   end

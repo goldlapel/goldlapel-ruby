@@ -47,7 +47,6 @@ module GoldLapel
       upstream,
       proxy_port: nil,
       dashboard_port: nil,
-      invalidation_port: nil,
       log_level: nil,
       mode: nil,
       license: nil,
@@ -58,12 +57,9 @@ module GoldLapel
       silent: false,
       mesh: false,
       mesh_tag: nil,
-      disable_native_cache: false,
       disable_proxy_cache: false,
-      disable_matviews: false,
       disable_sqloptimize: false,
-      disable_auto_indexes: false,
-      aggressive_verify: :auto
+      disable_auto_indexes: false
     )
       unless ::Async::Task.current?
         raise "GoldLapel::Async.start must be called inside an Async { ... } block"
@@ -72,7 +68,6 @@ module GoldLapel
         upstream,
         proxy_port: proxy_port,
         dashboard_port: dashboard_port,
-        invalidation_port: invalidation_port,
         log_level: log_level,
         mode: mode,
         license: license,
@@ -84,12 +79,9 @@ module GoldLapel
         silent: silent,
         mesh: mesh,
         mesh_tag: mesh_tag,
-        disable_native_cache: disable_native_cache,
         disable_proxy_cache: disable_proxy_cache,
-        disable_matviews: disable_matviews,
         disable_sqloptimize: disable_sqloptimize,
         disable_auto_indexes: disable_auto_indexes,
-        aggressive_verify: aggressive_verify,
       )
     end
 
@@ -109,7 +101,6 @@ module GoldLapel
         upstream,
         proxy_port: nil,
         dashboard_port: nil,
-        invalidation_port: nil,
         log_level: nil,
         mode: nil,
         license: nil,
@@ -121,17 +112,13 @@ module GoldLapel
         silent: false,
         mesh: false,
         mesh_tag: nil,
-        disable_native_cache: false,
         disable_proxy_cache: false,
-        disable_matviews: false,
         disable_sqloptimize: false,
-        disable_auto_indexes: false,
-        aggressive_verify: :auto
+        disable_auto_indexes: false
       )
         @upstream = upstream
         @proxy_port = proxy_port
         @dashboard_port = dashboard_port
-        @invalidation_port = invalidation_port
         @log_level = log_level
         @mode = mode
         @license = license
@@ -143,15 +130,11 @@ module GoldLapel
         @mesh = mesh ? true : false
         tag = mesh_tag.to_s
         @mesh_tag = tag.empty? ? nil : tag
-        @disable_native_cache = disable_native_cache ? true : false
         @disable_proxy_cache = disable_proxy_cache ? true : false
-        @disable_matviews = disable_matviews ? true : false
         @disable_sqloptimize = disable_sqloptimize ? true : false
         @disable_auto_indexes = disable_auto_indexes ? true : false
-        @aggressive_verify = aggressive_verify
         @proxy = nil
         @internal_conn = nil
-        @wrapped_conn = nil
         @fiber_key = :"__goldlapel_async_conn_#{object_id}"
 
         # Nested namespaces — async siblings of the sync sub-API classes.
@@ -179,10 +162,9 @@ module GoldLapel
       # Returns self.
       #
       # Subprocess-leak protection (mirror of sync Instance#start!): between
-      # proxy spawn and successful PG.connect we can hit LoadError, PG::Error,
-      # or any exception from the wrap layer. Each would otherwise leave an
-      # orphaned goldlapel subprocess running. The rescue re-raises after
-      # tearing down the proxy and closing any partial PG connection.
+      # proxy spawn and successful PG.connect we can hit LoadError or
+      # PG::Error. Either would otherwise leave an orphaned goldlapel
+      # subprocess running. The rescue re-raises after tearing down the proxy.
       def start!
         return self if @proxy&.running?
 
@@ -190,7 +172,6 @@ module GoldLapel
           @upstream,
           proxy_port: @proxy_port,
           dashboard_port: @dashboard_port,
-          invalidation_port: @invalidation_port,
           log_level: @log_level,
           mode: @mode,
           license: @license,
@@ -202,14 +183,12 @@ module GoldLapel
           mesh: @mesh,
           mesh_tag: @mesh_tag,
           disable_proxy_cache: @disable_proxy_cache,
-          disable_matviews: @disable_matviews,
           disable_sqloptimize: @disable_sqloptimize,
           disable_auto_indexes: @disable_auto_indexes,
         )
         Proxy.register(@proxy)
         @proxy.start
 
-        raw = nil
         begin
           begin
             require "pg"
@@ -219,35 +198,12 @@ module GoldLapel
               "or `gem install pg`."
           end
 
-          raw = PG.connect(@proxy.url)
-          @wrapped_conn = GoldLapel.wrap(
-            raw,
-            invalidation_port: @proxy.invalidation_port,
-            disable_native_cache: @disable_native_cache,
-            aggressive_verify: @aggressive_verify,
-            upstream: @upstream,
-          )
-          @internal_conn = @wrapped_conn
-          @proxy.wrapped_conn = @wrapped_conn
+          @internal_conn = PG.connect(@proxy.url)
         rescue Exception # rubocop:disable Lint/RescueException
           begin
-            if @wrapped_conn
-              begin
-                @wrapped_conn.close
-              rescue StandardError
-                # closing a partially-initialised conn is fine
-              end
-            elsif raw
-              begin
-                raw.close
-              rescue StandardError
-                # closing a partially-initialised conn is fine
-              end
-            end
             Proxy.unregister(@proxy)
             @proxy.stop
           ensure
-            @wrapped_conn = nil
             @internal_conn = nil
             @proxy = nil
           end
@@ -285,7 +241,6 @@ module GoldLapel
             # closing a dead conn is fine
           end
           @internal_conn = nil
-          @wrapped_conn = nil
         end
         if @proxy
           Proxy.unregister(@proxy)
