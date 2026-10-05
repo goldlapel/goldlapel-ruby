@@ -110,3 +110,19 @@ goldlapel clean   # drops _goldlapel.* tables
 If you have a pre-Phase-4 wrapper running against a post-Phase-4 proxy, the
 wrapper's first `gl.documents.<verb>` call surfaces a clear
 `version_mismatch` error pointing to this CHANGELOG.
+
+### Fixes
+
+**Several databases in one process no longer collide on port 7932.** A proxy
+started without `proxy_port` now takes the first port pair from 7932 up that
+no other proxy this process started is using — the proxy port and its
+dashboard port (proxy port + 1, or your explicit `dashboard_port`). The first
+proxy still gets 7932; a second upstream gets 7934. An explicit `proxy_port`
+is used as given, and stopping a proxy frees its ports. This applies to
+`GoldLapel.start`, `GoldLapel.start_proxy` and the Rails integration, which
+now points each database at the port its proxy actually got.
+
+**The Rails integration starts the proxy again.** Unless `database.yml` set a
+`goldlapel: config:` map — including when there was no `goldlapel:` block at
+all — the proxy failed to start on a nil config map, and Rails logged a
+warning and fell back to a direct connection.

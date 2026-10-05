@@ -129,6 +129,8 @@ class TestInstanceConn < Minitest::Test
     )
     fake_proxy.define_singleton_method(:stop) { stop_calls += 1 }
     fake_proxy.define_singleton_method(:running?) { false }
+    # Explicit port: the registry leaves it alone instead of allocating one.
+    fake_proxy.define_singleton_method(:proxy_port_explicit?) { true }
 
     inst = GoldLapel::Instance.allocate
     inst.instance_variable_set(:@upstream, "postgresql://localhost/test")

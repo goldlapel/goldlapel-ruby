@@ -116,9 +116,10 @@ module GoldLapel
       # Register the proxy in the module-level registry so GoldLapel.stop,
       # GoldLapel.proxy_url, etc. still see it — and so at_exit cleanup works.
       Proxy.register(@proxy)
-      @proxy.start
 
       begin
+        @proxy.start
+
         # Lazily require pg only on connect
         begin
           require "pg"
@@ -130,7 +131,8 @@ module GoldLapel
 
         @internal_conn = PG.connect(@proxy.url)
       rescue Exception # rubocop:disable Lint/RescueException
-        # Any failure between spawn and connect leaks the subprocess.
+        # Any failure between spawn and connect leaks the subprocess, and a
+        # failed spawn would keep its ports claimed in the registry.
         # Stop the proxy (idempotent — SIGTERM with 5s timeout, then SIGKILL),
         # unregister it from the module-level registry, and clear internal
         # state before re-raising so the caller sees the original error.

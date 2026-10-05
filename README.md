@@ -41,7 +41,7 @@ gl.stop  # (also cleaned up automatically on process exit)
 
 Point `pg` at `gl.url`. Gold Lapel sits between your app and your DB, caching results and indexing from the query patterns it sees. `gl.conn` is a plain `PG::Connection` to the proxy, if you'd rather not open your own.
 
-The proxy listens on two ports: the proxy itself (`proxy_port`, default 7932) and the dashboard (`dashboard_port`, default proxy port + 1).
+The proxy listens on two ports: the proxy itself (`proxy_port`, default 7932) and the dashboard (`dashboard_port`, default proxy port + 1). Start several databases in one process without a `proxy_port` and each gets the next free pair — 7932, then 7934, and so on (Rails multi-database setups included); `gl.url` carries the port it got.
 
 ### Namespaces
 

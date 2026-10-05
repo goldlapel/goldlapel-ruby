@@ -125,6 +125,9 @@ module GoldLapel
       disable_auto_indexes: false
     )
       @upstream = upstream
+      # Without an explicit proxy_port the registry (Proxy.start /
+      # Proxy.register) moves this proxy to the first free port pair.
+      @proxy_port_explicit = !proxy_port.nil?
       @proxy_port = proxy_port || DEFAULT_PROXY_PORT
 
       # Dashboard port defaults to proxy_port + 1 when unset. An explicit
@@ -139,7 +142,9 @@ module GoldLapel
       @config_file = config_file
 
       # Validate structured-config keys eagerly so a test that constructs
-      # without spawning still catches bad keys.
+      # without spawning still catches bad keys. nil (the Rails integration
+      # passes database.yml's absent `config:` straight through) means none.
+      config ||= {}
       config.each do |k, _|
         key = k.to_s
         unless VALID_CONFIG_KEYS.include?(key)
@@ -163,6 +168,21 @@ module GoldLapel
       @dashboard_url = nil
       @dashboard_token = nil
       @stderr_reader = nil
+    end
+
+    def proxy_port_explicit?
+      @proxy_port_explicit
+    end
+
+    def dashboard_port_explicit?
+      @dashboard_port_explicit
+    end
+
+    # Set by the registry, under its mutex, when no proxy_port was given.
+    # A derived dashboard port follows the proxy port.
+    def assign_proxy_port(port)
+      @proxy_port = port
+      @dashboard_port = port + 1 unless @dashboard_port_explicit
     end
 
     # Backwards-compat alias for the rest of the wrapper (ddl.rb etc.) that
@@ -376,7 +396,10 @@ module GoldLapel
       false
     end
 
-    # Module-level multi-instance registry keyed by upstream URL
+    # Module-level multi-instance registry keyed by upstream URL. Proxies
+    # started without a proxy_port are given the smallest port P >= 7932
+    # such that neither P nor its dashboard port is held by another
+    # registered proxy, so several upstreams in one process don't collide.
     @instances = {}
     @mutex = Mutex.new
     @cleanup_registered = false
@@ -429,6 +452,7 @@ module GoldLapel
             at_exit { cleanup }
             @cleanup_registered = true
           end
+          claim_port(proxy)
           proxy.start
           @instances[upstream] = proxy
           proxy.url
@@ -443,6 +467,7 @@ module GoldLapel
             at_exit { cleanup }
             @cleanup_registered = true
           end
+          claim_port(proxy)
           @instances[proxy.upstream] = proxy
         end
       end
@@ -493,6 +518,31 @@ module GoldLapel
       end
 
       private
+
+      # Caller holds @mutex. Ports held by every other registered proxy are
+      # claimed — except a dead one for the same upstream, which this proxy
+      # is about to replace in the registry.
+      def claim_port(proxy)
+        return if proxy.proxy_port_explicit?
+
+        claimed = []
+        @instances.each do |upstream, other|
+          next if other.equal?(proxy)
+          next if upstream == proxy.upstream && !other.running?
+          claimed << other.proxy_port
+          claimed << other.dashboard_port if other.dashboard_port > 0
+        end
+
+        # An explicit dashboard port is fixed, so only the proxy port has to
+        # step around it; a derived one moves with the proxy port.
+        port = DEFAULT_PROXY_PORT
+        if proxy.dashboard_port_explicit?
+          port += 1 while claimed.include?(port) || port == proxy.dashboard_port
+        else
+          port += 1 while claimed.include?(port) || claimed.include?(port + 1)
+        end
+        proxy.assign_proxy_port(port)
+      end
 
       def cleanup
         @instances.each_value(&:stop)

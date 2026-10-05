@@ -45,7 +45,7 @@ module GoldLapel
             # Rails manages its own pg connections; only spawn the proxy here.
             # (`start_proxy` is the low-level, connection-less variant of
             # `GoldLapel.start` that returns the proxy URL, not an instance.)
-            GoldLapel.start_proxy(
+            proxy_url = GoldLapel.start_proxy(
               upstream,
               proxy_port: proxy_port_opt,
               dashboard_port: gl_config[:dashboard_port],
@@ -63,13 +63,16 @@ module GoldLapel
               disable_sqloptimize: gl_config[:disable_sqloptimize] ? true : false,
               disable_auto_indexes: gl_config[:disable_auto_indexes] ? true : false,
             )
+            # Without a configured proxy_port the core picks a free port
+            # pair per upstream (multiple databases each get their own), so
+            # read the port back from the URL rather than assuming 7932.
+            proxy_port = URI.parse(proxy_url).port
           rescue => e
             ::Rails.logger.warn("[Gold Lapel] Proxy failed to start: #{e.message} — falling back to direct connection")
             @goldlapel_started = true
             return super
           end
 
-          proxy_port = proxy_port_opt || GoldLapel::DEFAULT_PROXY_PORT
           @connection_parameters[:host] = "127.0.0.1"
           @connection_parameters[:port] = proxy_port
           @goldlapel_started = true

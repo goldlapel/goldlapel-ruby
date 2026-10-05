@@ -1,5 +1,10 @@
 require "minitest/autorun"
 
+# The real proxy core (no subprocess at load time) backs the multi-database
+# allocation test; it must load before the skeleton below so its
+# DEFAULT_PROXY_PORT is the one defined.
+require_relative "_fake_proxy_helper"
+
 # Stub goldlapel gem BEFORE requiring rails.rb (which does `require "goldlapel"`).
 #
 # We only define the module skeleton + helpers that other test files don't
@@ -34,6 +39,7 @@ module RailsTestGoldLapelStub
 
     GoldLapel.define_singleton_method(:start_proxy) do |upstream, **kwargs|
       @start_calls << { upstream: upstream, **kwargs }
+      GoldLapel::Proxy.make_proxy_url(upstream, kwargs[:proxy_port] || GoldLapel::DEFAULT_PROXY_PORT)
     end
   ensure
     $VERBOSE = verbose_was
@@ -516,6 +522,29 @@ class TestConnect < Minitest::Test
     assert_equal true, call[:disable_proxy_cache]
     assert_equal true, call[:disable_sqloptimize]
     assert_equal true, call[:disable_auto_indexes]
+  end
+
+  def test_multiple_databases_without_ports_get_distinct_pairs
+    # Route through the real registry so its allocation decides the ports.
+    RailsTestGoldLapelStub.override_start_proxy do |upstream, **kwargs|
+      GoldLapel::Proxy.start(upstream, **kwargs)
+    end
+
+    FakeProxySupport.with_fake_proxies do
+      adapters = %w[primary analytics].map do |db|
+        FakeAdapter.new(
+          config: {},
+          connection_parameters: {
+            host: "db.example.com", port: "5432",
+            user: "u", password: "p", dbname: db
+          }
+        )
+      end
+      adapters.each { |a| a.send(:connect) }
+
+      assert_equal [7932, 7934], adapters.map { |a| a.connection_parameters[:port] }
+      assert_equal %w[127.0.0.1 127.0.0.1], adapters.map { |a| a.connection_parameters[:host] }
+    end
   end
 
   def test_graceful_fallback_on_start_failure

@@ -187,9 +187,12 @@ module GoldLapel
           disable_auto_indexes: @disable_auto_indexes,
         )
         Proxy.register(@proxy)
-        @proxy.start
 
         begin
+          # Inside the rescue so a failed spawn also leaves the registry and
+          # frees its claimed ports.
+          @proxy.start
+
           begin
             require "pg"
           rescue LoadError

@@ -4,6 +4,7 @@ require "minitest/autorun"
 require "socket"
 require "tmpdir"
 require "goldlapel"
+require_relative "_fake_proxy_helper"
 
 class TestFindBinary < Minitest::Test
   def test_env_var_override
@@ -222,6 +223,12 @@ class TestProxyClass < Minitest::Test
     assert_equal 0, proxy.port
   end
 
+  def test_nil_config_accepted
+    # The Rails integration forwards database.yml's absent `config:` as nil.
+    proxy = GoldLapel::Proxy.new("postgresql://localhost:5432/mydb", config: nil)
+    assert_equal({}, proxy.config)
+  end
+
   def test_not_running_initially
     proxy = GoldLapel::Proxy.new("postgresql://localhost:5432/mydb")
     refute proxy.running?
@@ -250,6 +257,112 @@ class TestProxyClass < Minitest::Test
     assert_nil proxy.dashboard_url
     assert_nil proxy.instance_variable_get(:@pid)
     assert_nil proxy.instance_variable_get(:@stderr_reader)
+  end
+end
+
+class TestPortAllocation < Minitest::Test
+  UP1 = "postgresql://localhost:5432/one"
+  UP2 = "postgresql://localhost:5432/two"
+  UP3 = "postgresql://localhost:5432/three"
+
+  def port_of(upstream)
+    GoldLapel::Proxy.instances[upstream].proxy_port
+  end
+
+  def test_first_proxy_gets_default_port
+    FakeProxySupport.with_fake_proxies do
+      url = GoldLapel::Proxy.start(UP1)
+      assert_equal 7932, port_of(UP1)
+      assert_includes url, "localhost:7932/"
+    end
+  end
+
+  def test_two_upstreams_without_ports_get_distinct_pairs
+    FakeProxySupport.with_fake_proxies do
+      GoldLapel::Proxy.start(UP1)
+      url2 = GoldLapel::Proxy.start(UP2)
+      assert_equal 7932, port_of(UP1)
+      assert_equal 7934, port_of(UP2)
+      assert_equal 7935, GoldLapel::Proxy.instances[UP2].dashboard_port
+      assert_includes url2, "localhost:7934/"
+    end
+  end
+
+  def test_same_upstream_reuses_running_proxy
+    FakeProxySupport.with_fake_proxies do
+      url1 = GoldLapel::Proxy.start(UP1)
+      url2 = GoldLapel::Proxy.start(UP1)
+      assert_equal url1, url2
+      assert_equal 1, GoldLapel::Proxy.instances.size
+    end
+  end
+
+  def test_explicit_proxy_port_counts_as_claimed
+    FakeProxySupport.with_fake_proxies do
+      GoldLapel::Proxy.start(UP1, proxy_port: 7934)
+      GoldLapel::Proxy.start(UP2)
+      GoldLapel::Proxy.start(UP3)
+      assert_equal 7934, port_of(UP1)
+      assert_equal 7932, port_of(UP2)
+      # 7934 and 7935 are UP1's pair, so the next free pair is 7936/7937.
+      assert_equal 7936, port_of(UP3)
+    end
+  end
+
+  def test_explicit_dashboard_port_is_skipped
+    FakeProxySupport.with_fake_proxies do
+      GoldLapel::Proxy.start(UP1, dashboard_port: 7934)
+      GoldLapel::Proxy.start(UP2)
+      assert_equal 7932, port_of(UP1)
+      # 7933 would put UP2's dashboard on UP1's 7934; 7934 is UP1's dashboard.
+      assert_equal 7935, port_of(UP2)
+    end
+  end
+
+  def test_disabled_dashboard_claims_only_proxy_port
+    FakeProxySupport.with_fake_proxies do
+      GoldLapel::Proxy.start(UP1, dashboard_port: 0)
+      GoldLapel::Proxy.start(UP2)
+      assert_equal 7932, port_of(UP1)
+      assert_equal 7933, port_of(UP2)
+    end
+  end
+
+  def test_own_explicit_dashboard_port_is_not_taken_as_proxy_port
+    FakeProxySupport.with_fake_proxies do
+      GoldLapel::Proxy.start(UP1, dashboard_port: 7932)
+      assert_equal 7933, port_of(UP1)
+      assert_equal 7932, GoldLapel::Proxy.instances[UP1].dashboard_port
+    end
+  end
+
+  def test_stop_releases_ports
+    FakeProxySupport.with_fake_proxies do
+      GoldLapel::Proxy.start(UP1)
+      GoldLapel::Proxy.start(UP2)
+      GoldLapel::Proxy.stop(UP1)
+      GoldLapel::Proxy.start(UP3)
+      assert_equal 7932, port_of(UP3)
+    end
+  end
+
+  def test_registered_proxies_get_distinct_pairs
+    # GoldLapel.start (Instance) builds its own Proxy and registers it.
+    FakeProxySupport.with_fake_proxies do
+      p1 = GoldLapel::Proxy.new(UP1)
+      p2 = GoldLapel::Proxy.new(UP2)
+      p3 = GoldLapel::Proxy.new(UP3, proxy_port: 9000)
+      [p1, p2, p3].each { |p| GoldLapel::Proxy.register(p) }
+      assert_equal 7932, p1.proxy_port
+      assert_equal 7934, p2.proxy_port
+      assert_equal 7935, p2.dashboard_port
+      assert_equal 9000, p3.proxy_port
+
+      GoldLapel::Proxy.unregister(p1)
+      p4 = GoldLapel::Proxy.new("postgresql://localhost:5432/four")
+      GoldLapel::Proxy.register(p4)
+      assert_equal 7932, p4.proxy_port
+    end
   end
 end
 
